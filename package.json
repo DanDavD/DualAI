@@ -1,0 +1,59 @@
+{
+  "name": "dualai",
+  "version": "1.0.0",
+  "description": "Cross-platform real-time voice, text, and screen translation tool tailored for interpreters and specialized professionals (Medical, Legal, Call Center).",
+  "main": "./out/main/index.js",
+  "author": "DanDavD",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "build:win": "npm run build && electron-builder --win",
+    "build:mac": "npm run build && electron-builder --mac",
+    "build:linux": "npm run build && electron-builder --linux"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DanDavD/DualAI.git"
+  },
+  "keywords": [
+    "translator",
+    "interpreter",
+    "realtime-audio",
+    "speech-to-text",
+    "screen-capture",
+    "gemini",
+    "supabase",
+    "electron",
+    "react",
+    "typescript"
+  ],
+  "dependencies": {
+    "@google/genai": "^3.6.0",
+    "@supabase/supabase-js": "^2.119.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.75.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tailwind-merge": "^3.7.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "autoprefixer": "^10.6.2",
+    "electron": "^45.3.4",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "postcss": "^8.5.33",
+    "tailwindcss": "^4.3.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  }
+}
