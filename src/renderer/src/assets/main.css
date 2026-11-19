@@ -1,26 +1,59 @@
 @import "tailwindcss";
 
+@theme {
+  --color-surface-base: #09090b;
+  --color-surface-panel: #121215;
+  --color-surface-active: #18181b;
+  --color-surface-border: #27272a;
+  --color-surface-border-subtle: #1e1e24;
+
+  --color-text-primary: #f4f4f5;
+  --color-text-secondary: #a1a1aa;
+  --color-text-muted: #71717a;
+
+  --color-accent-steel: #2563eb;
+  --color-accent-emerald: #059669;
+  --color-accent-amber: #d97706;
+  --color-accent-crimson: #dc2626;
+
+  --font-mono: "Geist Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
+}
+
 @layer base {
-  * {
+  *, *::before, *::after {
     box-sizing: border-box;
   }
+
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: var(--color-surface-base);
+    color: var(--color-text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::selection {
+    background-color: #27272a;
+    color: #f4f4f5;
   }
 }
 
-/* Custom scrollbars */
+/* Precision Hardware Scrollbars (DAW Style) */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 4px;
+  height: 4px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
-  border-radius: 9999px;
+  background: #27272a;
+  border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.3);
+  background: #3f3f46;
 }

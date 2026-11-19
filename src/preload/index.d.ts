@@ -1,9 +1,7 @@
-export interface CustomElectronAPI {
-  platform: string
-}
+import { ElectronBridgeApi } from '../types/ipc'
 
 declare global {
   interface Window {
-    electronAPI: CustomElectronAPI
+    electronAPI: ElectronBridgeApi
   }
 }
