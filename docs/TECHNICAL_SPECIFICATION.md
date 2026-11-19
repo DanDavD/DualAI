@@ -1,6 +1,7 @@
 # DUALAI: TECHNICAL ARCHITECTURE & 14-DAY PRODUCTION SPRINT PLAN
 
 Document Identifier: DUALAI-SPEC-2026-V1  
+Governance Framework: Refer to docs/AI_GOVERNANCE_PROTOCOL.md  
 Sprint Schedule: 14 Consecutive Days (Day 01 to Day 14)  
 Delivery Standard: Microsoft Store Production Gold Master  
 Aesthetic Directive: Enterprise Solid-State / DAW Neutral Dark Matrix  

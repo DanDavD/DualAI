@@ -1,11 +1,14 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react'
-import { AudioRouteMode, OperatingMode } from '../../../types/audio'
+import { AudioRouteMode, OperatingMode, LatencyMode } from '../../../types/audio'
 import { DomainId } from '../../../types/domain'
 
 export interface SessionState {
   audioRoute: AudioRouteMode
   operatingMode: OperatingMode
   domainId: DomainId
+  sourceLang: string
+  targetLang: string
+  latencyMode: LatencyMode
   noiseSuppression: boolean
   echoCancellation: boolean
   latencyPingMs: number
@@ -18,6 +21,10 @@ export interface SessionState {
   setAudioRoute: (route: AudioRouteMode) => void
   setOperatingMode: (mode: OperatingMode) => void
   setDomainId: (domain: DomainId) => void
+  setSourceLang: (lang: string) => void
+  setTargetLang: (lang: string) => void
+  swapLanguages: () => void
+  setLatencyMode: (mode: LatencyMode) => void
   setNoiseSuppression: (enabled: boolean) => void
   setEchoCancellation: (enabled: boolean) => void
   openGlossaryModal: () => void
@@ -32,6 +39,9 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [audioRoute, setAudioRoute] = useState<AudioRouteMode>('bilateral')
   const [operatingMode, setOperatingMode] = useState<OperatingMode>('conversation')
   const [domainId, setDomainId] = useState<DomainId>('medical')
+  const [sourceLang, setSourceLang] = useState('en')
+  const [targetLang, setTargetLang] = useState('es')
+  const [latencyMode, setLatencyMode] = useState<LatencyMode>('sub_second_live')
   const [noiseSuppression, setNoiseSuppression] = useState(true)
   const [echoCancellation, setEchoCancellation] = useState(true)
   const [latencyPingMs, setLatencyPingMs] = useState(42)
@@ -40,17 +50,35 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [isGlossaryModalOpen, setIsGlossaryModalOpen] = useState(false)
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false)
 
-  // 5-second simulated telemetry ping polling (as requested in spec)
+  // 5-second simulated telemetry ping polling
   useEffect(() => {
     const pollInterval = setInterval(() => {
-      // Fluctuate latency slightly around a realistic base (38ms - 54ms)
-      const basePing = 42
-      const jitter = Math.floor(Math.random() * 12) - 6
-      setLatencyPingMs(Math.max(24, basePing + jitter))
+      const basePing = latencyMode === 'sub_second_live' ? 38 : 74
+      const jitter = Math.floor(Math.random() * 10) - 5
+      setLatencyPingMs(Math.max(20, basePing + jitter))
     }, 5000)
 
     return () => clearInterval(pollInterval)
-  }, [])
+  }, [latencyMode])
+
+  // Swap Source and Target Languages cleanly
+  const swapLanguages = useCallback(() => {
+    setSourceLang((prevSource) => {
+      setTargetLang(prevSource)
+      return targetLang
+    })
+  }, [targetLang])
+
+  // Listen to Global Native Shortcut (Cmd/Ctrl + Shift + S) via Preload Bridge
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.electronAPI?.onShortcutSwapLanguages) {
+      const cleanup = window.electronAPI.onShortcutSwapLanguages(() => {
+        swapLanguages()
+      })
+      return cleanup
+    }
+    return undefined
+  }, [swapLanguages])
 
   const openGlossaryModal = useCallback(() => setIsGlossaryModalOpen(true), [])
   const closeGlossaryModal = useCallback(() => setIsGlossaryModalOpen(false), [])
@@ -63,6 +91,9 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         audioRoute,
         operatingMode,
         domainId,
+        sourceLang,
+        targetLang,
+        latencyMode,
         noiseSuppression,
         echoCancellation,
         latencyPingMs,
@@ -73,6 +104,10 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setAudioRoute,
         setOperatingMode,
         setDomainId,
+        setSourceLang,
+        setTargetLang,
+        swapLanguages,
+        setLatencyMode,
         setNoiseSuppression,
         setEchoCancellation,
         openGlossaryModal,
