@@ -81,10 +81,25 @@ To guarantee software engineering excellence and eliminate hallucinations or bli
 
 ---
 
-## 4. DEFINITION OF SPRINT VELOCITY & RECORD OF QUALITY
+## 4. DEFINITIONS & ACRONYMS
 
-Every daily card must conclude with:
-1. All changes left exclusively as **uncommitted local modifications** in the working directory for human inspection.
-2. Zero build warnings (`pnpm run typecheck` and `electron-vite build`).
-3. Complete local verification before any human review is requested.
-4. Ready-to-copy PR title, PR description, commit title, commit body, and recommended labels prepared for the Chief Architect to execute.
+* **DoD (Definition of Done):** The objective checklist of technical acceptance criteria defined in each Trello card that must be 100% verified (empirically tested, typechecked, and built) before a task is considered complete.
+* **HSS (Handoff Specification Summary):** The formal technical brief compiled by the Maker (Code/UX) detailing interfaces, memory allocations, architectural decisions, and edge-case handling, which the Reviewer is required to ingest and audit before inspecting the code diff.
+
+---
+
+## 5. DEFINITION OF SPRINT VELOCITY & RECORD OF QUALITY
+
+Every daily card delivery must strictly adhere to the following invariant rules:
+1. **Uncommitted Local Modifications Only:** All changes must remain exclusively as uncommitted local files in the working directory for human inspection via GitHub Desktop. Autonomous commits, pushes, or merges are strictly prohibited.
+2. **Zero Build & Type Warnings:** `pnpm run typecheck` and `electron-vite build` must pass with 0 errors before presenting the deliverable.
+3. **Mandatory Documentation Synchronization:**
+   - Update `docs/ARCHITECTURAL_DECISION_RECORDS.md` with new ADRs when introducing architectural shifts or external integrations.
+   - Update `docs/ENGINEERING_INCIDENTS_LOG.md` under the STAR framework (Situation, Task, Action, Result) whenever a technical blocker or edge case is resolved.
+4. **Standardized 5-Item Executive Delivery Package:** Every card response to the Chief Architect must conclude with the exact 5 ready-to-copy delivery blocks:
+   - 1. Texto Título Commit (Semantic Git format)
+   - 2. Texto Descripción Commit (Detailed bulleted change list)
+   - 3. Texto Título PR (Formal GitHub pull request title)
+   - 4. Texto Descripción PR (Comprehensive markdown documentation with DoD checklist)
+   - 5. Labels a Asignar en GitHub (Official repository labels)
+5. **Strict Zero Emojis Policy:** Absolute prohibition of emojis across code, UI, tooltips, commits, pull requests, and technical logs.
