@@ -16,6 +16,7 @@ import { SessionProvider, useSession } from './context/SessionContext'
 import { Header } from './components/Header/Header'
 import { SubHeader } from './components/SubHeader/SubHeader'
 import { GlossaryModal } from './components/Modals/GlossaryModal'
+import { StreamingSttFeed } from './components/Feed/StreamingSttFeed'
 import { DOMAIN_PRESETS } from '../../types/domain'
 import { SUPPORTED_LANGUAGES } from '../../types/language'
 
@@ -330,6 +331,9 @@ const WorkspaceContent: React.FC = () => {
           </div>
         </div>
 
+        {/* ZONE 3 PREVIEW: STREAMING SPEECH-TO-TEXT WEBSOCKET PIPELINE */}
+        <StreamingSttFeed />
+
         {/* Real-Time Dual Channel Status Strip */}
         <div className="rounded-lg border border-surface-border bg-surface-panel p-4 space-y-2">
           <div className="flex items-center justify-between text-xs font-mono text-text-secondary">
@@ -355,10 +359,10 @@ const WorkspaceContent: React.FC = () => {
       <footer className="flex h-9 items-center justify-between border-t border-surface-border bg-surface-panel px-4 font-mono text-xs text-text-secondary">
         <div className="flex items-center space-x-2">
           <CheckCircle2 className="h-3.5 w-3.5 text-accent-emerald" strokeWidth={1.5} />
-          <span>DAY 05 COMPLETE: SILERO VAD V5 ONNX WEB WORKER INTEGRATION VERIFIED</span>
+          <span>DAY 06 COMPLETE: WEBSOCKET STREAMING STT & INTERIM WORD EVENTS VERIFIED</span>
         </div>
         <div className="flex items-center space-x-4 text-text-muted">
-          <span>NEXT: DAY-06 WEBSOCKET STREAMING STT & INTERIM WORD EVENTS</span>
+          <span>NEXT: DAY-07 REAL-TIME DOMAIN INFERENCE ENGINE (GEMINI 2.0 FLASH)</span>
           <span className="h-3 w-px bg-surface-border" />
           <span>ZERO EMOJIS ENFORCED</span>
         </div>
