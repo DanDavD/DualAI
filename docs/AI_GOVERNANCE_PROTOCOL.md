@@ -10,9 +10,11 @@
 ## 1. SOVEREIGN HUMAN AUTHORITY (HUMAN-IN-THE-LOOP MANDATE)
 
 1. **Absolute Authority:** The User is the **Chief Architect and Product Owner**. Every architectural shift, scope modification, and code integration requires explicit Chief Architect approval.
-2. **Commit & Branch Security:**
+2. **Git & Commit Security (Zero Autonomous Commits Rule):**
+   - **No Autonomous Commits:** Autonomous agents (including the AI Team Leader and all subagents) are **strictly forbidden from executing `git commit`**. All implemented work must remain as uncommitted local modifications in the working tree.
+   - **User-Exclusive Commit Execution:** Only the Chief Architect (User) executes commits directly through GitHub Desktop or the command line. The AI Team Leader supplies the suggested commit title, body, PR text, and labels for the user to review and apply.
    - **No Automated Merges to `main`:** Autonomous agents are strictly prohibited from merging branches into `main`.
-   - **No Unauthorized Pushes to `origin`:** Pushes to remote repositories require explicit user consent.
+   - **No Unauthorized Pushes to `origin`:** Pushes to remote repositories require explicit user consent and execution.
    - **Exclusive Communication Channel:** Subagents (Code Maker, Code Reviewer, UX Maker, UX Reviewer, Agent Auditor) operate behind the scenes. **Only the AI Team Leader interacts with the Chief Architect.**
 3. **Decision Escalation:** Whenever a technical trade-off arises (e.g., latency vs. accuracy, browser APIs vs. native bindings), the AI Team Leader must present a concise executive summary with options and request the Chief Architect's final ruling.
 
@@ -82,7 +84,7 @@ To guarantee software engineering excellence and eliminate hallucinations or bli
 ## 4. DEFINITION OF SPRINT VELOCITY & RECORD OF QUALITY
 
 Every daily card must conclude with:
-1. Clean local commits adhering strictly to **Conventional Commits**.
+1. All changes left exclusively as **uncommitted local modifications** in the working directory for human inspection.
 2. Zero build warnings (`pnpm run typecheck` and `electron-vite build`).
 3. Complete local verification before any human review is requested.
-4. Ready-to-copy PR title, PR description, and commit messages prepared for the Chief Architect.
+4. Ready-to-copy PR title, PR description, commit title, commit body, and recommended labels prepared for the Chief Architect to execute.
