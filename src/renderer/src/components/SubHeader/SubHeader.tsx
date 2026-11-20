@@ -1,27 +1,30 @@
 import React from 'react'
-import { ArrowRightLeft, Zap, CheckCheck } from 'lucide-react'
+import { ArrowRightLeft, Zap } from 'lucide-react'
+import { useSession } from '../../context/SessionContext'
 import { LanguageSelector } from './LanguageSelector'
 import { HardwareVuMeter } from './HardwareVuMeter'
-import { useSession } from '../../context/SessionContext'
-import { LatencyMode } from '../../../../types/audio'
 
 export const SubHeader: React.FC = () => {
   const {
     sourceLang,
-    targetLang,
     setSourceLang,
+    targetLang,
     setTargetLang,
     swapLanguages,
     latencyMode,
     setLatencyMode,
     isAudioActive,
     levelMetricA,
-    levelMetricB
+    levelMetricB,
+    isSpeechActiveA,
+    isSpeechActiveB,
+    vadProbabilityA,
+    vadProbabilityB
   } = useSession()
 
   return (
     <div className="flex h-11 w-full shrink-0 items-center justify-between border-b border-surface-border bg-surface-base px-3 select-none">
-      {/* Left Cluster: Source Language + Channel A VU Meter */}
+      {/* Left Cluster: Source Language + Channel A VU Meter + VAD Indicator */}
       <div className="flex items-center space-x-2">
         <LanguageSelector
           label="Source Language"
@@ -34,6 +37,20 @@ export const SubHeader: React.FC = () => {
           isActive={isAudioActive}
           peakDb={levelMetricA ? levelMetricA.peakDb : undefined}
         />
+
+        <div
+          className="flex items-center space-x-1.5 px-2 py-1 rounded border border-surface-border bg-surface-panel"
+          title={`Channel A VAD Speech Probability: ${(vadProbabilityA * 100).toFixed(0)}%`}
+        >
+          <span
+            className={`inline-block h-1.5 w-1.5 rounded-full transition-colors ${
+              isSpeechActiveA ? 'bg-accent-emerald ring-2 ring-accent-emerald/30' : 'bg-surface-border'
+            }`}
+          />
+          <span className="font-mono text-[9px] uppercase tracking-wider text-text-muted">
+            VAD {isSpeechActiveA ? 'VOICE' : 'IDLE'}
+          </span>
+        </div>
       </div>
 
       {/* Center Cluster: Swap Languages Trigger */}
@@ -52,8 +69,22 @@ export const SubHeader: React.FC = () => {
         </button>
       </div>
 
-      {/* Right Cluster: Channel B VU Meter + Target Language + Latency Mode Switch */}
+      {/* Right Cluster: Channel B VAD + Channel B VU Meter + Target Language + Latency Mode Switch */}
       <div className="flex items-center space-x-2">
+        <div
+          className="flex items-center space-x-1.5 px-2 py-1 rounded border border-surface-border bg-surface-panel"
+          title={`Channel B VAD Speech Probability: ${(vadProbabilityB * 100).toFixed(0)}%`}
+        >
+          <span
+            className={`inline-block h-1.5 w-1.5 rounded-full transition-colors ${
+              isSpeechActiveB ? 'bg-accent-amber ring-2 ring-accent-amber/30' : 'bg-surface-border'
+            }`}
+          />
+          <span className="font-mono text-[9px] uppercase tracking-wider text-text-muted">
+            VAD {isSpeechActiveB ? 'VOICE' : 'IDLE'}
+          </span>
+        </div>
+
         <HardwareVuMeter
           channelLabel="CH B - OUT"
           isActive={isAudioActive}
@@ -100,9 +131,8 @@ export const SubHeader: React.FC = () => {
                 ? 'bg-surface-active text-text-primary shadow-sm border border-surface-border font-medium'
                 : 'text-text-muted hover:text-text-secondary'
             }`}
-            title="Sentence-Accurate: VAD-segmented clauses for maximal semantic accuracy"
+            title="Sentence-Accurate: Full clause interpretation optimized for linguistic context"
           >
-            <CheckCheck className="h-3 w-3 text-accent-emerald" strokeWidth={1.5} />
             <span>Sentence-Accurate</span>
           </button>
         </div>

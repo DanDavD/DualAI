@@ -1,16 +1,28 @@
 /**
  * DUALAI - Low-Latency Audio Ingestion Engine
  * Orchestrates dual-channel input (Local Mic + System Loopback),
- * AudioWorklet thread isolation, and circular FIFO frame buffering.
+ * AudioWorklet thread isolation, circular FIFO buffering,
+ * and client-side Silero VAD v5 ONNX segmentation.
  */
 
-import { ChannelId, AudioLevelMetric } from '../../../types/audio'
+import { ChannelId, AudioLevelMetric, VADEvent } from '../../../types/audio'
 import { CircularAudioBuffer } from './CircularAudioBuffer'
 import { PCM_PROCESSOR_CODE } from './PcmProcessorCode'
+import { SileroVadEngine } from './vad/SileroVadEngine'
 
 export interface AudioEngineCallbacks {
   onLevelMetric: (metric: AudioLevelMetric) => void
   onPcmChunk: (channelId: ChannelId, pcmData: Int16Array) => void
+  onVadTelemetry?: (
+    channelId: ChannelId,
+    probability: number,
+    isSpeech: boolean,
+    inferenceLatencyMs: number
+  ) => void
+  onSpeechStart?: (event: VADEvent, preSpeechPcm: Int16Array) => void
+  onSpeechFrame?: (channelId: ChannelId, pcmData: Int16Array, probability: number) => void
+  onSpeechEnd?: (event: VADEvent) => void
+  onVadStatusChange?: (status: 'initializing' | 'ready' | 'error', error?: string) => void
   onDeviceDisconnected?: (event: Event) => void
   onError?: (err: Error) => void
 }
@@ -25,6 +37,8 @@ export class AudioIngestionEngine {
   private gainNodeA: GainNode | null = null
   private workletNodeA: AudioWorkletNode | null = null
   private bufferChannelA: CircularAudioBuffer = new CircularAudioBuffer(16000)
+  private vadAccumulatorA: Int16Array = new Int16Array(480)
+  private vadAccumulatorIndexA: number = 0
 
   // Channel B (System Loopback)
   private streamChannelB: MediaStream | null = null
@@ -32,6 +46,11 @@ export class AudioIngestionEngine {
   private gainNodeB: GainNode | null = null
   private workletNodeB: AudioWorkletNode | null = null
   private bufferChannelB: CircularAudioBuffer = new CircularAudioBuffer(16000)
+  private vadAccumulatorB: Int16Array = new Int16Array(480)
+  private vadAccumulatorIndexB: number = 0
+
+  // VAD Engine
+  private vadEngine: SileroVadEngine | null = null
 
   private isRunning: boolean = false
   private callbacks: AudioEngineCallbacks
@@ -77,7 +96,7 @@ export class AudioIngestionEngine {
   }
 
   /**
-   * Start dual-channel ingestion (Channel A Mic + Channel B Loopback)
+   * Start dual-channel ingestion (Channel A Mic + Channel B Loopback) and Silero VAD
    */
   public async start(options: {
     noiseSuppression: boolean
@@ -89,6 +108,28 @@ export class AudioIngestionEngine {
 
     try {
       const ctx = await this.ensureAudioContext()
+
+      // Initialize Silero VAD v5 ONNX Engine
+      if (!this.vadEngine) {
+        this.vadEngine = new SileroVadEngine({
+          onSpeechStart: (event, preSpeechPcm) => {
+            this.callbacks.onSpeechStart?.(event, preSpeechPcm)
+          },
+          onSpeechFrame: (channelId, pcmData, prob) => {
+            this.callbacks.onSpeechFrame?.(channelId, pcmData, prob)
+          },
+          onSpeechEnd: (event) => {
+            this.callbacks.onSpeechEnd?.(event)
+          },
+          onVadTelemetry: (channelId, prob, isSpeech, latencyMs) => {
+            this.callbacks.onVadTelemetry?.(channelId, prob, isSpeech, latencyMs)
+          },
+          onStatusChange: (status, error) => {
+            this.callbacks.onVadStatusChange?.(status, error)
+          }
+        })
+      }
+      await this.vadEngine.start()
 
       // 1. Channel A: Local Microphone Capture
       this.streamChannelA = await navigator.mediaDevices.getUserMedia({
@@ -124,6 +165,15 @@ export class AudioIngestionEngine {
         })
 
         this.callbacks.onPcmChunk(channelId, samples)
+
+        // Feed into 30ms (480-sample) accumulator for Silero VAD
+        for (let i = 0; i < samples.length; i++) {
+          this.vadAccumulatorA[this.vadAccumulatorIndexA++] = samples[i]
+          if (this.vadAccumulatorIndexA >= 480) {
+            this.vadEngine?.processPcmFrame('channel_a', this.vadAccumulatorA, timestampMs)
+            this.vadAccumulatorIndexA = 0
+          }
+        }
       }
 
       this.sourceNodeA.connect(this.gainNodeA)
@@ -131,13 +181,14 @@ export class AudioIngestionEngine {
 
       // 2. Channel B: System Loopback / Remote Audio
       try {
-        // Attempt desktopCapturer loopback via native stream if available
         if (typeof window !== 'undefined' && window.electronAPI?.getDesktopSources) {
           const sources = await window.electronAPI.getDesktopSources()
           const primaryScreen = sources[0]
 
           if (primaryScreen) {
-            this.streamChannelB = await (navigator.mediaDevices as any).getUserMedia({
+            this.streamChannelB = await (navigator.mediaDevices as unknown as {
+              getUserMedia: (constraints: unknown) => Promise<MediaStream>
+            }).getUserMedia({
               audio: {
                 mandatory: {
                   chromeMediaSource: 'desktop',
@@ -152,9 +203,8 @@ export class AudioIngestionEngine {
         console.warn('[DUALAI] System audio loopback fallback:', loopbackErr)
       }
 
-      // If loopback is not permitted or unsupported in current host, create virtual Channel B test track
+      // Safe bilateral fallback clone for testing without external meeting
       if (!this.streamChannelB && this.streamChannelA) {
-        // Safe bilateral fallback clone for testing without external meeting
         this.streamChannelB = this.streamChannelA.clone()
       }
 
@@ -181,6 +231,15 @@ export class AudioIngestionEngine {
           })
 
           this.callbacks.onPcmChunk(channelId, samples)
+
+          // Feed into 30ms (480-sample) accumulator for Silero VAD
+          for (let i = 0; i < samples.length; i++) {
+            this.vadAccumulatorB[this.vadAccumulatorIndexB++] = samples[i]
+            if (this.vadAccumulatorIndexB >= 480) {
+              this.vadEngine?.processPcmFrame('channel_b', this.vadAccumulatorB, timestampMs)
+              this.vadAccumulatorIndexB = 0
+            }
+          }
         }
 
         this.sourceNodeB.connect(this.gainNodeB)
@@ -210,6 +269,13 @@ export class AudioIngestionEngine {
     } else if (channelId === 'channel_b' && this.gainNodeB) {
       this.gainNodeB.gain.setTargetAtTime(clampedGain, now, 0.03)
     }
+  }
+
+  /**
+   * Update VAD speech detection threshold and parameters
+   */
+  public setVadThreshold(threshold: number): void {
+    this.vadEngine?.updateConfig({ threshold })
   }
 
   /**
@@ -267,6 +333,13 @@ export class AudioIngestionEngine {
       this.workletNodeB = null
     }
 
+    if (this.vadEngine) {
+      this.vadEngine.stop()
+      this.vadEngine = null
+    }
+
+    this.vadAccumulatorIndexA = 0
+    this.vadAccumulatorIndexB = 0
     this.bufferChannelA.clear()
     this.bufferChannelB.clear()
     this.isRunning = false
@@ -274,5 +347,9 @@ export class AudioIngestionEngine {
 
   public getIsRunning(): boolean {
     return this.isRunning
+  }
+
+  public getIsVadReady(): boolean {
+    return this.vadEngine?.getIsReady() ?? false
   }
 }

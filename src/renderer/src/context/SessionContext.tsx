@@ -27,6 +27,17 @@ export interface SessionState {
   bufferSamplesA: number
   bufferSamplesB: number
 
+  // Silero VAD State
+  isVadReady: boolean
+  vadProbabilityA: number
+  vadProbabilityB: number
+  isSpeechActiveA: boolean
+  isSpeechActiveB: boolean
+  vadLatencyMs: number
+  vadThreshold: number
+  speechEventsCountA: number
+  speechEventsCountB: number
+
   // Actions
   setAudioRoute: (route: AudioRouteMode) => void
   setOperatingMode: (mode: OperatingMode) => void
@@ -47,6 +58,7 @@ export interface SessionState {
   stopAudioEngine: () => void
   setGainChannelA: (gain: number) => void
   setGainChannelB: (gain: number) => void
+  setVadThreshold: (threshold: number) => void
 }
 
 const SessionContext = createContext<SessionState | null>(null)
@@ -75,6 +87,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [bufferSamplesA, setBufferSamplesA] = useState(0)
   const [bufferSamplesB, setBufferSamplesB] = useState(0)
 
+  // Silero VAD State
+  const [isVadReady, setIsVadReady] = useState(false)
+  const [vadProbabilityA, setVadProbabilityA] = useState(0)
+  const [vadProbabilityB, setVadProbabilityB] = useState(0)
+  const [isSpeechActiveA, setIsSpeechActiveA] = useState(false)
+  const [isSpeechActiveB, setIsSpeechActiveB] = useState(false)
+  const [vadLatencyMs, setVadLatencyMs] = useState(0)
+  const [vadThreshold, setVadThresholdState] = useState(0.5)
+  const [speechEventsCountA, setSpeechEventsCountA] = useState(0)
+  const [speechEventsCountB, setSpeechEventsCountB] = useState(0)
+
   const engineRef = useRef<AudioIngestionEngine | null>(null)
 
   // Initialize Audio Ingestion Engine
@@ -96,6 +119,29 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
             setBufferSamplesB(status.available)
           }
         }
+      },
+      onVadTelemetry: (channelId, prob, isSpeech, latencyMs) => {
+        if (channelId === 'channel_a') {
+          setVadProbabilityA(prob)
+          setIsSpeechActiveA(isSpeech)
+        } else {
+          setVadProbabilityB(prob)
+          setIsSpeechActiveB(isSpeech)
+        }
+        setVadLatencyMs(latencyMs)
+      },
+      onSpeechStart: (event) => {
+        if (event.channelId === 'channel_a') {
+          setSpeechEventsCountA((prev) => prev + 1)
+        } else {
+          setSpeechEventsCountB((prev) => prev + 1)
+        }
+      },
+      onSpeechEnd: () => {
+        // Speech boundary event dispatched cleanly
+      },
+      onVadStatusChange: (status) => {
+        setIsVadReady(status === 'ready')
       },
       onDeviceDisconnected: (event) => {
         console.warn('[DUALAI] Audio hardware configuration changed:', event)
@@ -139,6 +185,10 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setLevelMetricB(null)
       setBufferSamplesA(0)
       setBufferSamplesB(0)
+      setVadProbabilityA(0)
+      setVadProbabilityB(0)
+      setIsSpeechActiveA(false)
+      setIsSpeechActiveB(false)
     }
   }, [])
 
@@ -151,6 +201,11 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const setGainChannelB = useCallback((gain: number) => {
     setGainChannelBState(gain)
     engineRef.current?.setGain('channel_b', gain)
+  }, [])
+
+  const setVadThreshold = useCallback((threshold: number) => {
+    setVadThresholdState(threshold)
+    engineRef.current?.setVadThreshold(threshold)
   }, [])
 
   // 5-second simulated telemetry ping polling
@@ -211,6 +266,15 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         levelMetricB,
         bufferSamplesA,
         bufferSamplesB,
+        isVadReady,
+        vadProbabilityA,
+        vadProbabilityB,
+        isSpeechActiveA,
+        isSpeechActiveB,
+        vadLatencyMs,
+        vadThreshold,
+        speechEventsCountA,
+        speechEventsCountB,
         setAudioRoute,
         setOperatingMode,
         setDomainId,
@@ -227,7 +291,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         startAudioEngine,
         stopAudioEngine,
         setGainChannelA,
-        setGainChannelB
+        setGainChannelB,
+        setVadThreshold
       }}
     >
       {children}
