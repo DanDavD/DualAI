@@ -1,7 +1,9 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react'
-import { AudioRouteMode, OperatingMode, LatencyMode, AudioLevelMetric } from '../../../types/audio'
+import { AudioRouteMode, OperatingMode, LatencyMode, AudioLevelMetric, ChannelId } from '../../../types/audio'
 import { DomainId } from '../../../types/domain'
+import { TranscriptUtterance, SttConnectionState } from '../../../types/stt'
 import { AudioIngestionEngine } from '../audio/AudioIngestionEngine'
+import { StreamingSttManager } from '../audio/stt/StreamingSttManager'
 
 export interface SessionState {
   audioRoute: AudioRouteMode
@@ -38,6 +40,16 @@ export interface SessionState {
   speechEventsCountA: number
   speechEventsCountB: number
 
+  // Streaming STT State
+  sttStatusA: SttConnectionState
+  sttStatusB: SttConnectionState
+  sttLatencyMs: number
+  sttProvider: 'deepgram-nova-2' | 'whisper-turbo' | 'simulated-stt'
+  sttReconnectCount: number
+  utterances: TranscriptUtterance[]
+  interimTranscriptA: TranscriptUtterance | null
+  interimTranscriptB: TranscriptUtterance | null
+
   // Actions
   setAudioRoute: (route: AudioRouteMode) => void
   setOperatingMode: (mode: OperatingMode) => void
@@ -59,6 +71,11 @@ export interface SessionState {
   setGainChannelA: (gain: number) => void
   setGainChannelB: (gain: number) => void
   setVadThreshold: (threshold: number) => void
+
+  // STT Actions
+  clearTranscripts: () => void
+  simulateSocketDrop: (channelId?: ChannelId) => void
+  sendTestSpeechUtterance: (channelId: ChannelId, phrase?: string) => void
 }
 
 const SessionContext = createContext<SessionState | null>(null)
@@ -98,7 +115,76 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [speechEventsCountA, setSpeechEventsCountA] = useState(0)
   const [speechEventsCountB, setSpeechEventsCountB] = useState(0)
 
+  // Streaming STT State
+  const [sttStatusA, setSttStatusA] = useState<SttConnectionState>('disconnected')
+  const [sttStatusB, setSttStatusB] = useState<SttConnectionState>('disconnected')
+  const [sttLatencyMs, setSttLatencyMs] = useState(0)
+  const [sttProvider, setSttProvider] = useState<'deepgram-nova-2' | 'whisper-turbo' | 'simulated-stt'>('simulated-stt')
+  const [sttReconnectCount, setSttReconnectCount] = useState(0)
+  const [utterances, setUtterances] = useState<TranscriptUtterance[]>([])
+  const [interimTranscriptA, setInterimTranscriptA] = useState<TranscriptUtterance | null>(null)
+  const [interimTranscriptB, setInterimTranscriptB] = useState<TranscriptUtterance | null>(null)
+
   const engineRef = useRef<AudioIngestionEngine | null>(null)
+  const sttManagerRef = useRef<StreamingSttManager | null>(null)
+
+  // Initialize Streaming STT Manager
+  useEffect(() => {
+    const stt = new StreamingSttManager(
+      {
+        onInterimTranscript: (utterance) => {
+          if (utterance.channelId === 'channel_a') {
+            setInterimTranscriptA(utterance)
+          } else {
+            setInterimTranscriptB(utterance)
+          }
+        },
+        onFinalTranscript: (utterance) => {
+          if (utterance.channelId === 'channel_a') {
+            setInterimTranscriptA(null)
+          } else {
+            setInterimTranscriptB(null)
+          }
+          setUtterances((prev) => [...prev.slice(-99), utterance])
+        },
+        onConnectionChange: (channelId, state) => {
+          if (channelId === 'channel_a') {
+            setSttStatusA(state)
+          } else {
+            setSttStatusB(state)
+          }
+        },
+        onTelemetry: (telemetry) => {
+          setSttLatencyMs(telemetry.latencyMs)
+          setSttProvider(telemetry.provider)
+          setSttReconnectCount((prev) => Math.max(prev, telemetry.reconnectCount))
+        },
+        onError: (channelId, err) => {
+          console.warn(`[DUALAI] STT Error on ${channelId}:`, err)
+        }
+      },
+      {
+        domainId,
+        confidenceThreshold: 0.75
+      }
+    )
+
+    sttManagerRef.current = stt
+    stt.updateLanguages(sourceLang, targetLang)
+
+    return () => {
+      stt.stop()
+    }
+  }, [])
+
+  // Sync language and domain changes with STT Manager
+  useEffect(() => {
+    sttManagerRef.current?.updateLanguages(sourceLang, targetLang)
+  }, [sourceLang, targetLang])
+
+  useEffect(() => {
+    sttManagerRef.current?.updateDomain(domainId)
+  }, [domainId])
 
   // Initialize Audio Ingestion Engine
   useEffect(() => {
@@ -130,15 +216,22 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
         setVadLatencyMs(latencyMs)
       },
-      onSpeechStart: (event) => {
+      onSpeechStart: (event, preSpeechPcm) => {
         if (event.channelId === 'channel_a') {
           setSpeechEventsCountA((prev) => prev + 1)
         } else {
           setSpeechEventsCountB((prev) => prev + 1)
         }
+        // Forward pre-speech padding buffer directly to STT client to protect plosive consonants
+        sttManagerRef.current?.sendAudio(event.channelId, preSpeechPcm)
       },
-      onSpeechEnd: () => {
-        // Speech boundary event dispatched cleanly
+      onSpeechFrame: (channelId, pcmData) => {
+        // Continuous speech frame forwarding during active speech
+        sttManagerRef.current?.sendAudio(channelId, pcmData)
+      },
+      onSpeechEnd: (event) => {
+        // Dispatched upon silence hangover expiration
+        sttManagerRef.current?.signalSpeechEnd(event.channelId)
       },
       onVadStatusChange: (status) => {
         setIsVadReady(status === 'ready')
@@ -159,7 +252,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [])
 
-  // Start Audio Ingestion
+  // Start Audio Ingestion & WebSocket STT Pipeline
   const startAudioEngine = useCallback(async () => {
     if (!engineRef.current) return
     try {
@@ -169,6 +262,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         gainA: gainChannelA,
         gainB: gainChannelB
       })
+      sttManagerRef.current?.start()
       setIsAudioActive(true)
     } catch (err) {
       console.error('[DUALAI] Failed to start audio engine:', err)
@@ -176,7 +270,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [noiseSuppression, echoCancellation, gainChannelA, gainChannelB])
 
-  // Stop Audio Ingestion
+  // Stop Audio Ingestion & Terminate Sockets cleanly
   const stopAudioEngine = useCallback(() => {
     if (engineRef.current) {
       engineRef.current.stop()
@@ -190,6 +284,12 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setIsSpeechActiveA(false)
       setIsSpeechActiveB(false)
     }
+    // Clean socket termination
+    sttManagerRef.current?.stop()
+    setSttStatusA('disconnected')
+    setSttStatusB('disconnected')
+    setInterimTranscriptA(null)
+    setInterimTranscriptB(null)
   }, [])
 
   // Hardware Gain Multipliers with smooth adjustment
@@ -206,6 +306,21 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const setVadThreshold = useCallback((threshold: number) => {
     setVadThresholdState(threshold)
     engineRef.current?.setVadThreshold(threshold)
+  }, [])
+
+  // STT Pipeline Actions
+  const clearTranscripts = useCallback(() => {
+    setUtterances([])
+    setInterimTranscriptA(null)
+    setInterimTranscriptB(null)
+  }, [])
+
+  const simulateSocketDrop = useCallback((channelId?: ChannelId) => {
+    sttManagerRef.current?.simulateNetworkDrop(channelId)
+  }, [])
+
+  const sendTestSpeechUtterance = useCallback((channelId: ChannelId, phrase?: string) => {
+    sttManagerRef.current?.triggerTestUtterance(channelId, phrase)
   }, [])
 
   // 5-second simulated telemetry ping polling
@@ -275,6 +390,14 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         vadThreshold,
         speechEventsCountA,
         speechEventsCountB,
+        sttStatusA,
+        sttStatusB,
+        sttLatencyMs,
+        sttProvider,
+        sttReconnectCount,
+        utterances,
+        interimTranscriptA,
+        interimTranscriptB,
         setAudioRoute,
         setOperatingMode,
         setDomainId,
@@ -292,7 +415,10 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         stopAudioEngine,
         setGainChannelA,
         setGainChannelB,
-        setVadThreshold
+        setVadThreshold,
+        clearTranscripts,
+        simulateSocketDrop,
+        sendTestSpeechUtterance
       }}
     >
       {children}
