@@ -13,7 +13,10 @@ export const SubHeader: React.FC = () => {
     setTargetLang,
     swapLanguages,
     latencyMode,
-    setLatencyMode
+    setLatencyMode,
+    isAudioActive,
+    levelMetricA,
+    levelMetricB
   } = useSession()
 
   return (
@@ -26,7 +29,11 @@ export const SubHeader: React.FC = () => {
           onSelectLanguage={setSourceLang}
         />
 
-        <HardwareVuMeter channelLabel="CH A - IN" isActive={true} />
+        <HardwareVuMeter
+          channelLabel="CH A - IN"
+          isActive={isAudioActive}
+          peakDb={levelMetricA ? levelMetricA.peakDb : undefined}
+        />
       </div>
 
       {/* Center Cluster: Swap Languages Trigger */}
@@ -47,7 +54,11 @@ export const SubHeader: React.FC = () => {
 
       {/* Right Cluster: Channel B VU Meter + Target Language + Latency Mode Switch */}
       <div className="flex items-center space-x-2">
-        <HardwareVuMeter channelLabel="CH B - OUT" isActive={true} />
+        <HardwareVuMeter
+          channelLabel="CH B - OUT"
+          isActive={isAudioActive}
+          peakDb={levelMetricB ? levelMetricB.peakDb : undefined}
+        />
 
         <LanguageSelector
           label="Target Language"

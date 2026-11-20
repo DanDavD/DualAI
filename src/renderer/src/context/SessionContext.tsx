@@ -1,6 +1,7 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react'
-import { AudioRouteMode, OperatingMode, LatencyMode } from '../../../types/audio'
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react'
+import { AudioRouteMode, OperatingMode, LatencyMode, AudioLevelMetric } from '../../../types/audio'
 import { DomainId } from '../../../types/domain'
+import { AudioIngestionEngine } from '../audio/AudioIngestionEngine'
 
 export interface SessionState {
   audioRoute: AudioRouteMode
@@ -17,6 +18,15 @@ export interface SessionState {
   isGlossaryModalOpen: boolean
   isSettingsModalOpen: boolean
 
+  // Audio Engine State
+  isAudioActive: boolean
+  gainChannelA: number
+  gainChannelB: number
+  levelMetricA: AudioLevelMetric | null
+  levelMetricB: AudioLevelMetric | null
+  bufferSamplesA: number
+  bufferSamplesB: number
+
   // Actions
   setAudioRoute: (route: AudioRouteMode) => void
   setOperatingMode: (mode: OperatingMode) => void
@@ -31,6 +41,12 @@ export interface SessionState {
   closeGlossaryModal: () => void
   openSettingsModal: () => void
   closeSettingsModal: () => void
+
+  // Audio Engine Actions
+  startAudioEngine: () => Promise<void>
+  stopAudioEngine: () => void
+  setGainChannelA: (gain: number) => void
+  setGainChannelB: (gain: number) => void
 }
 
 const SessionContext = createContext<SessionState | null>(null)
@@ -49,6 +65,93 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [quotaRemainingHours] = useState(67.36)
   const [isGlossaryModalOpen, setIsGlossaryModalOpen] = useState(false)
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false)
+
+  // Audio Engine Ingestion State
+  const [isAudioActive, setIsAudioActive] = useState(false)
+  const [gainChannelA, setGainChannelAState] = useState(1.0)
+  const [gainChannelB, setGainChannelBState] = useState(1.0)
+  const [levelMetricA, setLevelMetricA] = useState<AudioLevelMetric | null>(null)
+  const [levelMetricB, setLevelMetricB] = useState<AudioLevelMetric | null>(null)
+  const [bufferSamplesA, setBufferSamplesA] = useState(0)
+  const [bufferSamplesB, setBufferSamplesB] = useState(0)
+
+  const engineRef = useRef<AudioIngestionEngine | null>(null)
+
+  // Initialize Audio Ingestion Engine
+  useEffect(() => {
+    const engine = new AudioIngestionEngine({
+      onLevelMetric: (metric) => {
+        if (metric.channelId === 'channel_a') {
+          setLevelMetricA(metric)
+        } else {
+          setLevelMetricB(metric)
+        }
+      },
+      onPcmChunk: (channelId) => {
+        if (engineRef.current) {
+          const status = engineRef.current.getBufferStatus(channelId)
+          if (channelId === 'channel_a') {
+            setBufferSamplesA(status.available)
+          } else {
+            setBufferSamplesB(status.available)
+          }
+        }
+      },
+      onDeviceDisconnected: (event) => {
+        console.warn('[DUALAI] Audio hardware configuration changed:', event)
+      },
+      onError: (err) => {
+        console.error('[DUALAI] Audio Engine error:', err)
+        setIsAudioActive(false)
+      }
+    })
+
+    engineRef.current = engine
+
+    return () => {
+      engine.stop()
+    }
+  }, [])
+
+  // Start Audio Ingestion
+  const startAudioEngine = useCallback(async () => {
+    if (!engineRef.current) return
+    try {
+      await engineRef.current.start({
+        noiseSuppression,
+        echoCancellation,
+        gainA: gainChannelA,
+        gainB: gainChannelB
+      })
+      setIsAudioActive(true)
+    } catch (err) {
+      console.error('[DUALAI] Failed to start audio engine:', err)
+      setIsAudioActive(false)
+    }
+  }, [noiseSuppression, echoCancellation, gainChannelA, gainChannelB])
+
+  // Stop Audio Ingestion
+  const stopAudioEngine = useCallback(() => {
+    if (engineRef.current) {
+      engineRef.current.stop()
+      setIsAudioActive(false)
+      setLevelMetricA(null)
+      setLevelMetricB(null)
+      setBufferSamplesA(0)
+      setBufferSamplesB(0)
+    }
+  }, [])
+
+  // Hardware Gain Multipliers with smooth adjustment
+  const setGainChannelA = useCallback((gain: number) => {
+    setGainChannelAState(gain)
+    engineRef.current?.setGain('channel_a', gain)
+  }, [])
+
+  const setGainChannelB = useCallback((gain: number) => {
+    setGainChannelBState(gain)
+    engineRef.current?.setGain('channel_b', gain)
+  }, [])
 
   // 5-second simulated telemetry ping polling
   useEffect(() => {
@@ -101,6 +204,13 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         quotaRemainingHours,
         isGlossaryModalOpen,
         isSettingsModalOpen,
+        isAudioActive,
+        gainChannelA,
+        gainChannelB,
+        levelMetricA,
+        levelMetricB,
+        bufferSamplesA,
+        bufferSamplesB,
         setAudioRoute,
         setOperatingMode,
         setDomainId,
@@ -113,7 +223,11 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         openGlossaryModal,
         closeGlossaryModal,
         openSettingsModal,
-        closeSettingsModal
+        closeSettingsModal,
+        startAudioEngine,
+        stopAudioEngine,
+        setGainChannelA,
+        setGainChannelB
       }}
     >
       {children}
