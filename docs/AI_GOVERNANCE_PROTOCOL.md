@@ -101,5 +101,22 @@ Every daily card delivery must strictly adhere to the following invariant rules:
    - 2. Texto Descripción Commit (Detailed bulleted change list)
    - 3. Texto Título PR (Formal GitHub pull request title)
    - 4. Texto Descripción PR (Comprehensive markdown documentation with DoD checklist)
-   - 5. Labels a Asignar en GitHub (Official repository labels)
+   - 5. Labels a Asignar en GitHub (Strictly selected from the official 8 repository labels defined in Section 6)
 5. **Strict Zero Emojis Policy:** Absolute prohibition of emojis across code, UI, tooltips, commits, pull requests, and technical logs.
+
+---
+
+## 6. OFFICIAL GITHUB LABELS TAXONOMY
+
+Autonomous agents must strictly and exclusively select suggested PR/issue labels from this official 8-label repository taxonomy configured in GitHub. Improvised, unconfigured, or dynamic labels are strictly prohibited:
+
+| Official Label | Category / Domain | Description / Usage Scope |
+| :--- | :--- | :--- |
+| `enhancement` | General | General enhancements, performance optimizations, and refactoring. |
+| `ai/domain` | AI & Pipeline | Gemini inference, streaming STT, and specialized domain prompt injection. |
+| `architecture` | Core Infrastructure | Core system infrastructure, IPC contracts, and state machine scaffolding. |
+| `audio-engine` | Audio Hardware | Microphone capture, system loopback, VAD, and WebAudio pipelines. |
+| `Feature` | Functional Features | New user-facing features or major functional component deliverables. |
+| `release` | Store & Packaging | Windows MSIX packaging, WACK validation, store assets, and releases. |
+| `ui/ux` | Design & Layout | Visual interface, Zinc/Slate design system, components, and layout. |
+| `verified` | Quality Assurance | Audited and approved against 100% of the Definition of Done (DoD). |
