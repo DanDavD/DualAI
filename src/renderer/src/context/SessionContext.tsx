@@ -2,8 +2,10 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import { AudioRouteMode, OperatingMode, LatencyMode, AudioLevelMetric, ChannelId } from '../../../types/audio'
 import { DomainId } from '../../../types/domain'
 import { TranscriptUtterance, SttConnectionState } from '../../../types/stt'
+import { TranslationResult } from '../../../types/translation'
 import { AudioIngestionEngine } from '../audio/AudioIngestionEngine'
 import { StreamingSttManager } from '../audio/stt/StreamingSttManager'
+import { TranslationManager } from '../translation/TranslationManager'
 
 export interface SessionState {
   audioRoute: AudioRouteMode
@@ -50,6 +52,13 @@ export interface SessionState {
   interimTranscriptA: TranscriptUtterance | null
   interimTranscriptB: TranscriptUtterance | null
 
+  // Real-Time Domain Inference (Gemini 2.0 Flash) State
+  translations: TranslationResult[]
+  activeTranslation: TranslationResult | null
+  translationLatencyMs: number
+  endToEndLatencyMs: number
+  translationProvider: 'gemini-2.0-flash' | 'simulated-gemini'
+
   // Actions
   setAudioRoute: (route: AudioRouteMode) => void
   setOperatingMode: (mode: OperatingMode) => void
@@ -76,6 +85,10 @@ export interface SessionState {
   clearTranscripts: () => void
   simulateSocketDrop: (channelId?: ChannelId) => void
   sendTestSpeechUtterance: (channelId: ChannelId, phrase?: string) => void
+
+  // Translation Actions
+  clearTranslations: () => void
+  triggerDomainTestTranslation: (domainOverride?: DomainId, phraseOverride?: string) => Promise<void>
 }
 
 const SessionContext = createContext<SessionState | null>(null)
@@ -125,8 +138,47 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [interimTranscriptA, setInterimTranscriptA] = useState<TranscriptUtterance | null>(null)
   const [interimTranscriptB, setInterimTranscriptB] = useState<TranscriptUtterance | null>(null)
 
+  // Real-Time Domain Inference (Gemini 2.0 Flash) State
+  const [translations, setTranslations] = useState<TranslationResult[]>([])
+  const [activeTranslation, setActiveTranslation] = useState<TranslationResult | null>(null)
+  const [translationLatencyMs, setTranslationLatencyMs] = useState(0)
+  const [endToEndLatencyMs, setEndToEndLatencyMs] = useState(0)
+  const [translationProvider, setTranslationProvider] = useState<'gemini-2.0-flash' | 'simulated-gemini'>('simulated-gemini')
+
   const engineRef = useRef<AudioIngestionEngine | null>(null)
   const sttManagerRef = useRef<StreamingSttManager | null>(null)
+  const translationManagerRef = useRef<TranslationManager | null>(null)
+
+  // Initialize Real-Time Domain Translation Engine
+  useEffect(() => {
+    const tm = new TranslationManager({
+      onTranslationStart: (result) => {
+        setActiveTranslation(result)
+      },
+      onTranslationToken: (_token, accumulatedText) => {
+        setActiveTranslation((prev) => (prev ? { ...prev, translatedText: accumulatedText } : null))
+      },
+      onTranslationComplete: (result) => {
+        setActiveTranslation(null)
+        setTranslations((prev) => [...prev.slice(-99), result])
+      },
+      onTelemetry: (telemetry) => {
+        setTranslationLatencyMs(telemetry.timeToFirstTokenMs)
+        setEndToEndLatencyMs(telemetry.endToEndLatencyMs)
+        setTranslationProvider(telemetry.provider)
+      },
+      onError: (err) => {
+        console.warn('[DUALAI-SESSION] Translation Error:', err)
+        setActiveTranslation(null)
+      }
+    })
+
+    translationManagerRef.current = tm
+
+    return () => {
+      tm.cancelActive()
+    }
+  }, [])
 
   // Initialize Streaming STT Manager
   useEffect(() => {
@@ -146,6 +198,10 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
             setInterimTranscriptB(null)
           }
           setUtterances((prev) => [...prev.slice(-99), utterance])
+
+          // Trigger streaming domain translation immediately upon speech pause
+          const target = utterance.channelId === 'channel_a' ? targetLang : sourceLang
+          translationManagerRef.current?.translateUtterance(utterance, domainId, target)
         },
         onConnectionChange: (channelId, state) => {
           if (channelId === 'channel_a') {
@@ -175,7 +231,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return () => {
       stt.stop()
     }
-  }, [])
+  }, [domainId, sourceLang, targetLang])
 
   // Sync language and domain changes with STT Manager
   useEffect(() => {
@@ -286,10 +342,12 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
     // Clean socket termination
     sttManagerRef.current?.stop()
+    translationManagerRef.current?.cancelActive()
     setSttStatusA('disconnected')
     setSttStatusB('disconnected')
     setInterimTranscriptA(null)
     setInterimTranscriptB(null)
+    setActiveTranslation(null)
   }, [])
 
   // Hardware Gain Multipliers with smooth adjustment
@@ -308,12 +366,62 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     engineRef.current?.setVadThreshold(threshold)
   }, [])
 
+  // Translation Actions
+  const clearTranslations = useCallback(() => {
+    setTranslations([])
+    setActiveTranslation(null)
+    translationManagerRef.current?.clearHistory()
+  }, [])
+
+  const triggerDomainTestTranslation = useCallback(async (domainOverride?: DomainId, phraseOverride?: string) => {
+    const effectiveDomain = domainOverride || domainId
+    let testPhrase = phraseOverride
+    if (!testPhrase) {
+      if (effectiveDomain === 'medical') {
+        testPhrase = 'Patient presents with acute dyspnea and tachycardia following antibiotic administration.'
+      } else if (effectiveDomain === 'legal') {
+        testPhrase = 'The party of the first part hereby agrees to indemnify and hold harmless the licensee.'
+      } else if (effectiveDomain === 'technical') {
+        testPhrase = 'WebSocket connection initialized with binary ArrayBuffer linear16 stream.'
+      } else if (effectiveDomain === 'business') {
+        testPhrase = 'Quarterly earnings report indicates sixteen percent growth in enterprise subscriptions.'
+      } else {
+        testPhrase = 'Welcome to the bilingual conference interpretation session.'
+      }
+    }
+
+    const testUtterance: TranscriptUtterance = {
+      id: `test-${Date.now()}`,
+      channelId: 'channel_a',
+      speakerLabel: 'Channel A (Mic)',
+      language: sourceLang,
+      text: testPhrase,
+      tokens: testPhrase.split(' ').map((w, idx) => ({
+        id: `tok-${idx}`,
+        text: w,
+        confidence: 0.96,
+        isLowConfidence: false,
+        startTimeMs: idx * 120,
+        endTimeMs: (idx + 1) * 120
+      })),
+      isFinal: true,
+      timestampMs: Date.now(),
+      durationMs: testPhrase.split(' ').length * 120,
+      averageConfidence: 0.96,
+      receivedAtMs: Date.now()
+    }
+
+    setUtterances((prev) => [...prev.slice(-99), testUtterance])
+    await translationManagerRef.current?.translateUtterance(testUtterance, effectiveDomain, targetLang)
+  }, [domainId, sourceLang, targetLang])
+
   // STT Pipeline Actions
   const clearTranscripts = useCallback(() => {
     setUtterances([])
     setInterimTranscriptA(null)
     setInterimTranscriptB(null)
-  }, [])
+    clearTranslations()
+  }, [clearTranslations])
 
   const simulateSocketDrop = useCallback((channelId?: ChannelId) => {
     sttManagerRef.current?.simulateNetworkDrop(channelId)
@@ -398,6 +506,11 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         utterances,
         interimTranscriptA,
         interimTranscriptB,
+        translations,
+        activeTranslation,
+        translationLatencyMs,
+        endToEndLatencyMs,
+        translationProvider,
         setAudioRoute,
         setOperatingMode,
         setDomainId,
@@ -418,7 +531,9 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setVadThreshold,
         clearTranscripts,
         simulateSocketDrop,
-        sendTestSpeechUtterance
+        sendTestSpeechUtterance,
+        clearTranslations,
+        triggerDomainTestTranslation
       }}
     >
       {children}
