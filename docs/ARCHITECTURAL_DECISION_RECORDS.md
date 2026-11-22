@@ -17,6 +17,7 @@
 * [ADR-006: Client-Side Voice Activity Detection: Silero VAD v5 ONNX Web Worker Pipeline](#adr-006-client-side-voice-activity-detection)
 * [ADR-007: Bidirectional WebSocket Streaming Speech-to-Text & Interim Token Pipeline](#adr-007-bidirectional-websocket-streaming-speech-to-text)
 * [ADR-008: Streaming Domain Translation Inference with Gemini 2.0 Flash & Context Memory](#adr-008-streaming-domain-translation-inference)
+* [ADR-009: Zone 3 Resizable Dual-Pane Split Workspace & Virtualized Feed](#adr-009-zone-3-resizable-dual-pane-split-workspace)
 
 ---
 
@@ -224,3 +225,36 @@ We implement a **real-time streaming domain translation engine powered by Google
 ### Consequences
 * **Positive:** Sub-100ms streaming TTFT, total end-to-end roundtrip under 250ms, strict adherence to ICD-10 medical nomenclature and verbatim legal terms, and contextual dialogue continuity.
 * **Negative:** Requires managing streaming token state, sliding memory windows, and fallback handling when network connectivity fluctuates.
+
+---
+
+## ADR-009: ZONE 3 RESIZABLE DUAL-PANE SPLIT WORKSPACE & VIRTUALIZED FEED
+
+### Status
+Accepted
+
+### Context
+Simultaneous interpretation requires interpreters to maintain split-second visual synchronization between what was said (Source speech transcription) and what was translated (Target domain translation). In high-stress clinical and courtroom environments, interpreters need:
+1. Symmetrical or user-customized side-by-side split ratios that persist across sessions.
+2. Immediate, unmissable visual differentiation of high-risk numerical entities (dosages, vital signs, monetary figures, dates).
+3. A non-intrusive action rail on every translation card for rapid copy, audit flagging, and glossary terminology registration.
+4. Seamless 60fps scrolling that can handle 1,000+ utterances in prolonged hearings without memory bloat or DOM sluggishness.
+5. Smart auto-scroll that never fights the user when reviewing past statements.
+
+### Decision
+We implement **Zone 3: Resizable Dual-Pane Split Workspace & Virtualized Feed**:
+1. **Persistent Draggable Split Divider:** Central vertical divider clamped between 25% and 75% width, updated via `requestAnimationFrame` and persisted in `localStorage`. Fully accessible via ARIA attributes and arrow keys.
+2. **High-Contrast Bold Entity Highlighting:** Regular expression pipeline parsing clinical dosages (`500 mg`, `10 ml`), vital metrics (`145/92 mm Hg`, `38.5 °C`), anatomical codes (`L4-L5`), and financial figures (`$1,500.00`, `16%`). Formatted in amber bold mono chips (`font-bold text-amber-300 bg-amber-950/40`) to prevent critical misinterpretation.
+3. **Editable Speaker Designation:** Users can inline rename any speaker label (e.g. "Channel A" -> "Dr. Martinez", "Channel B" -> "Witness") directly from the card header with instant bidirectional persistence.
+4. **Action Rail (Copy, Flag, Terminology):** Every translation card features an inline rail with 1-click clipboard copy, audit flagging (`isFlagged`), and instant custom terminology registration.
+5. **Virtualized Windowing Engine:** Windowed rendering calculating visible item slices based on container height and scroll offset (with overscan), maintaining under 30 rendered DOM nodes for feeds exceeding 1,000 utterances.
+6. **Smart Auto-Scroll State Machine:** Automatically advances on incoming speech when user is at the bottom. If user scrolls up to audit past testimony, auto-scroll pauses instantly and displays a floating resume badge with unread counters.
+
+### Alternatives Considered & Rejected
+* **Stacked Horizontal Layout (Top Source / Bottom Target):** Rejected. Forces vertical saccadic eye movement and breaks horizontal gaze alignment between source phrases and their translations.
+* **Non-Virtualized DOM Mounting:** Rejected. Sustained 2-hour interpreting sessions generate 1,500+ utterance cards, causing DOM node bloat (>15,000 elements), scroll stutter, and dropped UI frames.
+* **Aggressive Full-Card Auto-Scroll:** Rejected. Automatically forcing scroll to bottom while an interpreter is actively re-reading a past medical statement creates severe disorientation and cognitive friction.
+
+### Consequences
+* **Positive:** Complete elimination of temporary Week 1 test benches; clean, professional DAW interface; zero frame drops on large feeds; unmissable numbers and dosages; frictionless terminology registration.
+* **Negative:** Requires managing scroll event listeners and virtualization overscan offsets.
