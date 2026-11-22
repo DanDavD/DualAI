@@ -228,3 +228,28 @@ Guarantee that translation begins streaming within 400ms of speech pause, enforc
 
 ### 4. Result
 All 4 Acceptance Criteria passed with 100% compliance. TTFT measured at an average of **97.22 ms** (over 4x faster than the 400ms ceiling). End-to-end interpretation roundtrip benchmarked at ~219ms with zero type warnings.
+
+---
+
+## INCIDENT 009: PERSISTENT RESIZABLE SPLIT-PANE ERGONOMICS AND VIRTUALIZED SYNCHRONOUS FEED RENDERING
+
+* **Date:** 2026-11-21
+* **Component:** Zone 3 Dual-Pane Workspace & Smart Auto-Scroll State Machine
+* **Severity:** Medium (UI thread layout jitter & interpreter ergonomics)
+
+### 1. Situation
+During the Day 08 implementation of the Zone 3 Dual-Pane Split Workspace, two UX engineering challenges emerged:
+1. Dynamic drag resizing between twin high-density feeds provoked micro-stutter and unintended text selection jumps across column boundaries.
+2. Continuous incoming interim transcription and translation tokens triggered repeated scroll mutations, fighting the user whenever an interpreter scrolled up to audit a previous utterance or verify a medication dosage.
+
+### 2. Task
+Ensure smooth 60fps split resizing with persistent width memory and keyboard accessibility, implement smart auto-scroll that pauses instantly when the user audits past utterances and resumes cleanly at the bottom, and highlight high-risk numbers and dosages in high-contrast bold.
+
+### 3. Action
+* **Zero-Flicker Split Divider:** Implemented `SplitDivider` leveraging `requestAnimationFrame` throttle, bounded percentage clamping (25% to 75%), global body cursor binding during drag, and `localStorage` width persistence with ARIA arrow-key controls.
+* **Smart Auto-Scroll State Machine:** Implemented bottom-proximity detection (<= 40px boundary). When the user scrolls away from the bottom, auto-scroll disengages immediately, accumulates an unread utterance counter, and displays a floating resume badge that jumps back to the latest stream with one click.
+* **High-Contrast Entity Highlighting:** Built a regex tokenizer (`highlightCriticalEntities`) parsing clinical dosages, anatomical codes, vitals, currencies, and percentages into high-contrast bold chips.
+* **Automated Verification Suite:** Developed `scripts/test_dual_pane_workspace.mjs` validating divider clamping, regex highlighting across medical and legal corpora, auto-scroll state transitions, and action rail operations.
+
+### 4. Result
+All 4 Acceptance Criteria passed with 100% compliance. Production build and TypeScript validation pass with zero errors. All temporary Week 1 test benches eliminated in favor of the production dual-workspace.
