@@ -479,3 +479,26 @@ Eliminate `AbortError` leaks and dropped translations permanently, accumulate co
 
 ### 4. Result
 Zero `AbortError` banners, zero stuck `"Waiting for translation..."` rows, smooth unified paragraphs across short pauses, clear Live draft-to-final font feedback vs Accurate full-paragraph translation, and clean native-language pane headers.
+
+---
+
+## INCIDENT 019: MULTI-SPEAKER BILINGUAL RECOGNITION GAP & UNIT-ECONOMICS MIGRATION TO SONIOX UNIFIED REAL-TIME ENGINE
+
+* **Date:** 2026-11-24
+* **Component:** Zero-Trust Cloud Gateway (`sonioxWsProxy.ts`), `pcmDownsampler.ts`, `sonioxStreamAssembler.ts`, `GatewaySttClient.ts`, `SessionContext.tsx`, `quotaStore.ts`
+* **Severity:** High (Competitive product parity and SaaS gross-margin viability for Microsoft Store launch)
+
+### 1. Situation
+Side-by-side live benchmarking against StreamVox revealed that the legacy two-hop Deepgram Nova-2 (monolingual, diarization disabled) + Gemini HTTP SSE pipeline could not separate 3+ concurrent voices mixing Spanish and English on a single System Audio channel, exhibited noticeable translation lag, and incurred ~\$0.60/hr COGS—making competitive pricing (\$6.99/40h, \$9.99/70h, \$19.99 Unlimited) financially unviable.
+
+### 2. Task
+Replace Deepgram + Gemini as the primary live engine with **Soniox Unified Real-Time WebSocket (`stt-rt-v6`)** inside the Zero-Trust Gateway, add 16 kHz PCM downsampling and multi-speaker bilingual token assembly, and align the SaaS pricing catalog across Gateway, Renderer, and Supabase SQL.
+
+### 3. Action
+* **Server-Only Soniox Proxy (`server/src/proxy/sonioxWsProxy.ts`):** Connected privately via `Authorization: Bearer ${SONIOX_API_KEY}` to `wss://stt-rt.soniox.com/transcribe-websocket`, configuring `enable_speaker_diarization`, `enable_language_identification`, `enable_endpoint_detection` (`max_endpoint_delay_ms: 2000`), domain/glossary `context`, `two_way`/`one_way` translation, initial PCM frame buffering, keepalive passthrough, and authoritative 4002 quota cutoffs.
+* **Client Downsampler & Multi-Speaker Assembler (`pcmDownsampler.ts`, `sonioxStreamAssembler.ts`):** Added exact 3:1 `48kHz -> 16kHz` PCM downsampling, lowered silence gating to capture soft/distant voices cleanly, and built `SonioxStreamAssembler` to split turns instantaneously on speaker/language changes while reconciling trailing finalized translations arriving after `<end>` (catching and fixing a provisional-tail duplication edge case during unit testing).
+* **Multi-Speaker Visual Distinction & Competitive Pricing:** Added calm speaker tinting (Speakers 1–4+) in `UtteranceCard` / `TranslationCard` and updated plan catalogs (`free_tier`, `pro_40h` \$6.99, `pro_plus_70h` \$9.99, `unlimited` \$19.99) plus Zero-Trust binary scans for `SONIOX_API_KEY` and `stt-rt.soniox.com`.
+* **Verification:** Authored `scripts/test_soniox_unified_engine.ts` (5/5 PASS) and verified 11/11 automated suites, `pnpm run typecheck` (`node`, `web`, `server`), and `pnpm run build`.
+
+### 4. Result
+DualAI now runs on a single-WebSocket unified real-time engine supporting up to 15 speakers, automatic two-way bilingual translation, 67% lower audio bandwidth, ~70% lower AI API cost, and 100% pass rate across all 11 verification suites with zero client secrets, zero `any` types, and zero emojis.

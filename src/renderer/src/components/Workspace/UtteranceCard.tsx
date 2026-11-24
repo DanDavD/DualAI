@@ -66,19 +66,25 @@ export const UtteranceCard: React.FC<UtteranceCardProps> = ({
   const hasLowConfidenceTokens = utterance.tokens.some((t) => t.isLowConfidence)
   const showPersistentMeta = isEditingSpeaker || isCustomSpeaker || isFlagged
 
+  const speakerColorClass = (() => {
+    const spk = utterance.speakerId
+    if (spk === '3') {
+      return isInterim ? 'font-light text-sky-300/65' : 'font-normal text-sky-300/95'
+    }
+    if (spk && spk !== '1' && spk !== '2') {
+      return isInterim ? 'font-light text-emerald-300/65' : 'font-normal text-emerald-300/95'
+    }
+    if (spk === '2' || isOppositeDirection) {
+      return isInterim ? 'font-light text-amber-300/65' : 'font-normal text-amber-300/95'
+    }
+    return isInterim ? 'font-light text-zinc-400/90' : 'font-normal text-zinc-300'
+  })()
+
   return (
     <div className="group relative text-sm font-sans">
       {/* Flowing, Boxless Source Paragraph (Zero Per-Message Title Clutter) */}
       <div
-        className={`text-[14px] leading-relaxed select-text transition-colors duration-300 ${
-          isInterim
-            ? isOppositeDirection
-              ? 'font-light text-amber-300/65'
-              : 'font-light text-zinc-400/90'
-            : isOppositeDirection
-              ? 'font-normal text-amber-300/95'
-              : 'font-normal text-zinc-300'
-        }`}
+        className={`text-[14px] leading-relaxed select-text transition-colors duration-300 ${speakerColorClass}`}
       >
         {hasLowConfidenceTokens && !isInterim ? (
           <span>

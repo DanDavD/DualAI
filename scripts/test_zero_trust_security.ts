@@ -40,13 +40,16 @@ async function runPenetrationSuite(): Promise<void> {
   assert.ok(compiledFiles.length >= 3, 'Production build artifacts must exist in out/ before security scan')
 
   const forbiddenClientStrings = [
+    'SONIOX_API_KEY',
     'DEEPGRAM_API_KEY',
     'GEMINI_API_KEY',
+    'VITE_SONIOX_API_KEY',
     'VITE_DEEPGRAM_API_KEY',
     'VITE_GEMINI_API_KEY',
     'SUPABASE_SERVICE_ROLE_KEY',
     'MS_STORE_CLIENT_SECRET',
     'BILLING_WEBHOOK_SECRET',
+    'stt-rt.soniox.com',
     'api.deepgram.com',
     'generativelanguage.googleapis.com'
   ]
@@ -194,7 +197,7 @@ async function runPenetrationSuite(): Promise<void> {
       provider: 'paypal',
       transactionId: 'PAYPAL-TX-HN-99887766',
       userId: signInData.user.userId,
-      planId: 'starter_10h'
+      planId: 'pro_40h'
     })
 
     // 4a. Forged webhook signature must fail with 401
@@ -208,7 +211,7 @@ async function runPenetrationSuite(): Promise<void> {
     })
     assert.equal(forgedWebhook.status, 401, 'Forged billing webhook must be rejected with 401')
 
-    // 4b. Valid HMAC-SHA256 signature credits 10 hours (36,000 seconds)
+    // 4b. Valid HMAC-SHA256 signature credits 40 hours (144,000 seconds)
     const validSig = crypto
       .createHmac('sha256', webhookSecret)
       .update(Buffer.from(webhookBody, 'utf-8'))
@@ -225,7 +228,7 @@ async function runPenetrationSuite(): Promise<void> {
     assert.equal(validWebhook1.status, 200)
     const credit1 = (await validWebhook1.json()) as { credited: boolean; remainingSeconds: number }
     assert.equal(credit1.credited, true)
-    assert.equal(credit1.remainingSeconds, 36000, 'Starter 10h plan must credit exactly 36,000 seconds')
+    assert.equal(credit1.remainingSeconds, 144000, 'Pro 40h plan must credit exactly 144,000 seconds')
 
     // 4c. Replay Attack (resending exact same signed webhook) must NOT double-credit
     const replayWebhook = await fetch(`${gw.baseUrl}/v1/billing/webhook`, {
@@ -239,8 +242,8 @@ async function runPenetrationSuite(): Promise<void> {
     assert.equal(replayWebhook.status, 200)
     const credit2 = (await replayWebhook.json()) as { credited: boolean; remainingSeconds: number }
     assert.equal(credit2.credited, false, 'Replayed transaction ID must not credit hours twice')
-    assert.equal(credit2.remainingSeconds, 36000, 'Remaining seconds must stay exactly 36,000 after replay')
-    console.log('  Forged Webhook Rejected (401) | Valid HMAC Credited (+36,000s) | Replay Attack Blocked: VERIFIED')
+    assert.equal(credit2.remainingSeconds, 144000, 'Remaining seconds must stay exactly 144,000 after replay')
+    console.log('  Forged Webhook Rejected (401) | Valid HMAC Credited (+144,000s / 40h) | Replay Attack Blocked: VERIFIED')
     console.log('PASS: Test 4 satisfied.\n')
 
     // ========================================================================
@@ -311,6 +314,7 @@ async function runPenetrationSuite(): Promise<void> {
     'server/src/security/rateLimiter.ts',
     'server/src/quota/quotaStore.ts',
     'server/src/billing/billingVerifier.ts',
+    'server/src/proxy/sonioxWsProxy.ts',
     'server/src/proxy/deepgramWsProxy.ts',
     'server/src/proxy/geminiStreamProxy.ts',
     'src/main/index.ts',

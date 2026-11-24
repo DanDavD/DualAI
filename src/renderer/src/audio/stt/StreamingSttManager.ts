@@ -16,10 +16,14 @@ import {
 } from '../../../../types/stt'
 import { GatewaySttClient } from './GatewaySttClient'
 import { SimulatedStreamingClient } from './SimulatedStreamingClient'
+import { UnifiedTurnSnapshot } from './sonioxStreamAssembler'
 
 export interface SttManagerCallbacks {
   onInterimTranscript: (utterance: TranscriptUtterance) => void
   onFinalTranscript: (utterance: TranscriptUtterance) => void
+  onUnifiedDraft?: (snapshot: UnifiedTurnSnapshot) => void
+  onUnifiedCommit?: (snapshot: UnifiedTurnSnapshot) => void
+  onUnifiedCommitUpdate?: (snapshot: UnifiedTurnSnapshot) => void
   onConnectionChange: (channelId: ChannelId, state: SttConnectionState, details?: string) => void
   onTelemetry: (telemetry: SttTelemetry) => void
   onError: (channelId: ChannelId, error: Error) => void
@@ -30,6 +34,9 @@ export interface SttManagerCallbacks {
 export interface SttRoutingConfig {
   languageA: string
   languageB: string
+  targetLanguageA?: string
+  targetLanguageB?: string
+  operatingMode?: 'translate' | 'conversation'
   enableChannelA: boolean
   enableChannelB: boolean
   endpointingMs?: number
@@ -46,11 +53,15 @@ export class StreamingSttManager {
   private accessToken: string | null = null
   private languageA: string = 'en'
   private languageB: string = 'es'
+  private targetLanguageA: string = 'es'
+  private targetLanguageB: string = 'es'
+  private operatingMode: 'translate' | 'conversation' = 'conversation'
   private enableChannelA: boolean = true
   private enableChannelB: boolean = true
   private endpointingMs: number = 250
   private sampleRate: number = 16000
   private domainId: string = 'medical'
+  private glossaryTerms: string[] = []
   private confidenceThreshold: number = 0.75
 
   constructor(
@@ -91,6 +102,12 @@ export class StreamingSttManager {
   public updateRouting(routing: SttRoutingConfig): void {
     const langAChanged = routing.languageA !== this.languageA
     const langBChanged = routing.languageB !== this.languageB
+    const nextTargetA = routing.targetLanguageA ?? this.targetLanguageA
+    const nextTargetB = routing.targetLanguageB ?? this.targetLanguageB
+    const targetAChanged = nextTargetA !== this.targetLanguageA
+    const targetBChanged = nextTargetB !== this.targetLanguageB
+    const nextOpMode = routing.operatingMode ?? this.operatingMode
+    const opModeChanged = nextOpMode !== this.operatingMode
     const enableAChanged = routing.enableChannelA !== this.enableChannelA
     const enableBChanged = routing.enableChannelB !== this.enableChannelB
     const nextEndpointing = routing.endpointingMs ?? this.endpointingMs
@@ -100,6 +117,9 @@ export class StreamingSttManager {
 
     this.languageA = routing.languageA
     this.languageB = routing.languageB
+    this.targetLanguageA = nextTargetA
+    this.targetLanguageB = nextTargetB
+    this.operatingMode = nextOpMode
     this.enableChannelA = routing.enableChannelA
     this.enableChannelB = routing.enableChannelB
     this.endpointingMs = nextEndpointing
@@ -107,10 +127,24 @@ export class StreamingSttManager {
 
     if (!this.isRunning) return
 
-    if (langAChanged || enableAChanged || endpointingChanged || sampleRateChanged) {
+    if (
+      langAChanged ||
+      targetAChanged ||
+      opModeChanged ||
+      enableAChanged ||
+      endpointingChanged ||
+      sampleRateChanged
+    ) {
       this.reconnectChannel('channel_a', this.enableChannelA)
     }
-    if (langBChanged || enableBChanged || endpointingChanged || sampleRateChanged) {
+    if (
+      langBChanged ||
+      targetBChanged ||
+      opModeChanged ||
+      enableBChanged ||
+      endpointingChanged ||
+      sampleRateChanged
+    ) {
       this.reconnectChannel('channel_b', this.enableChannelB)
     }
   }
@@ -142,6 +176,7 @@ export class StreamingSttManager {
   }
 
   public updateDomain(domainId: string): void {
+    const changed = domainId !== this.domainId
     this.domainId = domainId
     if (this.clientA instanceof SimulatedStreamingClient) {
       this.clientA.setDomain(domainId)
@@ -149,6 +184,14 @@ export class StreamingSttManager {
     if (this.clientB instanceof SimulatedStreamingClient) {
       this.clientB.setDomain(domainId)
     }
+    if (this.isRunning && changed && this.accessToken) {
+      if (this.enableChannelA) this.reconnectChannel('channel_a', true)
+      if (this.enableChannelB) this.reconnectChannel('channel_b', true)
+    }
+  }
+
+  public updateGlossaryTerms(terms: string[]): void {
+    this.glossaryTerms = terms.slice(0, 40)
   }
 
   public start(): void {
@@ -223,9 +266,14 @@ export class StreamingSttManager {
   }
 
   private createClient(channelId: ChannelId, language: string): SttClientInstance {
+    const targetLanguage = channelId === 'channel_a' ? this.targetLanguageA : this.targetLanguageB
     const config: SttClientConfig = {
-      model: 'nova-2',
+      model: 'soniox-rt',
       language,
+      targetLanguage,
+      operatingMode: this.operatingMode,
+      domainId: this.domainId,
+      glossaryTerms: this.glossaryTerms,
       sampleRate: this.sampleRate,
       confidenceThreshold: this.confidenceThreshold,
       interimResults: true,
@@ -248,7 +296,10 @@ export class StreamingSttManager {
       return new GatewaySttClient(channelId, config, this.accessToken, {
         ...callbacks,
         onQuotaUpdate: this.callbacks.onQuotaUpdate,
-        onQuotaExhausted: this.callbacks.onQuotaExhausted
+        onQuotaExhausted: this.callbacks.onQuotaExhausted,
+        onUnifiedDraft: this.callbacks.onUnifiedDraft,
+        onUnifiedCommit: this.callbacks.onUnifiedCommit,
+        onUnifiedCommitUpdate: this.callbacks.onUnifiedCommitUpdate
       })
     }
 

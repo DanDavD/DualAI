@@ -297,11 +297,13 @@ export const AccountPlanModal: React.FC = () => {
                       <div className="flex items-center space-x-3 pt-1 font-mono text-[10px] text-text-secondary">
                         <span className="flex items-center space-x-1">
                           <Check className="h-3 w-3 text-accent-emerald" />
-                          <span>{hours}h live audio</span>
+                          <span>
+                            {plan.isUnlimitedFairUse ? 'Unlimited hours/mo*' : `${hours}h / month`}
+                          </span>
                         </span>
                         <span className="flex items-center space-x-1">
                           <Check className="h-3 w-3 text-accent-emerald" />
-                          <span>{plan.maxConcurrentSessions}x session</span>
+                          <span>Multi-speaker + 60+ languages</span>
                         </span>
                       </div>
                     </div>

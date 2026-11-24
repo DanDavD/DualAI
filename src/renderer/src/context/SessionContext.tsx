@@ -43,6 +43,10 @@ import {
   ParagraphTurnAccumulator,
   normalizeTextForMatch
 } from '../audio/paragraphAccumulator'
+import {
+  TARGET_STREAM_SAMPLE_RATE,
+  downsampleInt16Pcm
+} from '../audio/pcmDownsampler'
 import { StreamingSttManager } from '../audio/stt/StreamingSttManager'
 import { TranslationManager } from '../translation/TranslationManager'
 import {
@@ -125,13 +129,13 @@ export interface SessionState {
   sttStatusA: SttConnectionState
   sttStatusB: SttConnectionState
   sttLatencyMs: number
-  sttProvider: 'deepgram-nova-2' | 'whisper-turbo' | 'simulated-stt'
+  sttProvider: 'soniox-unified' | 'deepgram-nova-2' | 'whisper-turbo' | 'simulated-stt'
   sttReconnectCount: number
   utterances: TranscriptUtterance[]
   interimTranscriptA: TranscriptUtterance | null
   interimTranscriptB: TranscriptUtterance | null
 
-  // Real-Time Domain Inference (Gemini 2.0 Flash) State
+  // Real-Time Domain Inference (Soniox Unified / Gemini Fallback) State
   translations: TranslationResult[]
   streamingTranslations: Record<string, TranslationResult>
   draftTranslationA: TranslationResult | null
@@ -139,7 +143,7 @@ export interface SessionState {
   activeTranslation: TranslationResult | null
   translationLatencyMs: number
   endToEndLatencyMs: number
-  translationProvider: 'gemini-2.0-flash' | 'simulated-gemini'
+  translationProvider: 'soniox-unified' | 'gemini-2.0-flash' | 'simulated-gemini'
 
   // Teleprompter Floating HUD State (Day 10)
   isHudOpen: boolean
@@ -286,14 +290,14 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [sttStatusB, setSttStatusB] = useState<SttConnectionState>('disconnected')
   const [sttLatencyMs, setSttLatencyMs] = useState(0)
   const [sttProvider, setSttProvider] = useState<
-    'deepgram-nova-2' | 'whisper-turbo' | 'simulated-stt'
+    'soniox-unified' | 'deepgram-nova-2' | 'whisper-turbo' | 'simulated-stt'
   >('simulated-stt')
   const [sttReconnectCount, setSttReconnectCount] = useState(0)
   const [utterances, setUtterances] = useState<TranscriptUtterance[]>([])
   const [interimTranscriptA, setInterimTranscriptA] = useState<TranscriptUtterance | null>(null)
   const [interimTranscriptB, setInterimTranscriptB] = useState<TranscriptUtterance | null>(null)
 
-  // Real-Time Domain Inference (Gemini 2.0 Flash) State
+  // Real-Time Domain Inference (Soniox Unified / Gemini Fallback) State
   const [translations, setTranslations] = useState<TranslationResult[]>([])
   const [streamingTranslations, setStreamingTranslations] = useState<
     Record<string, TranslationResult>
@@ -303,7 +307,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [translationLatencyMs, setTranslationLatencyMs] = useState(0)
   const [endToEndLatencyMs, setEndToEndLatencyMs] = useState(0)
   const [translationProvider, setTranslationProvider] = useState<
-    'gemini-2.0-flash' | 'simulated-gemini'
+    'soniox-unified' | 'gemini-2.0-flash' | 'simulated-gemini'
   >('simulated-gemini')
 
   const activeTranslation = useMemo<TranslationResult | null>(() => {
@@ -596,6 +600,9 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       // Ignore storage quota errors
     }
     translationManagerRef.current?.setCustomGlossary(glossaryEntriesToMap(customGlossaryEntries))
+    sttManagerRef.current?.updateGlossaryTerms(
+      customGlossaryEntries.flatMap((e) => [e.source, e.target]).filter(Boolean)
+    )
   }, [customGlossaryEntries])
 
   // Persist HUD settings whenever updated
@@ -770,6 +777,87 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         onFinalTranscript: (utterance) => {
           accumulator.pushFinalSegment(utterance)
         },
+        // Primary Unified Engine: Soniox Real-Time (STT + 15-Speaker Diarization + 2-Way Translation)
+        onUnifiedDraft: ({ utterance, translation }) => {
+          if (utterance.channelId === 'channel_a') {
+            setInterimTranscriptA(utterance)
+            if (latencyModeRef.current === 'sub_second_live') {
+              setDraftTranslationA(translation)
+            }
+          } else {
+            setInterimTranscriptB(utterance)
+            if (latencyModeRef.current === 'sub_second_live') {
+              setDraftTranslationB(translation)
+            }
+          }
+          setTranslationProvider('soniox-unified')
+          setTranslationLatencyMs(translation.timeToFirstTokenMs)
+          setEndToEndLatencyMs(translation.endToEndLatencyMs)
+
+          if (
+            latencyModeRef.current === 'sub_second_live' &&
+            isHudOpenRef.current &&
+            window.electronAPI?.sendHudTranscript
+          ) {
+            window.electronAPI.sendHudTranscript({
+              id: utterance.id,
+              speakerId: utterance.speakerId || utterance.channelId,
+              speakerLabel: utterance.speakerLabel,
+              sourceText: utterance.text,
+              translatedText: translation.translatedText,
+              timestampMs: utterance.timestampMs,
+              isInterim: true
+            })
+          }
+        },
+        onUnifiedCommit: ({ utterance, translation }) => {
+          if (utterance.channelId === 'channel_a') {
+            setInterimTranscriptA(null)
+            setDraftTranslationA(null)
+          } else {
+            setInterimTranscriptB(null)
+            setDraftTranslationB(null)
+          }
+          setUtterances((prev) => [...prev.slice(-999), utterance])
+          setTranslations((prev) => {
+            const filtered = prev.filter((t) => t.utteranceId !== utterance.id)
+            return [...filtered.slice(-999), translation]
+          })
+          setTranslationProvider('soniox-unified')
+
+          if (isHudOpenRef.current && window.electronAPI?.sendHudTranscript) {
+            window.electronAPI.sendHudTranscript({
+              id: utterance.id,
+              speakerId: utterance.speakerId || utterance.channelId,
+              speakerLabel: utterance.speakerLabel,
+              sourceText: utterance.text,
+              translatedText: translation.translatedText,
+              timestampMs: utterance.timestampMs,
+              isInterim: false
+            })
+          }
+        },
+        onUnifiedCommitUpdate: ({ utterance, translation }) => {
+          // Seamlessly append trailing finalized translation tokens arriving ms after <end> or speaker switch
+          setTranslations((prev) => {
+            const idx = prev.findIndex((t) => t.utteranceId === utterance.id)
+            if (idx === -1) return [...prev.slice(-999), translation]
+            const next = [...prev]
+            next[idx] = translation
+            return next
+          })
+          if (isHudOpenRef.current && window.electronAPI?.sendHudTranscript) {
+            window.electronAPI.sendHudTranscript({
+              id: utterance.id,
+              speakerId: utterance.speakerId || utterance.channelId,
+              speakerLabel: utterance.speakerLabel,
+              sourceText: utterance.text,
+              translatedText: translation.translatedText,
+              timestampMs: utterance.timestampMs,
+              isInterim: false
+            })
+          }
+        },
         onConnectionChange: (channelId, state) => {
           if (channelId === 'channel_a') {
             setSttStatusA(state)
@@ -823,13 +911,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     )
 
     sttManagerRef.current = stt
-    setSttProvider(stt.isGatewayAuthenticated() ? 'deepgram-nova-2' : 'simulated-stt')
+    setSttProvider(stt.isGatewayAuthenticated() ? 'soniox-unified' : 'simulated-stt')
     stt.updateRouting({
       languageA: routingDecisionRef.current.sttLangA,
       languageB: routingDecisionRef.current.sttLangB,
+      targetLanguageA: routingDecisionRef.current.translationTargetA,
+      targetLanguageB: routingDecisionRef.current.translationTargetB,
+      operatingMode,
       enableChannelA: routingDecisionRef.current.captureChannelA,
       enableChannelB: routingDecisionRef.current.captureChannelB,
-      endpointingMs: resolveEndpointingMs(latencyMode)
+      endpointingMs: resolveEndpointingMs(latencyMode),
+      sampleRate: TARGET_STREAM_SAMPLE_RATE
     })
 
     return () => {
@@ -849,16 +941,20 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [latencyMode, clearDraftTimers])
 
-  // Sync routing, language direction, latency mode, and domain changes with STT Manager
+  // Sync routing, language direction, operating mode, latency mode, and domain changes with STT Manager
   useEffect(() => {
     sttManagerRef.current?.updateRouting({
       languageA: routingDecision.sttLangA,
       languageB: routingDecision.sttLangB,
+      targetLanguageA: routingDecision.translationTargetA,
+      targetLanguageB: routingDecision.translationTargetB,
+      operatingMode,
       enableChannelA: routingDecision.captureChannelA,
       enableChannelB: routingDecision.captureChannelB,
-      endpointingMs: resolveEndpointingMs(latencyMode)
+      endpointingMs: resolveEndpointingMs(latencyMode),
+      sampleRate: TARGET_STREAM_SAMPLE_RATE
     })
-  }, [routingDecision, latencyMode])
+  }, [routingDecision, operatingMode, latencyMode])
 
   useEffect(() => {
     sttManagerRef.current?.updateDomain(domainId)
@@ -883,8 +979,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
             setBufferSamplesB(status.available)
           }
         }
-        // In live Zero-Trust Gateway mode, stream active PCM (above -52dBFS + 1.5s hangover)
-        // directly to Deepgram Nova-2 so music-backed videos transcribe cleanly while paused silence saves quota
+        // In live Zero-Trust Gateway mode, downsample to 16 kHz and stream active PCM
+        // (above -57dBFS + 2.2s hangover) so soft/distant voices transcribe cleanly while silence saves quota
         if (sttManagerRef.current?.isGatewayAuthenticated()) {
           if (channelId === 'channel_a' && engineRef.current?.getIsCoughMuted()) {
             return
@@ -895,12 +991,16 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
             if (v > maxAbs) maxAbs = v
           }
           const now = Date.now()
-          if (maxAbs >= 80) {
+          if (maxAbs >= 45) {
             lastActiveAudioMsRef.current[channelId] = now
           }
-          // 2.2s hangover guarantees Deepgram receives full trailing silence to flush final words
+          // 2.2s hangover guarantees Soniox/Deepgram receives full trailing silence to flush final words
           if (now - lastActiveAudioMsRef.current[channelId] <= 2200) {
-            sttManagerRef.current.sendAudio(channelId, pcmData)
+            const actualRate = engineRef.current?.getActualSampleRate() || TARGET_STREAM_SAMPLE_RATE
+            const streamPcm = downsampleInt16Pcm(pcmData, actualRate, TARGET_STREAM_SAMPLE_RATE)
+            if (streamPcm.length > 0) {
+              sttManagerRef.current.sendAudio(channelId, streamPcm)
+            }
           }
         }
       },
@@ -1022,14 +1122,16 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         captureChannelA: activeRouting.captureChannelA,
         captureChannelB: activeRouting.captureChannelB
       })
-      const actualSampleRate = engineRef.current.getActualSampleRate()
       sttManagerRef.current?.updateRouting({
         languageA: activeRouting.sttLangA,
         languageB: activeRouting.sttLangB,
+        targetLanguageA: activeRouting.translationTargetA,
+        targetLanguageB: activeRouting.translationTargetB,
+        operatingMode,
         enableChannelA: activeRouting.captureChannelA,
         enableChannelB: activeRouting.captureChannelB,
         endpointingMs: resolveEndpointingMs(latencyMode),
-        sampleRate: actualSampleRate
+        sampleRate: TARGET_STREAM_SAMPLE_RATE
       })
       sttManagerRef.current?.start()
       setIsAudioActive(true)
@@ -1043,6 +1145,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [
     authSession,
+    operatingMode,
     noiseSuppression,
     echoCancellation,
     gainChannelA,
