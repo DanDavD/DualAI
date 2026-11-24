@@ -64,6 +64,11 @@ export interface TranslationCallbacks {
 export class SimulatedTranslationEngine {
   private activeTimer: ReturnType<typeof setInterval> | null = null
   private ttftTimer: ReturnType<typeof setTimeout> | null = null
+  private customGlossary: Record<string, string> = {}
+
+  public setCustomGlossary(glossary?: Record<string, string>): void {
+    this.customGlossary = glossary ? { ...glossary } : {}
+  }
 
   public async translateStream(
     utterance: TranscriptUtterance,
@@ -75,7 +80,7 @@ export class SimulatedTranslationEngine {
 
     const startTime = performance.now()
     const cleanSource = utterance.text.trim().toLowerCase()
-    
+
     // Retrieve domain-accurate translation or synthesize fluent clinical/verbatim translation
     let targetTranslation = DOMAIN_TRANSLATION_MAP[cleanSource]
 
@@ -103,6 +108,16 @@ export class SimulatedTranslationEngine {
         targetTranslation = `[Jurídico] ${targetTranslation.charAt(0).toUpperCase() + targetTranslation.slice(1)}.`
       } else {
         targetTranslation = `Traducción: ${utterance.text}`
+      }
+    }
+
+    // Apply custom glossary overrides if source terms match
+    for (const [srcTerm, tgtTerm] of Object.entries(this.customGlossary)) {
+      if (!srcTerm || !tgtTerm) continue
+      const escaped = srcTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const regex = new RegExp(`\\b${escaped}\\b`, 'gi')
+      if (regex.test(utterance.text) && !targetTranslation.toLowerCase().includes(tgtTerm.toLowerCase())) {
+        targetTranslation = targetTranslation.replace(regex, tgtTerm)
       }
     }
 

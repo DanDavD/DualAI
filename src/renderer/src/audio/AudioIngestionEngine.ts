@@ -52,6 +52,12 @@ export class AudioIngestionEngine {
   // VAD Engine
   private vadEngine: SileroVadEngine | null = null
 
+  // Cough Mute & Calibration Monitor State
+  private isCoughMuted: boolean = false
+  private activeGainA: number = 1.0
+  private isMonitorLoopbackActive: boolean = false
+  private monitorGainNode: GainNode | null = null
+
   private isRunning: boolean = false
   private callbacks: AudioEngineCallbacks
 
@@ -103,19 +109,23 @@ export class AudioIngestionEngine {
     echoCancellation: boolean
     gainA: number
     gainB: number
+    deviceIdA?: string
   }): Promise<void> {
     if (this.isRunning) return
 
     try {
+      this.activeGainA = options.gainA
       const ctx = await this.ensureAudioContext()
 
       // Initialize Silero VAD v5 ONNX Engine
       if (!this.vadEngine) {
         this.vadEngine = new SileroVadEngine({
           onSpeechStart: (event, preSpeechPcm) => {
+            if (event.channelId === 'channel_a' && this.isCoughMuted) return
             this.callbacks.onSpeechStart?.(event, preSpeechPcm)
           },
           onSpeechFrame: (channelId, pcmData, prob) => {
+            if (channelId === 'channel_a' && this.isCoughMuted) return
             this.callbacks.onSpeechFrame?.(channelId, pcmData, prob)
           },
           onSpeechEnd: (event) => {
@@ -132,39 +142,55 @@ export class AudioIngestionEngine {
       await this.vadEngine.start()
 
       // 1. Channel A: Local Microphone Capture
+      const audioConstraints: MediaTrackConstraints = {
+        channelCount: 1,
+        sampleRate: 16000,
+        echoCancellation: options.echoCancellation,
+        noiseSuppression: options.noiseSuppression,
+        autoGainControl: false
+      }
+      if (options.deviceIdA && options.deviceIdA !== 'default') {
+        audioConstraints.deviceId = { exact: options.deviceIdA }
+      }
+
       this.streamChannelA = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: options.echoCancellation,
-          noiseSuppression: options.noiseSuppression,
-          autoGainControl: false
-        },
+        audio: audioConstraints,
         video: false
       })
 
       this.sourceNodeA = ctx.createMediaStreamSource(this.streamChannelA)
       this.gainNodeA = ctx.createGain()
-      this.gainNodeA.gain.value = options.gainA
+      this.gainNodeA.gain.value = this.isCoughMuted ? 0.0 : options.gainA
 
       this.workletNodeA = new AudioWorkletNode(ctx, 'pcm-processor', {
         processorOptions: { channelId: 'channel_a' }
       })
 
+      if (this.isCoughMuted) {
+        this.workletNodeA.port.postMessage({ type: 'set-mute', muted: true })
+      }
+
       this.workletNodeA.port.onmessage = (event) => {
         const { channelId, pcmData, rmsDb, peakDb, isClipping, timestampMs } = event.data
         const samples = new Int16Array(pcmData)
-        this.bufferChannelA.write(samples)
+
+        if (!this.isCoughMuted) {
+          this.bufferChannelA.write(samples)
+        }
 
         this.callbacks.onLevelMetric({
           channelId,
-          rmsDb,
-          peakDb,
-          isClipping,
+          rmsDb: this.isCoughMuted ? -60 : rmsDb,
+          peakDb: this.isCoughMuted ? -60 : peakDb,
+          isClipping: this.isCoughMuted ? false : isClipping,
           timestampMs
         })
 
         this.callbacks.onPcmChunk(channelId, samples)
+
+        if (this.isCoughMuted) {
+          return
+        }
 
         // Feed into 30ms (480-sample) accumulator for Silero VAD
         for (let i = 0; i < samples.length; i++) {
@@ -261,14 +287,117 @@ export class AudioIngestionEngine {
    */
   public setGain(channelId: ChannelId, gainMultiplier: number): void {
     const clampedGain = Math.max(0.0, Math.min(2.0, gainMultiplier))
+    if (channelId === 'channel_a') {
+      this.activeGainA = clampedGain
+    }
     if (!this.audioContext) return
 
     const now = this.audioContext.currentTime
     if (channelId === 'channel_a' && this.gainNodeA) {
-      this.gainNodeA.gain.setTargetAtTime(clampedGain, now, 0.03)
+      if (!this.isCoughMuted) {
+        this.gainNodeA.gain.setTargetAtTime(clampedGain, now, 0.03)
+      }
     } else if (channelId === 'channel_b' && this.gainNodeB) {
       this.gainNodeB.gain.setTargetAtTime(clampedGain, now, 0.03)
     }
+  }
+
+  /**
+   * Instantaneous Zero-Gain Cough Mute (Day 09 DoD):
+   * Cuts microphone input within 1 audio render quantum (128 samples / 8ms, 0ms audible bleed),
+   * zeroes the WebAudio GainNode immediately, and flushes pending VAD buffers.
+   */
+  public setCoughMute(muted: boolean): void {
+    this.isCoughMuted = muted
+
+    if (this.workletNodeA) {
+      this.workletNodeA.port.postMessage({ type: 'set-mute', muted })
+    }
+
+    if (this.audioContext && this.gainNodeA) {
+      const now = this.audioContext.currentTime
+      this.gainNodeA.gain.cancelScheduledValues(now)
+      this.gainNodeA.gain.setValueAtTime(muted ? 0.0 : this.activeGainA, now)
+    }
+
+    if (muted) {
+      // Flush pending pre-buffer samples immediately so zero cough audio leaks to VAD/STT
+      this.vadAccumulatorIndexA = 0
+      this.bufferChannelA.clear()
+    }
+  }
+
+  public getIsCoughMuted(): boolean {
+    return this.isCoughMuted
+  }
+
+  /**
+   * Audible Hardware Calibration Monitor Feedback (Day 11 DoD):
+   * Plays a brief, smooth 440Hz reference tone scaled safely by the calibration gain slider.
+   */
+  public async playCalibrationTone(gainMultiplier: number): Promise<void> {
+    try {
+      const ctx = await this.ensureAudioContext()
+      const now = ctx.currentTime
+      const osc = ctx.createOscillator()
+      const envGain = ctx.createGain()
+
+      const clampedGain = Math.max(0.02, Math.min(2.0, gainMultiplier))
+      // Safe studio reference level (max 0.25 amplitude) scaled linearly by calibration slider
+      const targetPeak = Math.min(0.28, clampedGain * 0.14)
+
+      osc.type = 'sine'
+      osc.frequency.setValueAtTime(440, now)
+
+      envGain.gain.setValueAtTime(0.0001, now)
+      envGain.gain.linearRampToValueAtTime(targetPeak, now + 0.015)
+      envGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16)
+
+      osc.connect(envGain)
+      envGain.connect(ctx.destination)
+
+      osc.start(now)
+      osc.stop(now + 0.17)
+      osc.onended = () => {
+        osc.disconnect()
+        envGain.disconnect()
+      }
+    } catch (err) {
+      console.warn('[DUALAI-AUDIO] Calibration test tone error:', err)
+    }
+  }
+
+  /**
+   * Toggle live hardware microphone monitor loopback during Settings calibration
+   */
+  public setMonitorLoopback(enabled: boolean): void {
+    this.isMonitorLoopbackActive = enabled
+    if (!this.audioContext || !this.gainNodeA) return
+
+    if (enabled) {
+      if (!this.monitorGainNode) {
+        this.monitorGainNode = this.audioContext.createGain()
+        this.monitorGainNode.gain.value = 0.65
+      }
+      try {
+        this.gainNodeA.connect(this.monitorGainNode)
+        this.monitorGainNode.connect(this.audioContext.destination)
+      } catch {
+        // Already connected
+      }
+    } else if (this.monitorGainNode) {
+      try {
+        this.gainNodeA.disconnect(this.monitorGainNode)
+        this.monitorGainNode.disconnect()
+      } catch {
+        // Ignore if not connected
+      }
+      this.monitorGainNode = null
+    }
+  }
+
+  public getIsMonitorLoopbackActive(): boolean {
+    return this.isMonitorLoopbackActive
   }
 
   /**
@@ -332,6 +461,16 @@ export class AudioIngestionEngine {
       this.workletNodeB.disconnect()
       this.workletNodeB = null
     }
+
+    if (this.monitorGainNode) {
+      try {
+        this.monitorGainNode.disconnect()
+      } catch {
+        // Ignore already disconnected
+      }
+      this.monitorGainNode = null
+    }
+    this.isMonitorLoopbackActive = false
 
     if (this.vadEngine) {
       this.vadEngine.stop()

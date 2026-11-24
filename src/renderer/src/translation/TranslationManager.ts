@@ -31,21 +31,37 @@ export class TranslationManager {
   private simulatedEngine: SimulatedTranslationEngine
   private dialogueHistory: DialogueTurn[] = []
   private maxHistoryTurns: number = 20
+  private customGlossary: Record<string, string> = {}
 
   constructor(callbacks: TranslationManagerCallbacks, options?: { apiKey?: string; customGlossary?: Record<string, string> }) {
     this.callbacks = callbacks
     this.apiKey = options?.apiKey || import.meta.env.VITE_GEMINI_API_KEY
     this.simulatedEngine = new SimulatedTranslationEngine()
 
-    if (this.apiKey && this.apiKey.trim().length > 10 && this.apiKey !== 'your_gemini_api_key_here') {
-      this.geminiEngine = new GeminiTranslationEngine(this.apiKey, options?.customGlossary)
+    if (options?.customGlossary) {
+      this.customGlossary = { ...options.customGlossary }
+      this.simulatedEngine.setCustomGlossary(this.customGlossary)
     }
+
+    if (this.apiKey && this.apiKey.trim().length > 10 && this.apiKey !== 'your_gemini_api_key_here') {
+      this.geminiEngine = new GeminiTranslationEngine(this.apiKey, this.customGlossary)
+    }
+  }
+
+  public setCustomGlossary(glossary: Record<string, string>): void {
+    this.customGlossary = { ...glossary }
+    this.geminiEngine?.setCustomGlossary(this.customGlossary)
+    this.simulatedEngine.setCustomGlossary(this.customGlossary)
+  }
+
+  public getCustomGlossary(): Record<string, string> {
+    return { ...this.customGlossary }
   }
 
   public setApiKey(key: string): void {
     this.apiKey = key
     if (key && key.trim().length > 10 && key !== 'your_gemini_api_key_here') {
-      this.geminiEngine = new GeminiTranslationEngine(key)
+      this.geminiEngine = new GeminiTranslationEngine(key, this.customGlossary)
     } else {
       this.geminiEngine = null
     }

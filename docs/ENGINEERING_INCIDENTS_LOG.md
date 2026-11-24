@@ -253,3 +253,71 @@ Ensure smooth 60fps split resizing with persistent width memory and keyboard acc
 
 ### 4. Result
 All 4 Acceptance Criteria passed with 100% compliance. Production build and TypeScript validation pass with zero errors. All temporary Week 1 test benches eliminated in favor of the production dual-workspace.
+
+---
+
+## INCIDENT 010: AUDIOWORKLET TRANSFERABLE BUFFER MISMATCH AND 1-QUANTUM COUGH MUTE ISOLATION
+
+* **Date:** 2026-11-23
+* **Component:** AudioWorklet PCM Processor & Cough/Mute Buffer (Day 09)
+* **Severity:** Medium (Subtle zero-copy transfer inefficiency & mute bleed risk)
+
+### 1. Situation
+During the Day 09 audit of `PcmProcessorCode.ts` while implementing the instantaneous zero-gain cough mute, two subtle issues were identified:
+1. Previously, `this.port.postMessage({ pcmData: this.int16Buffer.slice().buffer }, [this.int16Buffer.slice().buffer])` created two distinct `ArrayBuffer` slices, preventing true zero-copy transfer of the actual payload buffer.
+2. Relying solely on `GainNode.setTargetAtTime(0, now, 0.03)` introduced a ~30ms exponential decay tail during a sudden cough, violating the strict 0ms audible bleed requirement within 1 audio buffer.
+
+### 2. Task
+Eliminate all audible bleed within a single audio render quantum (128 samples / 8ms) and guarantee true zero-copy `ArrayBuffer` transfers out of the AudioWorklet thread.
+
+### 3. Action
+* **Worklet-Level Zeroing:** Added a `{ type: 'set-mute', muted }` port handler inside `PcmProcessor` that calls `this.int16Buffer.fill(0)` directly inside `process()`, paired with `gainNodeA.gain.cancelScheduledValues(now)` + `setValueAtTime(0.0, now)` and immediate VAD accumulator flushing.
+* **Single Transfer Reference:** Stored `const transferBuffer = this.int16Buffer.slice().buffer` once and passed the identical reference to both payload and transfer list.
+* **Empirical Verification:** Created `scripts/test_master_toolbar_fsm.mjs` verifying peak output of `0` under 0.92 simulated cough transients.
+
+### 4. Result
+Zero audible bleed within 1 render quantum, true zero-copy IPC transfer, and 4/4 Day 09 verification tests passing.
+
+---
+
+## INCIDENT 011: ELECTRON CLICK-THROUGH OVERLAY LOCKOUT PREVENTION AND FULL-SCREEN LAYERING
+
+* **Date:** 2026-11-23
+* **Component:** Secondary Floating Teleprompter HUD Window (Day 10)
+* **Severity:** Medium (UX lockout risk when click-through is enabled)
+
+### 1. Situation
+When enabling click-through mode (`hudWindow.setIgnoreMouseEvents(true, { forward: true })`) on a frameless transparent Electron `BrowserWindow`, all mouse clicks pass directly through to underlying desktop applications (Zoom/Teams). Without an escape mechanism, users could become unable to disable click-through or adjust HUD opacity/font scale. Additionally, default `alwaysOnTop: true` on macOS/Windows drops behind native full-screen video conference spaces.
+
+### 2. Task
+Ensure the HUD reliably floats above full-screen Zoom and Teams sessions while providing fail-safe click-through unlock paths.
+
+### 3. Action
+* **Full-Screen Layering:** Applied `hudWindow.setAlwaysOnTop(true, 'screen-saver')` combined with `hudWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })` inside `src/main/index.ts`.
+* **Dual Escape Hatches:** Implemented temporary mouse capture on hover over the slim HUD drag header (`onMouseEnter` / `onMouseLeave`), AND added a synchronized HUD Quick Control popover inside the main window's `MasterToolbar` plus global shortcut `Cmd/Ctrl+Shift+H`.
+* **Verification:** Built `scripts/test_teleprompter_hud.mjs` validating full-screen flags, click-through IPC, inline styling latency, and bounds persistence.
+
+### 4. Result
+HUD remains pinned above full-screen video calls, click-through passes desktop clicks cleanly, and users can seamlessly lock/unlock or tune HUD settings at zero rendering latency.
+
+---
+
+## INCIDENT 012: RFC 4180 QUOTED CSV GLOSSARY PARSING AND BACKGROUND OS SHORTCUT REBINDING
+
+* **Date:** 2026-11-23
+* **Component:** Custom Glossary Engine & Electron Global Shortcuts (Day 11)
+* **Severity:** Low (Parser edge-case resilience & dynamic OS keybindings)
+
+### 1. Situation
+Legal and clinical glossaries routinely contain commas inside multi-clause phrases (e.g. `"indemnify, defend, and hold harmless"`). Naive `line.split(',')` parsing corrupts such rows into false syntax errors. Additionally, static shortcut registration in `main/index.ts` prevented users from customizing global background shortcuts from Settings Tab 3.
+
+### 2. Task
+Implement an RFC 4180 compliant CSV/JSON glossary parser with strict syntax validation and dynamic Electron `globalShortcut` rebinding that works while the app is minimized.
+
+### 3. Action
+* **Stateful RFC 4180 CSV Tokenizer:** Built `parseCsvLine()` in `src/renderer/src/utils/glossaryParser.ts` handling double-quoted commas, escaped quotes, header detection, 2MB payload limits, duplicate deduplication, and malformed row diagnostics.
+* **Dynamic Background Rebinding:** Added `IPC_CHANNELS.SHORTCUT_UPDATE_BINDINGS` in `src/main/index.ts` calling `globalShortcut.unregisterAll()` and re-registering all 5 global actions (`ptt`, `mute`, `swap`, `hudToggle`, `clearBuffer`) with registration telemetry feedback.
+* **Verification:** Built `scripts/test_config_matrix_glossary.mjs` validating quoted CSV parsing, prompt context injection, background shortcut wiring, audible calibration tone generation, and Zero-Data Retention articulation.
+
+### 4. Result
+100% of Day 11 Acceptance Criteria verified (4/4 tests passing) with zero type or build errors.

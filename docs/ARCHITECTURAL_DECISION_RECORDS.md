@@ -18,6 +18,9 @@
 * [ADR-007: Bidirectional WebSocket Streaming Speech-to-Text & Interim Token Pipeline](#adr-007-bidirectional-websocket-streaming-speech-to-text)
 * [ADR-008: Streaming Domain Translation Inference with Gemini 2.0 Flash & Context Memory](#adr-008-streaming-domain-translation-inference)
 * [ADR-009: Zone 3 Resizable Dual-Pane Split Workspace & Virtualized Feed](#adr-009-zone-3-resizable-dual-pane-split-workspace)
+* [ADR-010: Zone 4 Master Toolbar, 1-Quantum Cough Mute & Pipeline State Machine](#adr-010-zone-4-master-toolbar-cough-mute-and-state-machine)
+* [ADR-011: Module 3 Frameless Transparent Teleprompter HUD Overlay](#adr-011-module-3-frameless-transparent-teleprompter-hud-overlay)
+* [ADR-012: Module 4 Configuration Matrix, Glossary Injection & Zero-Data Retention](#adr-012-module-4-configuration-matrix-glossary-injection-and-zero-data-retention)
 
 ---
 
@@ -258,3 +261,65 @@ We implement **Zone 3: Resizable Dual-Pane Split Workspace & Virtualized Feed**:
 ### Consequences
 * **Positive:** Complete elimination of temporary Week 1 test benches; clean, professional DAW interface; zero frame drops on large feeds; unmissable numbers and dosages; frictionless terminology registration.
 * **Negative:** Requires managing scroll event listeners and virtualization overscan offsets.
+
+---
+
+## ADR-010: ZONE 4 MASTER TOOLBAR, COUGH MUTE AND STATE MACHINE
+
+### Status
+Accepted
+
+### Context
+Live interpreters require an instantaneous physical/keyboard cough mute that cuts microphone transmission immediately without trailing speech artifacts leaking into VAD or cloud STT endpoints. Additionally, concurrent asynchronous pipelines (AudioWorklet, Silero VAD, WebSocket STT, Gemini streaming) can produce contradictory UI indicators unless governed by a single deterministic finite state machine.
+
+### Decision
+We implement a **two-layer instantaneous cough mute** paired with a **deterministic Master Pipeline Finite State Machine (`sessionStateMachine.ts`)** and **Zone 4 Master Toolbar (`MasterToolbar.tsx`)**:
+1. **1-Quantum AudioWorklet Mute Gate:** Toggling Spacebar (or `Cmd/Ctrl+Shift+M`) cancels pending `GainNode` ramps, sets gain to `0.0` at `currentTime`, posts `{ type: 'set-mute', muted: true }` to `PcmProcessor` (zeroing every sample in the 128-sample / 8ms render quantum), and flushes the VAD accumulator buffer immediately.
+2. **Deterministic Priority State Machine:** Resolves `idle`, `initializing`, `listening`, `transcribing`, `translating`, `muted`, `reconnecting`, and `error` strictly by priority so `muted` always supersedes speech telemetry.
+3. **DAW Transport Toolbar with Full Keyboard Roving Focus:** Implements Steel Blue (`START TRANSLATION`) / Solid Crimson (`STOP TRANSLATION`) transport controls, Spacebar cough mute pill, buffer latency readout, and ARIA `role="toolbar"` arrow-key navigation.
+
+### Consequences
+* **Positive:** Guaranteed 0ms audible bleed within a single audio buffer frame, unambiguous pipeline status readout, and 100% keyboard accessibility.
+* **Negative:** Requires coordinating mute state across both main renderer state and off-thread AudioWorklet messaging.
+
+---
+
+## ADR-011: MODULE 3 FRAMELESS TRANSPARENT TELEPROMPTER HUD OVERLAY
+
+### Status
+Accepted
+
+### Context
+Interpreters working in Zoom, Microsoft Teams, or Google Meet cannot constantly switch desktop windows to read live translations. They require a floating, distraction-free teleprompter that stays above full-screen video calls, scales typography cleanly, and permits clicking underlying meeting controls without obstruction.
+
+### Decision
+We implement a **secondary Electron `BrowserWindow` overlay (`TeleprompterHud.tsx`)** launched via `IPC_CHANNELS.HUD_OPEN`:
+1. **Full-Screen Top-Most Layering:** Configured with `frame: false`, `transparent: true`, `setAlwaysOnTop(true, 'screen-saver')`, and `setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })` so the HUD remains visible over full-screen Zoom/Teams windows without minimizing.
+2. **Zero-Latency Inline Styling:** Opacity (`0%` to `100%` solid zinc `rgba(9, 9, 11, alpha)`), Geist Mono font scale (`14px` to `48px`), and line limits (`2`, `4`, `6` sentences) apply directly via inline React styles with zero frame delay.
+3. **Safe Click-Through Toggle:** Invokes Electron `setIgnoreMouseEvents(enabled, { forward: true })`, paired with both a hover-release top grab bar and a remote HUD control popover inside the main window so users can never become locked out of click-through mode.
+4. **Coordinate & Preference Persistence:** Listens to `moved` and `resized` events in Electron Main, syncing bounds and HUD preferences to `localStorage`.
+
+### Consequences
+* **Positive:** Seamless over-call teleprompter workflow, zero obstruction during click-through, and persistent screen positioning across reboots.
+* **Negative:** Requires bidirectional IPC synchronization between main and secondary renderer processes.
+
+---
+
+## ADR-012: MODULE 4 CONFIGURATION MATRIX, GLOSSARY INJECTION AND ZERO-DATA RETENTION
+
+### Status
+Accepted
+
+### Context
+Hardware gain calibration, custom terminology glossaries, background OS shortcuts, and compliance disclosures must remain accessible without cluttering the clean Zone 3 interpretation workspace. Furthermore, medical and legal interpreters require explicit Zero-Data Retention (ZDR) assurances aligned with HIPAA and GDPR.
+
+### Decision
+We implement a **modular 4-tab Configuration Matrix Modal (`SettingsModal.tsx`)** and **RFC 4180 CSV / JSON Glossary Engine (`glossaryParser.ts`)**:
+1. **Tab 1 — Audio & Hardware:** Device enumeration, Channel A/B gain calibration sliders with audible 440Hz WebAudio reference tone feedback and live mic monitor loopback, RNNoise suppression, AEC, and Silero VAD sensitivity threshold.
+2. **Tab 2 — Translation & Domain:** Syntax-validating CSV/JSON glossary parser (2MB ceiling, quoted comma handling, deduplication) that injects terms live into `TranslationManager` (`GeminiTranslationEngine` prompt context + offline simulator).
+3. **Tab 3 — Global Keyboard Shortcuts:** Dynamic OS-level `globalShortcut` registration for PTT, Mute, Swap, HUD Toggle, and Clear Buffer so shortcuts execute reliably even when minimized in the background.
+4. **Tab 4 — Account & Compliance:** Visual quota gauge and explicit Zero-Data Retention (ZDR) compliance statement articulating volatile RAM audio buffers and zero model training guarantees.
+
+### Consequences
+* **Positive:** Keeps the primary dual-pane workspace 100% focused on interpretation while delivering enterprise hardware calibration, glossary accuracy, and regulatory transparency.
+* **Negative:** OS global shortcuts may conflict with platform-reserved bindings; mitigated via live registration status feedback and one-click default reset.
