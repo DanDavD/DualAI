@@ -37,6 +37,12 @@ export const DualPaneWorkspace: React.FC = () => {
     isAudioActive,
     startAudioEngine,
     stopAudioEngine,
+    loopbackStatus,
+    loopbackStatusMessage,
+    pipelineErrorMessage,
+    isGatewayAuthenticated,
+    openAccountModal,
+    openSettingsModal,
     utterances,
     interimTranscriptA,
     interimTranscriptB,
@@ -263,8 +269,37 @@ export const DualPaneWorkspace: React.FC = () => {
           </button>
         </div>
 
-        {/* Right Controls: Filters & Actions */}
-        <div className="flex items-center space-x-3">
+        {/* Right Controls: Live Engine Telemetry, Filters & Actions */}
+        <div className="flex items-center space-x-2.5">
+          <button
+            type="button"
+            onClick={openAccountModal}
+            className="hidden lg:flex items-center space-x-1.5 px-2 py-0.5 rounded border border-surface-border bg-surface-base text-[10px] text-text-secondary hover:border-accent-steel transition"
+            title="Zero-Trust Cloud Gateway Status & Interpretation Quota"
+          >
+            <span
+              className={
+                isGatewayAuthenticated ? 'text-accent-emerald font-bold' : 'text-accent-amber'
+              }
+            >
+              {isGatewayAuthenticated ? 'GATEWAY: ZERO-TRUST LIVE' : 'SIGN IN (1H FREE)'}
+            </span>
+            {loopbackStatus !== 'inactive' && (
+              <>
+                <span className="text-surface-border">|</span>
+                <span
+                  className={
+                    loopbackStatus === 'unavailable'
+                      ? 'text-accent-crimson font-bold'
+                      : 'text-accent-emerald'
+                  }
+                >
+                  LOOPBACK: {loopbackStatus === 'native_loopback' ? 'NATIVE' : loopbackStatus === 'virtual_device' ? 'VIRTUAL' : 'BLOCKED'}
+                </span>
+              </>
+            )}
+          </button>
+
           {/* Flagged Filter Toggle */}
           <button
             type="button"
@@ -293,6 +328,26 @@ export const DualPaneWorkspace: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Actionable System Audio Loopback / Pipeline Error Banner */}
+      {(pipelineErrorMessage || loopbackStatus === 'unavailable') && (
+        <div
+          role="alert"
+          className="flex items-center justify-between border-b border-accent-crimson/40 bg-accent-crimson/10 px-4 py-2 font-mono text-[11px] text-text-primary"
+        >
+          <span className="truncate pr-3">
+            <strong className="text-accent-crimson uppercase mr-2">Audio Pipeline Notice:</strong>
+            {pipelineErrorMessage || loopbackStatusMessage}
+          </span>
+          <button
+            type="button"
+            onClick={openSettingsModal}
+            className="shrink-0 rounded border border-accent-crimson/50 bg-surface-panel px-2.5 py-1 text-[10px] font-bold text-text-primary hover:bg-surface-active transition"
+          >
+            Open Audio Settings
+          </button>
+        </div>
+      )}
 
       {/* Pane Column Headers */}
       <div className="flex border-b border-surface-border bg-surface-base text-[11px] font-mono text-text-secondary select-none">

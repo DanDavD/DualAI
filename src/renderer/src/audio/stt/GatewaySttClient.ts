@@ -1,21 +1,21 @@
 /**
- * DUALAI - Deepgram Nova-2 WebSocket Streaming Client
- * Production bidirectional WebSocket client for sub-300ms continuous Speech-to-Text.
- * Handles binary linear16 PCM streaming, interim word event dispatch,
- * confidence scoring with low-confidence token tagging (< 0.75),
- * keepalive heartbeats, and exponential backoff automatic reconnection.
+ * DUALAI - Zero-Trust Gateway WebSocket STT Client
+ * Connects exclusively to the DualAI Cloud Gateway (/v1/stt) using the user's Bearer JWT.
+ * Zero upstream Deepgram API keys ever exist in this client or renderer bundle.
+ * Receives relayed interim/final transcript frames and authoritative server quota updates.
  */
 
 import { ChannelId } from '../../../../types/audio'
 import {
-  SttClientConfig,
   SttClientCallbacks,
+  SttClientConfig,
   SttConnectionState,
   TranscriptToken,
   TranscriptUtterance
 } from '../../../../types/stt'
+import { getGatewayWsUrl } from '../../services/gatewayAuthService'
 
-interface DeepgramWord {
+interface RelayedWord {
   word: string
   start: number
   end: number
@@ -23,30 +23,34 @@ interface DeepgramWord {
   punctuated_word?: string
 }
 
-interface DeepgramAlternative {
-  transcript: string
-  confidence: number
-  words: DeepgramWord[]
-}
-
-interface DeepgramChannel {
-  alternatives: DeepgramAlternative[]
-}
-
-interface DeepgramMessage {
+interface RelayedGatewayMessage {
   type?: string
-  channel_index?: number[]
+  code?: string
+  message?: string
+  remainingSeconds?: number
+  totalAllocatedSeconds?: number
   duration?: number
-  start?: number
   is_final?: boolean
   speech_final?: boolean
-  channel?: DeepgramChannel
+  channel?: {
+    alternatives?: Array<{
+      transcript: string
+      confidence: number
+      words: RelayedWord[]
+    }>
+  }
 }
 
-export class DeepgramStreamingClient {
+export interface GatewaySttExtraCallbacks {
+  onQuotaUpdate?: (remainingSeconds: number, totalAllocatedSeconds: number) => void
+  onQuotaExhausted?: (message: string) => void
+}
+
+export class GatewaySttClient {
   private channelId: ChannelId
   private config: SttClientConfig
-  private callbacks: SttClientCallbacks
+  private accessToken: string
+  private callbacks: SttClientCallbacks & GatewaySttExtraCallbacks
   private socket: WebSocket | null = null
   private connectionState: SttConnectionState = 'disconnected'
   private reconnectAttempts: number = 0
@@ -56,20 +60,29 @@ export class DeepgramStreamingClient {
   private currentUtteranceId: string = ''
   private isManuallyClosed: boolean = false
 
-  constructor(channelId: ChannelId, config: SttClientConfig, callbacks: SttClientCallbacks) {
+  constructor(
+    channelId: ChannelId,
+    config: SttClientConfig,
+    accessToken: string,
+    callbacks: SttClientCallbacks & GatewaySttExtraCallbacks
+  ) {
     this.channelId = channelId
     this.config = config
+    this.accessToken = accessToken
     this.callbacks = callbacks
   }
 
   public connect(): void {
-    if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) {
+    if (
+      this.socket &&
+      (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)
+    ) {
       return
     }
 
-    if (!this.config.apiKey) {
-      this.updateState('error', 'Missing Deepgram API key')
-      this.callbacks.onError(new Error('Deepgram API key is required for live WebSocket streaming'))
+    if (!this.accessToken) {
+      this.updateState('error', 'User authentication required')
+      this.callbacks.onError(new Error('Sign in required for live DualAI Cloud Gateway STT'))
       return
     }
 
@@ -77,22 +90,15 @@ export class DeepgramStreamingClient {
     this.updateState(this.reconnectAttempts > 0 ? 'reconnecting' : 'connecting')
 
     try {
-      const baseUrl = this.config.endpointUrl || 'wss://api.deepgram.com/v1/listen'
       const queryParams = new URLSearchParams({
-        model: this.config.model,
-        encoding: 'linear16',
-        sample_rate: this.config.sampleRate.toString(),
-        channels: '1',
-        interim_results: this.config.interimResults ? 'true' : 'false',
-        smart_format: this.config.smartFormat ? 'true' : 'false',
-        endpointing: '300',
-        language: this.config.language
+        language: this.config.language,
+        endpointing: String(this.config.endpointingMs ?? 250),
+        channel: this.channelId
       })
+      const wsUrl = `${getGatewayWsUrl()}/v1/stt?${queryParams.toString()}`
 
-      const wsUrl = `${baseUrl}?${queryParams.toString()}`
-
-      // Browser WebSocket authentication via subprotocol
-      this.socket = new WebSocket(wsUrl, ['token', this.config.apiKey])
+      // Authenticate via WebSocket subprotocol (never place JWT inside URL query string)
+      this.socket = new WebSocket(wsUrl, ['dualai-auth', this.accessToken])
       this.socket.binaryType = 'arraybuffer'
 
       this.socket.onopen = () => {
@@ -105,27 +111,39 @@ export class DeepgramStreamingClient {
         this.handleMessage(event)
       }
 
-      this.socket.onerror = (err) => {
-        console.warn(`[DUALAI-STT] Socket error on ${this.channelId}:`, err)
+      this.socket.onerror = () => {
+        // Handled cleanly via onclose state transition
       }
 
       this.socket.onclose = (event: CloseEvent) => {
         this.stopKeepalive()
         this.socket = null
 
-        if (this.isManuallyClosed) {
+        if (this.isManuallyClosed || event.code === 1000) {
           this.updateState('disconnected')
           return
         }
 
-        if (event.code === 1000) {
-          this.updateState('disconnected')
-        } else {
-          this.handleReconnection(`Socket closed unexpectedly (code: ${event.code})`)
+        // Authoritative server quota exhaustion or concurrency lock: do NOT auto-reconnect
+        if (event.code === 4002) {
+          this.updateState('error', 'Interpretation quota exhausted')
+          this.callbacks.onQuotaExhausted?.(
+            'Your interpretation hours have been used. Upgrade your plan to continue.'
+          )
+          return
         }
+        if (event.code === 4003) {
+          this.updateState('error', 'Concurrent session limit reached')
+          this.callbacks.onError(
+            new Error('Maximum concurrent sessions active on your account.')
+          )
+          return
+        }
+
+        this.handleReconnection(`Gateway socket closed (code: ${event.code})`)
       }
     } catch (err) {
-      this.handleReconnection(`Connection failure: ${(err as Error).message}`)
+      this.handleReconnection(`Gateway connection error: ${(err as Error).message}`)
     }
   }
 
@@ -139,18 +157,19 @@ export class DeepgramStreamingClient {
       this.currentUtteranceId = `${this.channelId}-${Date.now()}`
     }
 
-    // Direct binary transmission of PCM ArrayBuffer
     if (pcmData.buffer instanceof ArrayBuffer) {
-      this.socket.send(pcmData.buffer)
+      const payload =
+        pcmData.byteOffset === 0 && pcmData.byteLength === pcmData.buffer.byteLength
+          ? pcmData.buffer
+          : pcmData.buffer.slice(pcmData.byteOffset, pcmData.byteOffset + pcmData.byteLength)
+      this.socket.send(payload)
     }
   }
 
   public signalSpeechEnd(): void {
     this.speechStartTimestamp = 0
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      // Send finalize control frame to Deepgram
-      const finalizeMsg = JSON.stringify({ type: 'Finalize' })
-      this.socket.send(finalizeMsg)
+      this.socket.send(JSON.stringify({ type: 'Finalize' }))
     }
   }
 
@@ -158,21 +177,39 @@ export class DeepgramStreamingClient {
     if (typeof event.data !== 'string') return
 
     try {
-      const data: DeepgramMessage = JSON.parse(event.data)
-      const alternative = data.channel?.alternatives?.[0]
+      const data = JSON.parse(event.data) as RelayedGatewayMessage
 
-      if (!alternative || !alternative.transcript) {
+      if (data.type === 'dualai_quota') {
+        if (
+          typeof data.remainingSeconds === 'number' &&
+          typeof data.totalAllocatedSeconds === 'number'
+        ) {
+          this.callbacks.onQuotaUpdate?.(data.remainingSeconds, data.totalAllocatedSeconds)
+        }
         return
       }
 
+      if (data.type === 'dualai_error') {
+        if (data.code === 'QUOTA_EXHAUSTED') {
+          this.callbacks.onQuotaExhausted?.(
+            data.message || 'Interpretation quota exhausted. Upgrade your plan to continue.'
+          )
+        } else {
+          this.callbacks.onError(new Error(data.message || 'Gateway STT error'))
+        }
+        return
+      }
+
+      const alternative = data.channel?.alternatives?.[0]
+      if (!alternative || !alternative.transcript) return
+
       const now = performance.now()
-      const latencyMs = this.speechStartTimestamp > 0
-        ? Math.max(12, Math.round(now - this.speechStartTimestamp))
-        : 45
+      const latencyMs =
+        this.speechStartTimestamp > 0 ? Math.max(15, Math.round(now - this.speechStartTimestamp)) : 48
 
       const words = alternative.words || []
       const tokens: TranscriptToken[] = words.map((w, idx) => {
-        const conf = typeof w.confidence === 'number' ? w.confidence : 0.8
+        const conf = typeof w.confidence === 'number' ? w.confidence : 0.85
         const roundedConf = Math.round(conf * 100) / 100
         return {
           id: `${this.channelId}-${this.currentUtteranceId || Date.now()}-${idx}`,
@@ -200,7 +237,6 @@ export class DeepgramStreamingClient {
         receivedAtMs: Date.now()
       }
 
-      // Telemetry dispatch
       this.callbacks.onTelemetry({
         channelId: this.channelId,
         latencyMs,
@@ -217,33 +253,30 @@ export class DeepgramStreamingClient {
       } else {
         this.callbacks.onInterimTranscript(utterance)
       }
-    } catch (parseErr) {
-      console.warn(`[DUALAI-STT] Failed to parse WebSocket payload:`, parseErr)
+    } catch {
+      // Ignore malformed frames
     }
   }
 
   private handleReconnection(reason: string): void {
     if (this.isManuallyClosed) return
-
     if (this.reconnectAttempts >= this.config.reconnectMaxAttempts) {
-      this.updateState('error', `Max reconnection attempts (${this.config.reconnectMaxAttempts}) exceeded: ${reason}`)
-      this.callbacks.onError(new Error(`WebSocket connection failed after ${this.config.reconnectMaxAttempts} retries.`))
+      this.updateState('error', `Max reconnects exceeded: ${reason}`)
+      this.callbacks.onError(new Error(`Gateway WebSocket failed after retries: ${reason}`))
       return
     }
 
     this.reconnectAttempts++
-    // Exponential backoff with jitter
-    const delay = Math.min(
-      5000,
-      this.config.reconnectBaseDelayMs * Math.pow(1.5, this.reconnectAttempts - 1)
-    ) + Math.floor(Math.random() * 200)
+    const delay =
+      Math.min(5000, this.config.reconnectBaseDelayMs * Math.pow(1.5, this.reconnectAttempts - 1)) +
+      Math.floor(Math.random() * 200)
 
-    this.updateState('reconnecting', `Attempt ${this.reconnectAttempts}/${this.config.reconnectMaxAttempts} in ${delay}ms`)
-
+    this.updateState(
+      'reconnecting',
+      `Attempt ${this.reconnectAttempts}/${this.config.reconnectMaxAttempts}`
+    )
     this.clearReconnectTimer()
-    this.reconnectTimer = setTimeout(() => {
-      this.connect()
-    }, delay)
+    this.reconnectTimer = setTimeout(() => this.connect(), delay)
   }
 
   private startKeepalive(): void {
@@ -269,17 +302,9 @@ export class DeepgramStreamingClient {
     }
   }
 
-  private updateState(newState: SttConnectionState, details?: string): void {
-    this.connectionState = newState
-    this.callbacks.onConnectionStateChange(newState, details)
-  }
-
-  public getConnectionState(): SttConnectionState {
-    return this.connectionState
-  }
-
-  public getReconnectAttempts(): number {
-    return this.reconnectAttempts
+  private updateState(state: SttConnectionState, details?: string): void {
+    this.connectionState = state
+    this.callbacks.onConnectionStateChange(state, details)
   }
 
   public disconnect(): void {
@@ -292,7 +317,6 @@ export class DeepgramStreamingClient {
       this.socket.onmessage = null
       this.socket.onerror = null
       this.socket.onclose = null
-
       if (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING) {
         this.socket.close(1000, 'Session terminated')
       }

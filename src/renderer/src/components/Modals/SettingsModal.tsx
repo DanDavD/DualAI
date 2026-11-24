@@ -53,8 +53,12 @@ export const SettingsModal: React.FC = () => {
     echoCancellation,
     setEchoCancellation,
     selectedInputDeviceId,
+    selectedLoopbackDeviceId,
     selectedOutputDeviceId,
+    loopbackStatus,
+    loopbackStatusMessage,
     setSelectedInputDeviceId,
+    setSelectedLoopbackDeviceId,
     setSelectedOutputDeviceId,
     playHardwareCalibrationTone,
     isMonitorLoopbackActive,
@@ -70,8 +74,10 @@ export const SettingsModal: React.FC = () => {
     resetShortcutBindings,
     quotaTotalHours,
     quotaRemainingHours,
-    geminiApiKey,
-    setGeminiApiKey
+    authSession,
+    accountQuota,
+    isGatewayAuthenticated,
+    openAccountModal
   } = useSession()
 
   const [activeTab, setActiveTab] = useState<SettingsTabId>('audio')
@@ -288,7 +294,7 @@ export const SettingsModal: React.FC = () => {
                 </div>
 
                 {/* Device Selection */}
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-3 gap-3">
                   <label className="space-y-1.5">
                     <span className="block font-mono text-[11px] uppercase text-text-secondary">
                       Channel A Input (Microphone)
@@ -301,6 +307,26 @@ export const SettingsModal: React.FC = () => {
                       <option value="default">Default System Microphone</option>
                       {inputDevices.map((d) => (
                         <option key={d.deviceId} value={d.deviceId}>
+                          {d.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="space-y-1.5">
+                    <span className="block font-mono text-[11px] uppercase text-text-secondary">
+                      Channel B (System Loopback)
+                    </span>
+                    <select
+                      value={selectedLoopbackDeviceId}
+                      onChange={(e) => setSelectedLoopbackDeviceId(e.target.value)}
+                      className="w-full rounded border border-surface-border bg-surface-base px-2.5 py-2 font-mono text-xs text-text-primary outline-none focus:border-accent-amber"
+                    >
+                      <option value="system_loopback">
+                        Native OS System Audio Loopback (Recommended)
+                      </option>
+                      {inputDevices.map((d) => (
+                        <option key={`lb-${d.deviceId}`} value={d.deviceId}>
                           {d.label}
                         </option>
                       ))}
@@ -324,6 +350,28 @@ export const SettingsModal: React.FC = () => {
                       ))}
                     </select>
                   </label>
+                </div>
+
+                {/* Channel B System Loopback Telemetry Banner */}
+                <div className="flex items-center justify-between rounded border border-surface-border bg-surface-base px-3 py-2 font-mono text-[11px]">
+                  <span className="text-text-secondary">
+                    System Loopback Status:{' '}
+                    <strong
+                      className={
+                        loopbackStatus === 'native_loopback' || loopbackStatus === 'virtual_device'
+                          ? 'text-accent-emerald'
+                          : loopbackStatus === 'unavailable'
+                            ? 'text-accent-crimson'
+                            : 'text-text-muted'
+                      }
+                    >
+                      {loopbackStatus.toUpperCase()}
+                    </strong>
+                  </span>
+                  <span className="text-text-muted truncate max-w-[420px]">
+                    {loopbackStatusMessage ||
+                      'Uses Electron native CoreAudio/WASAPI loopback or a selected virtual driver (BlackHole / VB-Cable).'}
+                  </span>
                 </div>
 
                 {/* Hardware Gain Calibration Sliders with Audible Monitor Feedback */}
@@ -491,19 +539,40 @@ export const SettingsModal: React.FC = () => {
                   </p>
                 </div>
 
-                {/* Local API Key Configuration */}
-                <div className="rounded-lg border border-surface-border bg-surface-base p-3.5 space-y-2">
-                  <label className="flex items-center space-x-1.5 font-mono text-[11px] font-semibold text-text-secondary">
-                    <Key className="h-3.5 w-3.5 text-accent-steel" />
-                    <span>Gemini 2.0 Flash API Key (Stored Locally Only)</span>
-                  </label>
-                  <input
-                    type="password"
-                    value={geminiApiKey}
-                    onChange={(e) => setGeminiApiKey(e.target.value)}
-                    placeholder="AIza... (leave empty for local offline domain simulator)"
-                    className="w-full rounded border border-surface-border bg-surface-panel px-3 py-1.5 font-mono text-xs text-text-primary outline-none focus:border-accent-steel"
-                  />
+                {/* Zero-Trust Managed Cloud Gateway Status (Zero Client API Keys) */}
+                <div className="flex items-center justify-between rounded-lg border border-surface-border bg-surface-base p-4">
+                  <div className="space-y-1">
+                    <div className="flex items-center space-x-2">
+                      <Key className="h-3.5 w-3.5 text-accent-emerald" />
+                      <span className="font-mono text-xs font-semibold text-text-primary">
+                        Zero-Trust Managed AI Gateway
+                      </span>
+                      <span
+                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${
+                          isGatewayAuthenticated
+                            ? 'bg-accent-emerald/20 text-accent-emerald'
+                            : 'bg-surface-panel text-accent-amber'
+                        }`}
+                      >
+                        {isGatewayAuthenticated ? 'AUTHENTICATED (LIVE)' : 'SIGN IN FOR 1H FREE'}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-text-muted">
+                      {isGatewayAuthenticated
+                        ? `Signed in as ${authSession?.user.email}. Plan: ${accountQuota?.planId.toUpperCase() || 'FREE_TIER'}. Zero provider API keys exist on this device.`
+                        : 'End users never configure API keys. Sign in to activate your server-protected 1-hour Free Tier.'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      closeSettingsModal()
+                      openAccountModal()
+                    }}
+                    className="shrink-0 rounded bg-accent-steel px-3 py-1.5 font-mono text-[11px] font-bold text-white hover:bg-blue-700 transition"
+                  >
+                    {isGatewayAuthenticated ? 'Manage Plan' : 'Sign In (1h Free)'}
+                  </button>
                 </div>
 
                 {/* CSV / JSON Upload & Validation Zone */}

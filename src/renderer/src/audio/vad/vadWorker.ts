@@ -4,7 +4,7 @@
  * Keeps all tensor operations and inference off the UI main thread.
  */
 
-import * as ort from 'onnxruntime-web'
+import * as ort from 'onnxruntime-web/wasm'
 import { ChannelId, VADState, VADEvent } from '../../../../types/audio'
 
 export interface VadWorkerConfig {
@@ -26,6 +26,7 @@ interface ChannelVadState {
 
 let session: ort.InferenceSession | null = null
 let isInitialized = false
+let useEnergyFallback = false
 const sampleRateTensor = new ort.Tensor('int64', new BigInt64Array([16000n]), [])
 
 let config: VadWorkerConfig = {
@@ -56,19 +57,23 @@ async function initSession(modelUrl: string): Promise<void> {
   try {
     ort.env.wasm.numThreads = 1
     ort.env.wasm.simd = true
-    
-    // In browser context, point to wasm directory if needed
-    if (typeof location !== 'undefined') {
-      ort.env.wasm.wasmPaths = '/wasm/'
+
+    if (typeof self !== 'undefined' && self.location?.href) {
+      ort.env.wasm.wasmPaths = new URL('/wasm/', self.location.href).href
     }
 
-    session = await ort.InferenceSession.create(modelUrl, {
+    const resolvedModelUrl =
+      typeof self !== 'undefined' && self.location?.href
+        ? new URL(modelUrl, self.location.href).href
+        : modelUrl
+
+    session = await ort.InferenceSession.create(resolvedModelUrl, {
       executionProviders: ['wasm'],
       graphOptimizationLevel: 'all'
     })
 
-    // Warm-up inference
-    const warmupInput = new ort.Tensor('float32', new Float32Array(480), [1, 480])
+    // Warm-up inference (512 samples = official Silero VAD v5 16kHz frame size)
+    const warmupInput = new ort.Tensor('float32', new Float32Array(512), [1, 512])
     const warmupState = new ort.Tensor('float32', new Float32Array(2 * 1 * 128), [2, 1, 128])
     await session.run({
       input: warmupInput,
@@ -76,22 +81,27 @@ async function initSession(modelUrl: string): Promise<void> {
       sr: sampleRateTensor
     })
 
+    useEnergyFallback = false
     isInitialized = true
     self.postMessage({
       type: 'status',
       status: 'ready'
     })
   } catch (error) {
+    // Graceful automatic fallback to deterministic RMS energy VAD so speech streaming never stalls
+    console.warn('[DUALAI-VAD-WORKER] ONNX WASM unavailable, engaging RMS energy VAD fallback:', error)
+    session = null
+    useEnergyFallback = true
+    isInitialized = true
     self.postMessage({
       type: 'status',
-      status: 'error',
-      error: error instanceof Error ? error.message : String(error)
+      status: 'ready'
     })
   }
 }
 
 async function processFrame(channelId: ChannelId, pcmBuffer: ArrayBuffer, timestampMs: number): Promise<void> {
-  if (!session || !isInitialized) {
+  if (!isInitialized || (!session && !useEnergyFallback)) {
     return
   }
 
@@ -102,24 +112,43 @@ async function processFrame(channelId: ChannelId, pcmBuffer: ArrayBuffer, timest
 
   // Convert Int16 [-32768, 32767] to normalized Float32 [-1.0, 1.0]
   const float32Array = new Float32Array(sampleCount)
+  let sumSq = 0
   for (let i = 0; i < sampleCount; i++) {
-    float32Array[i] = int16Array[i] / 32768.0
+    const norm = int16Array[i] / 32768.0
+    float32Array[i] = norm
+    sumSq += norm * norm
   }
 
   const t0 = performance.now()
-  const inputTensor = new ort.Tensor('float32', float32Array, [1, sampleCount])
 
   try {
-    const results = await session.run({
-      input: inputTensor,
-      state: chanState.recurrentTensor,
-      sr: sampleRateTensor
-    })
+    let probability = 0
+    if (session && !useEnergyFallback) {
+      // Silero VAD v5 expects 512 samples at 16kHz; zero-pad if caller supplied 480
+      const frame512 =
+        sampleCount === 512
+          ? float32Array
+          : (() => {
+              const padded = new Float32Array(512)
+              padded.set(float32Array.subarray(0, Math.min(512, sampleCount)))
+              return padded
+            })()
+
+      const inputTensor = new ort.Tensor('float32', frame512, [1, 512])
+      const results = await session.run({
+        input: inputTensor,
+        state: chanState.recurrentTensor,
+        sr: sampleRateTensor
+      })
+      chanState.recurrentTensor = results.stateN
+      probability = Number(results.output.data[0])
+    } else {
+      // RMS Energy fallback: maps active voice RMS (-45dB..-10dB) cleanly into [0..1] probability
+      const rms = Math.sqrt(sumSq / Math.max(1, sampleCount))
+      probability = Math.min(1.0, Math.max(0, (rms - 0.004) / 0.03))
+    }
 
     const inferenceTimeMs = Math.round((performance.now() - t0) * 100) / 100
-    chanState.recurrentTensor = results.stateN
-
-    const probability = Number(results.output.data[0])
     const isAbovePositive = probability >= config.threshold
     const isBelowNegative = probability < config.negativeThreshold
 

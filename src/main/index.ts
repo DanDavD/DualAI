@@ -5,8 +5,11 @@ import {
   ipcMain,
   globalShortcut,
   desktopCapturer,
-  screen
+  screen,
+  session,
+  safeStorage
 } from 'electron'
+import fs from 'node:fs'
 import { join } from 'path'
 import {
   IPC_CHANNELS,
@@ -21,6 +24,15 @@ import {
   DEFAULT_SHORTCUT_BINDINGS,
   ShortcutActionId
 } from '../types/settings'
+
+// Enable native macOS CoreAudio Process Tap & ScreenCaptureKit system audio loopback
+// in Electron 45+ before Chromium initializes audio/media subsystems.
+if (process.platform === 'darwin') {
+  app.commandLine.appendSwitch(
+    'enable-features',
+    'MacCatapLoopbackAudioForScreenShare,MacSckSystemAudioLoopbackOverride'
+  )
+}
 
 let mainWindow: BrowserWindow | null = null
 let hudWindow: BrowserWindow | null = null
@@ -37,6 +49,39 @@ function sendToHud(channel: string, ...args: unknown[]): void {
   }
 }
 
+function getSessionVaultPath(): string {
+  return join(app.getPath('userData'), 'dualai-session.vault')
+}
+
+function hardenBrowserWindow(win: BrowserWindow): void {
+  // Prevent untrusted navigation out of the Electron app origin
+  win.webContents.on('will-navigate', (event, targetUrl) => {
+    const devUrl = process.env['ELECTRON_RENDERER_URL']
+    const isAllowed =
+      targetUrl.startsWith('file://') || (devUrl ? targetUrl.startsWith(devUrl) : false)
+    if (!isAllowed) {
+      event.preventDefault()
+    }
+  })
+
+  // Lock down DevTools in packaged production builds
+  if (app.isPackaged) {
+    win.webContents.on('devtools-opened', () => {
+      win.webContents.closeDevTools()
+    })
+    win.webContents.on('before-input-event', (event, input) => {
+      const isDevToolsShortcut =
+        input.key === 'F12' ||
+        ((input.control || input.meta) &&
+          (input.shift || input.alt) &&
+          input.key.toLowerCase() === 'i')
+      if (isDevToolsShortcut) {
+        event.preventDefault()
+      }
+    })
+  }
+}
+
 function createMainWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1180,
@@ -49,10 +94,15 @@ function createMainWindow(): void {
     backgroundColor: '#09090b',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false,
-      contextIsolation: true
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true,
+      allowRunningInsecureContent: false
     }
   })
+
+  hardenBrowserWindow(mainWindow)
 
   mainWindow.on('ready-to-show', () => {
     mainWindow?.show()
@@ -123,10 +173,15 @@ function createHudWindow(initialBounds?: HudBounds): BrowserWindow {
     backgroundColor: '#00000000',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false,
-      contextIsolation: true
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true,
+      allowRunningInsecureContent: false
     }
   })
+
+  hardenBrowserWindow(hudWindow)
 
   // Guarantee HUD floats above full-screen Zoom, Teams, and Meet windows without minimizing
   hudWindow.setAlwaysOnTop(true, 'screen-saver')
@@ -308,9 +363,137 @@ function registerIpcHandlers(): void {
       return registerGlobalShortcuts(bindings)
     }
   )
+
+  // Zero-Trust OS Keychain Encrypted Session Vault (Electron safeStorage)
+  ipcMain.handle(
+    IPC_CHANNELS.AUTH_STORE_SESSION,
+    async (_event, serializedSession: string): Promise<boolean> => {
+      try {
+        if (!safeStorage.isEncryptionAvailable()) {
+          return false
+        }
+        const encrypted = safeStorage.encryptString(serializedSession)
+        fs.writeFileSync(getSessionVaultPath(), encrypted, { mode: 0o600 })
+        return true
+      } catch {
+        return false
+      }
+    }
+  )
+
+  ipcMain.handle(IPC_CHANNELS.AUTH_LOAD_SESSION, async (): Promise<string | null> => {
+    try {
+      const vaultPath = getSessionVaultPath()
+      if (!fs.existsSync(vaultPath) || !safeStorage.isEncryptionAvailable()) {
+        return null
+      }
+      const encrypted = fs.readFileSync(vaultPath)
+      return safeStorage.decryptString(encrypted)
+    } catch {
+      return null
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.AUTH_CLEAR_SESSION, async (): Promise<boolean> => {
+    try {
+      const vaultPath = getSessionVaultPath()
+      if (fs.existsSync(vaultPath)) {
+        fs.unlinkSync(vaultPath)
+      }
+      return true
+    } catch {
+      return false
+    }
+  })
+}
+
+/**
+ * Enforce strict Content-Security-Policy (CSP) blocking unauthorized external origins.
+ * Upstream provider APIs (Deepgram, Google Gemini) are intentionally excluded so the
+ * desktop renderer can ONLY communicate with the Zero-Trust DualAI Gateway and Supabase Auth.
+ */
+function registerSecurityHeaders(): void {
+  const isDev = Boolean(process.env['ELECTRON_RENDERER_URL'])
+  const connectSources = isDev
+    ? "'self' http://127.0.0.1:8787 ws://127.0.0.1:8787 http://localhost:8787 ws://localhost:8787 ws://localhost:5173 https://*.supabase.co blob: data:"
+    : "'self' https://*.dualai.app wss://*.dualai.app https://*.supabase.co blob: data:"
+
+  const scriptSources = isDev
+    ? "'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:"
+    : "'self' 'wasm-unsafe-eval' blob:"
+
+  const cspHeader = [
+    "default-src 'self'",
+    `script-src ${scriptSources}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "worker-src 'self' blob:",
+    `connect-src ${connectSources}`,
+    "object-src 'none'",
+    "frame-ancestors 'none'"
+  ].join('; ')
+
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [cspHeader]
+      }
+    })
+  })
+}
+
+/**
+ * Configure Chromium media permissions and native system audio loopback handler
+ * for navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }).
+ * Supports Windows WASAPI loopback and macOS CoreAudio Tap / ScreenCaptureKit loopback.
+ */
+function registerMediaAndLoopbackHandlers(): void {
+  const defaultSes = session.defaultSession
+
+  defaultSes.setPermissionCheckHandler((_webContents, permission) => {
+    if (permission === 'media' || permission === 'display-capture') {
+      return true
+    }
+    return false
+  })
+
+  defaultSes.setPermissionRequestHandler((_webContents, permission, callback) => {
+    if (permission === 'media' || permission === 'display-capture') {
+      callback(true)
+    } else {
+      callback(false)
+    }
+  })
+
+  defaultSes.setDisplayMediaRequestHandler(async (_request, callback) => {
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: { width: 1, height: 1 }
+      })
+      const primaryScreen = sources[0]
+
+      if (!primaryScreen) {
+        callback({})
+        return
+      }
+
+      callback({
+        video: primaryScreen,
+        audio: 'loopback'
+      })
+    } catch (err) {
+      console.error('[DUALAI-MAIN] Native system audio loopback handler error:', err)
+      callback({})
+    }
+  })
 }
 
 app.whenReady().then(() => {
+  registerSecurityHeaders()
+  registerMediaAndLoopbackHandlers()
   registerIpcHandlers()
   registerGlobalShortcuts(DEFAULT_SHORTCUT_BINDINGS)
   createMainWindow()
