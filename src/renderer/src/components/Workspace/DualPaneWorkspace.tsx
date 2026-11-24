@@ -43,7 +43,8 @@ export const DualPaneWorkspace: React.FC = () => {
     translations,
     activeTranslation,
     clearTranscripts,
-    triggerDomainTestTranslation
+    triggerDomainTestTranslation,
+    addGlossaryEntry
   } = useSession()
 
   const containerRef = useRef<HTMLDivElement>(null)
@@ -95,10 +96,14 @@ export const DualPaneWorkspace: React.FC = () => {
     })
   }, [])
 
-  const handleAddToGlossary = useCallback((sourceTerm: string, targetTerm: string) => {
-    setGlossaryNotification(`Saved "${sourceTerm}" -> "${targetTerm}" to glossary`)
-    setTimeout(() => setGlossaryNotification(null), 3000)
-  }, [])
+  const handleAddToGlossary = useCallback(
+    (sourceTerm: string, targetTerm: string) => {
+      addGlossaryEntry(sourceTerm, targetTerm)
+      setGlossaryNotification(`Injected "${sourceTerm}" -> "${targetTerm}" into prompt glossary`)
+      setTimeout(() => setGlossaryNotification(null), 3000)
+    },
+    [addGlossaryEntry]
+  )
 
   // 3. Paired Dialogue List Assembly
   const pairedItems = useMemo(() => {

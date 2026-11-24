@@ -4,9 +4,11 @@ import {
   IPC_CHANNELS,
   ScreenSourceInfo,
   CaptureBounds,
-  TranscriptPayload
+  TranscriptPayload,
+  ShortcutRegistrationReport
 } from '../types/ipc'
 import { AudioLevelMetric } from '../types/audio'
+import { HudBounds, HudSettings, ShortcutBinding } from '../types/settings'
 
 const electronBridgeApi: ElectronBridgeApi = {
   // Window Controls
@@ -31,12 +33,15 @@ const electronBridgeApi: ElectronBridgeApi = {
     return ipcRenderer.invoke(IPC_CHANNELS.AUDIO_CAPTURE_LOOPBACK, bounds)
   },
 
-  // HUD Controls
-  openHud: async (): Promise<void> => {
-    return ipcRenderer.invoke(IPC_CHANNELS.HUD_OPEN)
+  // HUD Controls (Day 10)
+  openHud: async (initialBounds?: HudBounds): Promise<boolean> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.HUD_OPEN, initialBounds)
   },
   closeHud: async (): Promise<void> => {
     return ipcRenderer.invoke(IPC_CHANNELS.HUD_CLOSE)
+  },
+  isHudOpen: async (): Promise<boolean> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.HUD_IS_OPEN)
   },
   setHudOpacity: async (opacity: number): Promise<void> => {
     return ipcRenderer.invoke(IPC_CHANNELS.HUD_SET_OPACITY, opacity)
@@ -44,8 +49,18 @@ const electronBridgeApi: ElectronBridgeApi = {
   setHudClickThrough: async (enabled: boolean): Promise<void> => {
     return ipcRenderer.invoke(IPC_CHANNELS.HUD_SET_CLICK_THROUGH, enabled)
   },
+  sendHudConfig: (config: HudSettings): void => {
+    ipcRenderer.send(IPC_CHANNELS.HUD_UPDATE_CONFIG, config)
+  },
   sendHudTranscript: (payload: TranscriptPayload): void => {
     ipcRenderer.send(IPC_CHANNELS.HUD_UPDATE_TRANSCRIPT, payload)
+  },
+
+  // Dynamic Global Shortcuts Registration (Day 11)
+  updateGlobalShortcuts: async (
+    bindings: ShortcutBinding[]
+  ): Promise<ShortcutRegistrationReport> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.SHORTCUT_UPDATE_BINDINGS, bindings)
   },
 
   // Event Listeners (Main -> Renderer)
@@ -77,11 +92,54 @@ const electronBridgeApi: ElectronBridgeApi = {
       ipcRenderer.removeListener(IPC_CHANNELS.SHORTCUT_TRIGGER_SNIP, handler)
     }
   },
+  onShortcutPttToggle: (callback: () => void): (() => void) => {
+    const handler = (): void => callback()
+    ipcRenderer.on(IPC_CHANNELS.SHORTCUT_PTT_TOGGLE, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.SHORTCUT_PTT_TOGGLE, handler)
+    }
+  },
+  onShortcutClearBuffer: (callback: () => void): (() => void) => {
+    const handler = (): void => callback()
+    ipcRenderer.on(IPC_CHANNELS.SHORTCUT_CLEAR_BUFFER, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.SHORTCUT_CLEAR_BUFFER, handler)
+    }
+  },
   onSystemAudioMetrics: (callback: (metric: AudioLevelMetric) => void): (() => void) => {
     const handler = (_event: IpcRendererEvent, metric: AudioLevelMetric): void => callback(metric)
     ipcRenderer.on(IPC_CHANNELS.AUDIO_CAPTURE_LOOPBACK, handler)
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.AUDIO_CAPTURE_LOOPBACK, handler)
+    }
+  },
+  onHudTranscript: (callback: (payload: TranscriptPayload) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, payload: TranscriptPayload): void =>
+      callback(payload)
+    ipcRenderer.on(IPC_CHANNELS.HUD_UPDATE_TRANSCRIPT, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.HUD_UPDATE_TRANSCRIPT, handler)
+    }
+  },
+  onHudConfigUpdate: (callback: (config: HudSettings) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, config: HudSettings): void => callback(config)
+    ipcRenderer.on(IPC_CHANNELS.HUD_UPDATE_CONFIG, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.HUD_UPDATE_CONFIG, handler)
+    }
+  },
+  onHudBoundsChanged: (callback: (bounds: HudBounds) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, bounds: HudBounds): void => callback(bounds)
+    ipcRenderer.on(IPC_CHANNELS.HUD_BOUNDS_CHANGED, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.HUD_BOUNDS_CHANGED, handler)
+    }
+  },
+  onHudStatusChanged: (callback: (isOpen: boolean) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, isOpen: boolean): void => callback(isOpen)
+    ipcRenderer.on(IPC_CHANNELS.HUD_STATUS_CHANGED, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.HUD_STATUS_CHANGED, handler)
     }
   }
 }

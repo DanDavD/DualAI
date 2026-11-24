@@ -3,7 +3,8 @@
  * Defines strict type boundaries between Electron Main, Preload, and Renderer.
  */
 
-import { AudioDeviceInfo, AudioLevelMetric, LatencyTelemetry } from './audio'
+import { AudioLevelMetric } from './audio'
+import { HudBounds, HudSettings, ShortcutBinding } from './settings'
 
 export const IPC_CHANNELS = {
   // Window Management
@@ -17,18 +18,25 @@ export const IPC_CHANNELS = {
   AUDIO_CAPTURE_LOOPBACK: 'dualai:audio-capture-loopback',
   AUDIO_STOP_LOOPBACK: 'dualai:audio-stop-loopback',
 
-  // Global Shortcuts & Events
+  // Global Shortcuts & Events (Day 09 & Day 11)
   SHORTCUT_MUTE_TOGGLE: 'dualai:shortcut-mute-toggle',
   SHORTCUT_SWAP_LANGUAGES: 'dualai:shortcut-swap-languages',
   SHORTCUT_TOGGLE_HUD: 'dualai:shortcut-toggle-hud',
   SHORTCUT_TRIGGER_SNIP: 'dualai:shortcut-trigger-snip',
+  SHORTCUT_PTT_TOGGLE: 'dualai:shortcut-ptt-toggle',
+  SHORTCUT_CLEAR_BUFFER: 'dualai:shortcut-clear-buffer',
+  SHORTCUT_UPDATE_BINDINGS: 'dualai:shortcut-update-bindings',
 
-  // Secondary Floating HUD
+  // Secondary Floating HUD (Day 10)
   HUD_OPEN: 'dualai:hud-open',
   HUD_CLOSE: 'dualai:hud-close',
+  HUD_IS_OPEN: 'dualai:hud-is-open',
   HUD_SET_OPACITY: 'dualai:hud-set-opacity',
   HUD_SET_CLICK_THROUGH: 'dualai:hud-set-click-through',
-  HUD_UPDATE_TRANSCRIPT: 'dualai:hud-update-transcript'
+  HUD_UPDATE_CONFIG: 'dualai:hud-update-config',
+  HUD_UPDATE_TRANSCRIPT: 'dualai:hud-update-transcript',
+  HUD_BOUNDS_CHANGED: 'dualai:hud-bounds-changed',
+  HUD_STATUS_CHANGED: 'dualai:hud-status-changed'
 } as const
 
 export type IpcChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS]
@@ -55,12 +63,18 @@ export interface HudWindowConfig {
 }
 
 export interface TranscriptPayload {
+  id?: string
   speakerId: string
   speakerLabel: string
   sourceText: string
   translatedText: string
   timestampMs: number
   isInterim: boolean
+}
+
+export interface ShortcutRegistrationReport {
+  registered: string[]
+  failed: string[]
 }
 
 /**
@@ -77,17 +91,28 @@ export interface ElectronBridgeApi {
   getDesktopSources: () => Promise<ScreenSourceInfo[]>
   captureScreenRegion: (bounds: CaptureBounds) => Promise<string>
 
-  // HUD Controls
-  openHud: () => Promise<void>
+  // HUD Controls (Day 10)
+  openHud: (initialBounds?: HudBounds) => Promise<boolean>
   closeHud: () => Promise<void>
+  isHudOpen: () => Promise<boolean>
   setHudOpacity: (opacity: number) => Promise<void>
   setHudClickThrough: (enabled: boolean) => Promise<void>
+  sendHudConfig: (config: HudSettings) => void
   sendHudTranscript: (payload: TranscriptPayload) => void
+
+  // Global Shortcuts Registration (Day 11)
+  updateGlobalShortcuts: (bindings: ShortcutBinding[]) => Promise<ShortcutRegistrationReport>
 
   // Event Listeners (Main -> Renderer)
   onShortcutMute: (callback: () => void) => () => void
   onShortcutSwapLanguages: (callback: () => void) => () => void
   onShortcutToggleHud: (callback: () => void) => () => void
   onShortcutTriggerSnip: (callback: () => void) => () => void
+  onShortcutPttToggle: (callback: () => void) => () => void
+  onShortcutClearBuffer: (callback: () => void) => () => void
   onSystemAudioMetrics: (callback: (metric: AudioLevelMetric) => void) => () => void
+  onHudTranscript: (callback: (payload: TranscriptPayload) => void) => () => void
+  onHudConfigUpdate: (callback: (config: HudSettings) => void) => () => void
+  onHudBoundsChanged: (callback: (bounds: HudBounds) => void) => () => void
+  onHudStatusChanged: (callback: (isOpen: boolean) => void) => () => void
 }

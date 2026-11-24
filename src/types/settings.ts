@@ -1,0 +1,112 @@
+/**
+ * DUALAI - System State Machine, HUD, Glossary & Settings Type Definitions
+ * Strict zero-any contracts covering Days 09, 10, and 11.
+ */
+
+export type SystemPipelineState =
+  | 'idle'
+  | 'initializing'
+  | 'listening'
+  | 'transcribing'
+  | 'translating'
+  | 'muted'
+  | 'reconnecting'
+  | 'error'
+
+export interface HudBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface HudSettings {
+  opacity: number // 0.0 to 1.0 (0% to 100% solid zinc)
+  fontSizePx: number // 14 to 48
+  lineLimit: 2 | 4 | 6
+  isClickThrough: boolean
+  bounds: HudBounds
+}
+
+export interface GlossaryEntry {
+  id: string
+  source: string
+  target: string
+  notes?: string
+  domain?: string
+}
+
+export interface GlossaryValidationResult {
+  isValid: boolean
+  entries: GlossaryEntry[]
+  errors: string[]
+  warnings: string[]
+  totalRowsParsed: number
+  duplicateCount: number
+}
+
+export type ShortcutActionId =
+  | 'ptt'
+  | 'mute'
+  | 'swap'
+  | 'hudToggle'
+  | 'clearBuffer'
+
+export interface ShortcutBinding {
+  id: ShortcutActionId
+  label: string
+  description: string
+  accelerator: string
+  isGlobal: boolean
+}
+
+export const DEFAULT_SHORTCUT_BINDINGS: ShortcutBinding[] = [
+  {
+    id: 'ptt',
+    label: 'Push-to-Talk (PTT)',
+    description: 'Toggle active microphone capture window while running in background',
+    accelerator: 'CommandOrControl+Shift+P',
+    isGlobal: true
+  },
+  {
+    id: 'mute',
+    label: 'Instant Cough / Mute',
+    description: 'Cut microphone input within 1 audio buffer (0ms audible bleed)',
+    accelerator: 'CommandOrControl+Shift+M',
+    isGlobal: true
+  },
+  {
+    id: 'swap',
+    label: 'Swap Languages',
+    description: 'Symmetrically swap active Source and Target language channels',
+    accelerator: 'CommandOrControl+Shift+S',
+    isGlobal: true
+  },
+  {
+    id: 'hudToggle',
+    label: 'Toggle Teleprompter HUD',
+    description: 'Show or hide floating transparent overlay above video calls',
+    accelerator: 'CommandOrControl+Shift+H',
+    isGlobal: true
+  },
+  {
+    id: 'clearBuffer',
+    label: 'Clear Session Buffer',
+    description: 'Flush active transcript and translation feed memory immediately',
+    accelerator: 'CommandOrControl+Shift+K',
+    isGlobal: true
+  }
+]
+
+export const DEFAULT_HUD_SETTINGS: HudSettings = {
+  opacity: 0.85,
+  fontSizePx: 22,
+  lineLimit: 4,
+  isClickThrough: false,
+  bounds: {
+    x: 160,
+    y: 80,
+    width: 760,
+    height: 220
+  }
+}
