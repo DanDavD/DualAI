@@ -5,6 +5,7 @@
  * ZERO Gemini API keys or Google SDKs are ever present in the desktop renderer.
  */
 
+import { ChannelId } from '../../../types/audio'
 import { DomainId } from '../../../types/domain'
 import {
   TranslationResult,
@@ -18,8 +19,11 @@ import { SimulatedTranslationEngine, TranslationCallbacks } from './SimulatedTra
 
 export interface TranslationManagerCallbacks {
   onTranslationStart: (result: TranslationResult) => void
-  onTranslationToken: (token: TranslationToken, accumulatedText: string) => void
+  onTranslationToken: (utteranceId: string, token: TranslationToken, accumulatedText: string) => void
   onTranslationComplete: (result: TranslationResult) => void
+  onDraftStart?: (result: TranslationResult) => void
+  onDraftToken?: (utteranceId: string, token: TranslationToken, accumulatedText: string) => void
+  onDraftComplete?: (result: TranslationResult) => void
   onTelemetry: (telemetry: TranslationTelemetry) => void
   onError: (error: Error) => void
   onQuotaExhausted?: (message: string) => void
@@ -82,6 +86,45 @@ export class TranslationManager {
     }
   }
 
+  /**
+   * Streams a progressive live draft translation while the speaker is still talking.
+   * Never cancels committed paragraphs and never mutates dialogueHistory until commit.
+   */
+  public async translateDraftPreview(
+    utterance: TranscriptUtterance,
+    domainId: DomainId,
+    targetLang: string
+  ): Promise<void> {
+    const draftCallbacks: TranslationCallbacks = {
+      onStart: (result) => this.callbacks.onDraftStart?.(result),
+      onToken: (token, accumulatedText) =>
+        this.callbacks.onDraftToken?.(utterance.id, token, accumulatedText),
+      onComplete: (result) => this.callbacks.onDraftComplete?.(result),
+      onTelemetry: (telemetry) => this.callbacks.onTelemetry(telemetry),
+      onError: (err) => {
+        // Live previews degrade quietly without popping error banners if superseded
+        console.warn('[DUALAI] Live draft preview warning:', err.message)
+      }
+    }
+
+    if (this.gatewayEngine) {
+      await this.gatewayEngine.translateStream(
+        utterance,
+        domainId,
+        targetLang,
+        this.dialogueHistory,
+        draftCallbacks,
+        { isDraft: true }
+      )
+      return
+    }
+
+    await this.simulatedEngine.translateStream(utterance, domainId, targetLang, draftCallbacks)
+  }
+
+  /**
+   * Translates a finalized committed paragraph without aborting any other committed paragraph.
+   */
   public async translateUtterance(
     utterance: TranscriptUtterance,
     domainId: DomainId,
@@ -89,7 +132,8 @@ export class TranslationManager {
   ): Promise<void> {
     const internalCallbacks: TranslationCallbacks = {
       onStart: (result) => this.callbacks.onTranslationStart(result),
-      onToken: (token, accumulatedText) => this.callbacks.onTranslationToken(token, accumulatedText),
+      onToken: (token, accumulatedText) =>
+        this.callbacks.onTranslationToken(utterance.id, token, accumulatedText),
       onComplete: (result) => {
         this.appendDialogueTurn({
           id: `turn-${utterance.id}`,
@@ -114,7 +158,8 @@ export class TranslationManager {
         domainId,
         targetLang,
         this.dialogueHistory,
-        internalCallbacks
+        internalCallbacks,
+        { isDraft: false }
       )
       return
     }
@@ -125,6 +170,10 @@ export class TranslationManager {
       targetLang,
       internalCallbacks
     )
+  }
+
+  public cancelDraftPreview(channelId?: ChannelId): void {
+    this.gatewayEngine?.cancelDraftPreview(channelId)
   }
 
   public appendDialogueTurn(turn: DialogueTurn): void {

@@ -369,3 +369,47 @@ We implement a **100% Zero-Trust Cloud Gateway architecture (`server/`)** backed
 ### Consequences
 * **Positive:** Complete immunity against client-side API key theft, network sniffing, DB tampering, and receipt replay; frictionless 1-hour Free Tier onboarding for non-technical users; Honduras-compatible monetization via Microsoft Store and PayPal/Paddle.
 * **Negative:** Requires deploying and operating the lightweight `server/` Gateway (e.g. Railway / Fly.io) alongside Supabase in production.
+
+---
+
+## ADR-015: BOXLESS FLOWING TRANSCRIPT CANVAS AND PRODUCTION CHROME SIMPLIFICATION (CARD-15)
+
+### Status
+Accepted
+
+### Context
+During live English-to-Spanish interpretation sessions, wrapping every spoken utterance in heavy bordered cards filled with technical metadata (`CH A (MIC)`, `ICD-10 CLINICAL`, `TTFT: 96ms`, `OFFLINE SIMULATOR`) plus four stacked chrome bars (`Header`, `SubHeader`, Workspace Sub-Toolbar, Column Header bar) created severe visual fatigue and reduced readable transcript viewport height.
+
+### Decision
+We transition Zone 1-4 to a **boxless flowing transcript canvas** while maintaining DualAI's solid-state matte Zinc/Slate DAW identity:
+1. **Zero Per-Utterance Boxes:** Refactored `UtteranceCard.tsx` and `TranslationCard.tsx` into clean, borderless paired rows where source speech flows on the left and larger, crisp target phrasing ("what to say") flows on the right, staying persisted in scrollable history so interpreters can effortlessly copy phone numbers, Gmail/email addresses, and clinical values.
+2. **Hover-Revealed Action Rail:** Preserved Copy, Flag, and Terminology actions cleanly on row hover (`opacity-0 group-hover:opacity-100`) so Day-08 capabilities remain instant without visual clutter.
+3. **Inline Contact & Entity Highlighting:** Extended `entityHighlighter.tsx` to detect email addresses and phone numbers alongside medical dosages, replacing heavy bordered chips with calm bold amber inline highlights.
+4. **Chrome Consolidation & Single Transport Control:** Removed developer test buttons (`Inject Domain`), redundant `START AUDIO CAPTURE`, `VAD IDLE` boxes, `v1.0.0-PRO`, and duplicate column headers; unified session start/stop strictly in Zone 4 `MasterToolbar.tsx` paired with plain-English live status (`Ready`, `Listening`, `Recognizing voice`, `Translating`, `Muted`) and a plain-English empty-state audio source selector.
+
+### Consequences
+* **Positive:** Reclaims ~80px+ of vertical reading space, eliminates cognitive clutter during high-speed calls, makes contact info and translations effortless to scan, and improves onboarding clarity for non-technical users.
+* **Negative:** Engineers seeking raw millisecond buffer/E2E metrics now inspect the status hover tooltip or Settings Matrix rather than permanent footer chrome.
+
+---
+
+## ADR-016: 2-SECOND PAUSE PARAGRAPH ACCUMULATION, CONCURRENT STREAM ISOLATION & DUAL-MODE TYPOGRAPHY
+
+### Status
+Accepted
+
+### Context
+Fast endpointing (`250ms`) is essential for low-latency interim words, yet committing every short breath pause as an independent UI row fragments continuous speech and previously caused overlapping `fetch()` streams to cancel each other via a shared `AbortController`.
+
+### Decision
+We introduce a **2-Second Pause Paragraph Accumulator (`paragraphAccumulator.ts`)** paired with **dual-lane concurrent translation streams (`GatewayTranslationEngine.ts`)**:
+1. **Unified Paragraph Turn Buffering (`DEFAULT_PAUSE_COMMIT_MS = 2000`):** Consecutive STT `is_final` segments and live interim words accumulate into a single coherent paragraph per channel across short (~1s) pauses until 2 full seconds of silence elapse (with VAD activity extending the timer while speaking and a `2200ms` PCM hangover ensuring zero clipped endings).
+2. **Concurrent Final Lane vs Cancellable Draft Lane:** Committed paragraphs execute on independent `finalControllers` keyed by `utteranceId` so finalized paragraphs never abort one another; live previews execute on isolated per-channel `draftControllers` with strict local `AbortError` suppression.
+3. **Distinct Live vs Accurate UX:**
+   - **Live (`sub_second_live`):** Progressively translates while speaking in softer draft typography (`font-light text-zinc-400/85`); when the 2-second pause commit signal fires, up-to-date drafts promote instantaneously into full-contrast final typography (`font-normal text-zinc-100`).
+   - **Accurate (`sentence_accurate`):** Accumulates the full paragraph without premature mid-sentence translation and dispatches one cohesive full-paragraph translation upon the 2-second pause signal.
+4. **Native-Language Top-of-Pane Headers:** Eliminates repetitive per-message `EN -> ES` titles in favor of a single aligned top-of-pane header displaying each language in its native name (`SUPPORTED_LANGUAGES.nativeName`, e.g., `English` | `Español`, `Español` | `Deutsch`).
+
+### Consequences
+* **Positive:** Eliminates `AbortError` alerts and stuck rows, prevents 1-second sentence fragmentation, gives interpreters unmistakable visual feedback between evolving drafts and finalized text, and keeps the workspace visually serene.
+* **Negative:** Live mode issues incremental preview calls during long monologues; mitigated via smart text-change deduplication and `120ms`/`420ms` debounce thresholds.

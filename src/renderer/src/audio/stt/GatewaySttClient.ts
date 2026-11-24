@@ -93,6 +93,7 @@ export class GatewaySttClient {
       const queryParams = new URLSearchParams({
         language: this.config.language,
         endpointing: String(this.config.endpointingMs ?? 250),
+        sampleRate: String(this.config.sampleRate || 16000),
         channel: this.channelId
       })
       const wsUrl = `${getGatewayWsUrl()}/v1/stt?${queryParams.toString()}`

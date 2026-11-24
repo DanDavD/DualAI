@@ -125,7 +125,7 @@ console.log('PASS: Test 4 satisfied.\n')
 console.log('[TEST 5] Verifying Zero-Trust UI Wiring (Zero API Key Inputs, Zero any, Zero Emojis)...')
 assert.ok(settingsSource.includes('selectedLoopbackDeviceId'))
 assert.ok(!settingsSource.includes('VITE_DEEPGRAM_API_KEY') && !settingsSource.includes('VITE_GEMINI_API_KEY'))
-assert.ok(workspaceSource.includes('role="alert"') && workspaceSource.includes('GATEWAY: ZERO-TRUST LIVE'))
+assert.ok(workspaceSource.includes('role="alert"') && workspaceSource.includes('pipelineErrorMessage'))
 
 const audited = [
   ['src/main/index.ts', mainSource],

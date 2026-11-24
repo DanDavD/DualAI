@@ -429,3 +429,53 @@ Restore reliable sub-second live speech-to-text streaming from native macOS syst
 
 ### 4. Result
 Live end-to-end verification confirmed Deepgram Nova-2 WebSocket connectivity (`CONNECTED OK`), Gemini 3.5 Flash Lite streaming translation (`HTTP 200`, TTFT ~880ms), `vadWorker` bundle reduction from 529 kB to 112 kB, and 100% pass rate across all 9 automated test suites.
+
+---
+
+## INCIDENT 017: WORKSPACE CARD CLUTTER, REDUNDANT CHROME & TELEMETRY FATIGUE (CARD-15)
+
+* **Date:** 2026-11-24
+* **Component:** Zone 1-4 UI Hierarchy (`Header`, `SubHeader`, `DualPaneWorkspace`, `UtteranceCard`, `TranslationCard`, `MasterToolbar`)
+* **Severity:** Medium (High visual cognitive load during live interpretation)
+
+### 1. Situation
+Live English-to-Spanish testing revealed that rendering every short phrase inside a heavy bordered box with permanent technical badges (`CH A (MIC)`, `ICD-10 CLINICAL`, `TTFT`, `E2E`, `OFFLINE SIMULATOR`) plus 4 stacked top toolbars fragmented the transcript and distracted interpreters from reading translations and referencing details such as phone numbers or Gmail addresses.
+
+### 2. Task
+Execute CARD-15: strip all developer test buttons and redundant transport chrome, replace boxed utterance cards with a calm boxless flowing dual-pane layout, surface clear plain-English live states (`Ready`, `Listening`, `Recognizing voice`, `Translating`), and ensure zero regression across existing automated suites.
+
+### 3. Action
+* **Boxless Flowing Feed:** Rebuilt `UtteranceCard.tsx`, `TranslationCard.tsx`, and `DualPaneWorkspace.tsx` to flow cleanly downward without per-utterance card borders, revealing Copy/Flag/Terminology actions gently on hover and adding inline email/phone highlighting in `entityHighlighter.tsx`.
+* **Chrome Simplification:** Removed the Workspace Sub-Toolbar (`Inject Domain`, duplicate `START AUDIO CAPTURE`) and duplicate pane header bar, simplified `Header.tsx` (adding live `LIVE` dot + `MM:SS` session timer and Account button) and `SubHeader.tsx`, and added an interactive plain-English audio source picker in the idle state.
+* **Plain-English Live Status:** Updated `sessionStateMachine.ts` and `MasterToolbar.tsx` to display `Ready`, `Listening`, `Recognizing voice`, `Translating`, and `Muted` while retaining full ARIA roving focus and Day-09 Steel Blue / Solid Crimson transport controls.
+* **Verification:** Authored `scripts/test_card15_ui_cleanup.mjs` (4/4 DoD tests passing) and verified all 9 prior test suites, `pnpm run typecheck`, and `pnpm run build`.
+
+### 4. Result
+Viewport reading height expanded by ~80px+, zero developer test controls remain in the workspace, and all 10 automated test suites pass with 0 TypeScript/build errors, 0 `any` types, and 0 emojis.
+
+---
+
+## INCIDENT 018: OVERLAPPING STREAM ABORT LEAK, 1-SECOND CLAUSE FRAGMENTATION & DUAL-MODE PARAGRAPH COMMIT ENGINE
+
+* **Date:** 2026-11-24
+* **Component:** `GatewayTranslationEngine`, `TranslationManager`, `ParagraphTurnAccumulator`, `SessionContext`, `DualPaneWorkspace`
+* **Severity:** High (Leaked `NOTICE: signal is aborted without reason`, dropped translations stuck on `"Waiting for translation..."`, and fragmented continuous speech into tiny rows)
+
+### 1. Situation
+During live end-to-end macOS loopback verification of CARD-15, three usability and reliability issues surfaced:
+1. `GatewayTranslationEngine` held a single shared `this.abortController` and called `cancelActiveStream()` whenever a new utterance started. Because `this.abortController` was immediately overwritten with a fresh controller before the aborted `fetch()` rejected, the aborted stream's `catch` evaluated `!this.abortController?.signal.aborted` against the new non-aborted controller — leaking `NOTICE: signal is aborted without reason` into the error banner and leaving previous rows permanently stuck on `Waiting for translation...`.
+2. Deepgram `endpointing=250ms` emitted `is_final: true` on natural 0.5s-1s pauses, fragmenting one continuous spoken paragraph into 5-6 disconnected rows.
+3. Repeating `EN -> ES` above every single message added repetitive visual noise, while Live vs Accurate modes lacked a clear draft-to-final visual transition.
+
+### 2. Task
+Eliminate `AbortError` leaks and dropped translations permanently, accumulate continuous speech into unified paragraphs until a 2-second (`2000ms`) silence pause signal fires, differentiate `Live` (progressive softer draft font -> instant final font on 2s pause) from `Accurate` (wait until 2s pause -> single full-paragraph translation), and replace per-message `EN -> ES` headers with single native-language top-of-pane headers.
+
+### 3. Action
+* **Per-Utterance Stream Isolation (`GatewayTranslationEngine.ts` & `TranslationManager.ts`):** Replaced the single shared `abortController` with `finalControllers: Map<string, AbortController>` for committed paragraphs (never cancelling prior committed paragraphs) and `draftControllers: Map<ChannelId, AbortController>` strictly for `Live` draft previews, guarded by local `controller.signal.aborted || isAbortError(err)` checks.
+* **2-Second Pause Paragraph Accumulator (`paragraphAccumulator.ts` & `SessionContext.tsx`):** Authored `ParagraphTurnAccumulator` (`DEFAULT_PAUSE_COMMIT_MS = 2000`) merging consecutive Deepgram clauses and live interim words per channel across short pauses until 2 full seconds of silence elapse, extending live PCM hangover to `2200ms` so final words flush cleanly.
+* **Live Soft-Draft vs Accurate Mode (`SessionContext.tsx`, `UtteranceCard.tsx`, `TranslationCard.tsx`):** In `Live` mode, debounced draft translations stream progressively in a visibly softer font (`font-light text-zinc-400/85`) and promote instantaneously into crisp finalized typography (`font-normal text-zinc-100`) upon the 2-second commit signal. In `Accurate` mode, the full paragraph accumulates silently and translates in a single coherent pass after the 2-second pause.
+* **Native-Language Pane Headers (`DualPaneWorkspace.tsx`, `SubHeader.tsx`):** Removed all per-message `EN -> ES` headers and added a single aligned top-of-pane header displaying each language in its native name (`English` | `Español`, `Español` | `Deutsch`, etc.).
+* **Verification:** Expanded `scripts/test_card15_ui_cleanup.mjs` (5/5 tests passing), verified runtime `ParagraphTurnAccumulator` timer merging, and confirmed 10/10 automated suites, `pnpm run typecheck`, and `pnpm run build` pass.
+
+### 4. Result
+Zero `AbortError` banners, zero stuck `"Waiting for translation..."` rows, smooth unified paragraphs across short pauses, clear Live draft-to-final font feedback vs Accurate full-paragraph translation, and clean native-language pane headers.
