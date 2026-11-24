@@ -37,39 +37,39 @@ INSERT INTO public.plans (
 VALUES
   (
     'free_tier',
-    'Free Starter (1 Hour)',
-    'Automatic 1-hour real-time interpretation trial with zero API key setup.',
+    'Free Trial (1 Hour)',
+    'Automatic 1-hour real-time interpretation trial. All features included.',
     3600,
     0.00,
     NULL,
     1
   ),
   (
-    'starter_10h',
-    'Interpreter Starter (10 Hours)',
-    '10 hours of sub-second live STT and domain-specialized Gemini translation.',
-    36000,
-    14.99,
-    '9NBLGGH4DUAL10H',
+    'pro_40h',
+    'Pro (40 Hours)',
+    '40 hours/month of unified multi-speaker live translation across 60+ languages.',
+    144000,
+    6.99,
+    '9NBLGGH4DUAL40H',
     1
   ),
   (
-    'pro_40h',
-    'Interpreter Pro (40 Hours)',
-    '40 hours of live medical, legal, and technical simultaneous interpretation.',
-    144000,
-    39.99,
-    '9NBLGGH4DUAL40H',
-    2
+    'pro_plus_70h',
+    'Pro+ (70 Hours)',
+    '70 hours/month for active medical, legal, and business interpreters.',
+    252000,
+    9.99,
+    '9NBLGGH4DUAL70H',
+    1
   ),
   (
-    'enterprise_100h',
-    'Enterprise Studio (100 Hours)',
-    '100 hours monthly allocation with priority routing and custom glossaries.',
-    360000,
-    79.99,
-    '9NBLGGH4DUAL100H',
-    3
+    'unlimited',
+    'Unlimited',
+    'Unlimited monthly interpretation for full-time interpreters (single-user fair use).',
+    576000,
+    19.99,
+    '9NBLGGH4DUALUNL',
+    1
   )
 ON CONFLICT (id) DO NOTHING;
 

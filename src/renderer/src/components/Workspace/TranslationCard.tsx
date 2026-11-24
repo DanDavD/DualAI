@@ -61,6 +61,19 @@ export const TranslationCard: React.FC<TranslationCardProps> = ({
   }
 
   const isInProgressVisual = isDraft || isStreaming
+  const speakerToneClass = (() => {
+    const spk = translation?.speakerId
+    if (spk === '3') {
+      return isInProgressVisual ? 'font-light text-sky-300/65' : 'font-normal text-sky-300'
+    }
+    if (spk && spk !== '1' && spk !== '2') {
+      return isInProgressVisual ? 'font-light text-emerald-300/65' : 'font-normal text-emerald-300'
+    }
+    if (spk === '2' || isOppositeDirection) {
+      return isInProgressVisual ? 'font-light text-amber-300/65' : 'font-normal text-amber-300'
+    }
+    return isInProgressVisual ? 'font-light text-zinc-400/85' : 'font-normal text-zinc-100'
+  })()
 
   return (
     <div className="group relative text-sm font-sans">
@@ -122,15 +135,7 @@ export const TranslationCard: React.FC<TranslationCardProps> = ({
 
       {/* Flowing Target Translation: Softer Draft Font -> Crisp Final Typography on 2s Commit */}
       <div
-        className={`text-[15px] leading-relaxed select-text min-h-[22px] transition-colors duration-300 ${
-          isInProgressVisual
-            ? isOppositeDirection
-              ? 'font-light text-amber-300/65'
-              : 'font-light text-zinc-400/85'
-            : isOppositeDirection
-              ? 'font-normal text-amber-300'
-              : 'font-normal text-zinc-100'
-        }`}
+        className={`text-[15px] leading-relaxed select-text min-h-[22px] transition-colors duration-300 ${speakerToneClass}`}
       >
         {translation?.translatedText ? (
           highlightCriticalEntities(translation.translatedText)

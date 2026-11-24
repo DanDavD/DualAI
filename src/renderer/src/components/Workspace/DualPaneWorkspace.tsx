@@ -176,7 +176,8 @@ export const DualPaneWorkspace: React.FC = () => {
         : u
       const effectiveTarget = resolveTranslationTargetForChannel(u.channelId, routingDecision)
       const isOppositeDirection =
-        routingDecision.isBilateralTwoWay && u.channelId === 'channel_b'
+        (routingDecision.isBilateralTwoWay && u.channelId === 'channel_b') ||
+        (operatingMode === 'conversation' && u.language === targetLang)
 
       const finalTranslation = translationMap.get(u.id)
       const inFlightTranslation = streamingTranslations[u.id]
@@ -205,7 +206,9 @@ export const DualPaneWorkspace: React.FC = () => {
     speakerOverrides,
     flaggedIds,
     filterFlaggedOnly,
-    routingDecision
+    routingDecision,
+    operatingMode,
+    targetLang
   ])
 
   // 4. Smart Auto-Scroll & Virtualization State

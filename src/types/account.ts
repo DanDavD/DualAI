@@ -3,7 +3,7 @@
  * Strictly typed contracts between Electron Renderer and DualAI Cloud Gateway.
  */
 
-export type PlanId = 'free_tier' | 'starter_10h' | 'pro_40h' | 'enterprise_100h'
+export type PlanId = 'free_tier' | 'pro_40h' | 'pro_plus_70h' | 'unlimited'
 
 export interface BillingPlan {
   id: PlanId
@@ -13,6 +13,7 @@ export interface BillingPlan {
   monthlyPriceUsd: number
   msStoreProductId: string | null
   maxConcurrentSessions: number
+  isUnlimitedFairUse?: boolean
 }
 
 export interface AccountQuota {
@@ -38,38 +39,39 @@ export interface AuthenticatedSession {
 export const DEFAULT_SAAS_PLANS: BillingPlan[] = [
   {
     id: 'free_tier',
-    name: 'Free Starter (1 Hour)',
-    description: 'Automatic 1-hour real-time interpretation trial. Zero API keys required.',
+    name: 'Free Trial (1 Hour)',
+    description: 'Automatic 1-hour real-time interpretation trial. All features included.',
     includedSeconds: 3600,
     monthlyPriceUsd: 0,
     msStoreProductId: null,
     maxConcurrentSessions: 1
   },
   {
-    id: 'starter_10h',
-    name: 'Interpreter Starter (10 Hours)',
-    description: '10 hours of live STT + specialized domain translation via Microsoft Store or PayPal.',
-    includedSeconds: 36000,
-    monthlyPriceUsd: 14.99,
-    msStoreProductId: '9NBLGGH4DUAL10H',
+    id: 'pro_40h',
+    name: 'Pro (40 Hours)',
+    description: '40 hours/month of unified multi-speaker live translation across 60+ languages.',
+    includedSeconds: 144000,
+    monthlyPriceUsd: 6.99,
+    msStoreProductId: '9NBLGGH4DUAL40H',
     maxConcurrentSessions: 1
   },
   {
-    id: 'pro_40h',
-    name: 'Interpreter Pro (40 Hours)',
-    description: '40 hours for medical, legal, and corporate interpretation with 2 concurrent channels.',
-    includedSeconds: 144000,
-    monthlyPriceUsd: 39.99,
-    msStoreProductId: '9NBLGGH4DUAL40H',
-    maxConcurrentSessions: 2
+    id: 'pro_plus_70h',
+    name: 'Pro+ (70 Hours)',
+    description: '70 hours/month for active medical, legal, and business interpreters.',
+    includedSeconds: 252000,
+    monthlyPriceUsd: 9.99,
+    msStoreProductId: '9NBLGGH4DUAL70H',
+    maxConcurrentSessions: 1
   },
   {
-    id: 'enterprise_100h',
-    name: 'Enterprise Studio (100 Hours)',
-    description: '100 hours monthly quota with priority routing and custom terminology glossaries.',
-    includedSeconds: 360000,
-    monthlyPriceUsd: 79.99,
-    msStoreProductId: '9NBLGGH4DUAL100H',
-    maxConcurrentSessions: 3
+    id: 'unlimited',
+    name: 'Unlimited',
+    description: 'Unlimited monthly interpretation for full-time interpreters (single-user fair use).',
+    includedSeconds: 576000,
+    monthlyPriceUsd: 19.99,
+    msStoreProductId: '9NBLGGH4DUALUNL',
+    maxConcurrentSessions: 1,
+    isUnlimitedFairUse: true
   }
 ]

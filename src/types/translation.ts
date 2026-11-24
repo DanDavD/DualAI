@@ -19,6 +19,7 @@ export interface TranslationResult {
   id: string
   utteranceId: string
   channelId: ChannelId
+  speakerId?: string
   speakerLabel: string
   sourceLang: string
   targetLang: string
@@ -31,7 +32,7 @@ export interface TranslationResult {
   timeToFirstTokenMs: number
   totalDurationMs: number
   endToEndLatencyMs: number
-  provider: 'gemini-2.0-flash' | 'simulated-gemini'
+  provider: 'soniox-unified' | 'gemini-2.0-flash' | 'simulated-gemini'
   timestampMs: number
 }
 
@@ -55,7 +56,7 @@ export interface TranslationTelemetry {
   tokensCount: number
   endToEndLatencyMs: number // Audio Ingest (30ms) + VAD (~0.3ms) + STT (~90ms) + Translation TTFT
   domainId: DomainId
-  provider: 'gemini-2.0-flash' | 'simulated-gemini'
+  provider: 'soniox-unified' | 'gemini-2.0-flash' | 'simulated-gemini'
   timestampMs: number
 }
 
