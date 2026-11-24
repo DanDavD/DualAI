@@ -5,7 +5,7 @@
  * and client-side Silero VAD v5 ONNX segmentation.
  */
 
-import { ChannelId, AudioLevelMetric, VADEvent } from '../../../types/audio'
+import { ChannelId, AudioLevelMetric, VADEvent, LoopbackSourceStatus } from '../../../types/audio'
 import { CircularAudioBuffer } from './CircularAudioBuffer'
 import { PCM_PROCESSOR_CODE } from './PcmProcessorCode'
 import { SileroVadEngine } from './vad/SileroVadEngine'
@@ -23,6 +23,7 @@ export interface AudioEngineCallbacks {
   onSpeechFrame?: (channelId: ChannelId, pcmData: Int16Array, probability: number) => void
   onSpeechEnd?: (event: VADEvent) => void
   onVadStatusChange?: (status: 'initializing' | 'ready' | 'error', error?: string) => void
+  onLoopbackStatusChange?: (status: LoopbackSourceStatus, detail?: string) => void
   onDeviceDisconnected?: (event: Event) => void
   onError?: (err: Error) => void
 }
@@ -42,12 +43,14 @@ export class AudioIngestionEngine {
 
   // Channel B (System Loopback)
   private streamChannelB: MediaStream | null = null
+  private displayVideoTracks: MediaStreamTrack[] = []
   private sourceNodeB: MediaStreamAudioSourceNode | null = null
   private gainNodeB: GainNode | null = null
   private workletNodeB: AudioWorkletNode | null = null
   private bufferChannelB: CircularAudioBuffer = new CircularAudioBuffer(16000)
   private vadAccumulatorB: Int16Array = new Int16Array(480)
   private vadAccumulatorIndexB: number = 0
+  private loopbackStatus: LoopbackSourceStatus = 'inactive'
 
   // VAD Engine
   private vadEngine: SileroVadEngine | null = null
@@ -101,8 +104,90 @@ export class AudioIngestionEngine {
     return this.audioContext
   }
 
+  private setLoopbackStatus(status: LoopbackSourceStatus, detail?: string): void {
+    this.loopbackStatus = status
+    this.callbacks.onLoopbackStatusChange?.(status, detail)
+  }
+
   /**
-   * Start dual-channel ingestion (Channel A Mic + Channel B Loopback) and Silero VAD
+   * Acquire Channel B (System Loopback / Remote Audio).
+   * Priority 1: Explicitly selected virtual loopback input device (e.g. BlackHole / VB-Cable).
+   * Priority 2: Native Electron 45 OS Loopback via getDisplayMedia + setDisplayMediaRequestHandler.
+   */
+  private async acquireChannelBStream(deviceIdB?: string): Promise<MediaStream | null> {
+    if (deviceIdB && deviceIdB !== 'system_loopback' && deviceIdB !== 'default') {
+      try {
+        const virtualStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            sampleRate: 16000,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            deviceId: { exact: deviceIdB }
+          },
+          video: false
+        })
+        this.setLoopbackStatus('virtual_device', 'Dedicated loopback audio device active')
+        return virtualStream
+      } catch (devErr) {
+        console.warn('[DUALAI] Selected Channel B device unavailable, attempting native OS loopback:', devErr)
+      }
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getDisplayMedia) {
+      try {
+        const displayStream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            width: { ideal: 16 },
+            height: { ideal: 16 },
+            frameRate: { ideal: 1 }
+          },
+          audio: true
+        })
+
+        const audioTracks = displayStream.getAudioTracks()
+        const videoTracks = displayStream.getVideoTracks()
+
+        if (audioTracks.length > 0 && audioTracks[0].readyState === 'live') {
+          // Keep minimal video tracks disabled while session runs so macOS ScreenCaptureKit
+          // does not prematurely terminate the linked audio stream; released cleanly in stop().
+          videoTracks.forEach((track) => {
+            track.enabled = false
+          })
+          this.displayVideoTracks = videoTracks
+          this.setLoopbackStatus('native_loopback', 'Native OS system audio loopback active')
+          return new MediaStream(audioTracks)
+        }
+
+        // No live audio track returned (e.g. OS Screen & System Audio Recording permission denied)
+        displayStream.getTracks().forEach((track) => track.stop())
+        this.setLoopbackStatus(
+          'unavailable',
+          'System audio loopback unavailable. Grant Screen & System Audio Recording permission in macOS System Settings or select a virtual loopback device (e.g. BlackHole) in Settings -> Audio.'
+        )
+        return null
+      } catch (displayErr) {
+        const message =
+          displayErr instanceof Error ? displayErr.message : 'Display media capture rejected'
+        console.warn('[DUALAI] Native OS loopback capture unavailable:', displayErr)
+        this.setLoopbackStatus(
+          'unavailable',
+          `System audio loopback unavailable (${message}). Verify macOS Screen & System Audio Recording permission or select a virtual loopback device in Settings -> Audio.`
+        )
+        return null
+      }
+    }
+
+    this.setLoopbackStatus(
+      'unavailable',
+      'System audio loopback API unavailable in this runtime. Select a virtual loopback device in Settings -> Audio.'
+    )
+    return null
+  }
+
+  /**
+   * Start dual-channel or routed ingestion (Channel A Mic and/or Channel B System Loopback) + Silero VAD
    */
   public async start(options: {
     noiseSuppression: boolean
@@ -110,8 +195,14 @@ export class AudioIngestionEngine {
     gainA: number
     gainB: number
     deviceIdA?: string
+    deviceIdB?: string
+    captureChannelA?: boolean
+    captureChannelB?: boolean
   }): Promise<void> {
     if (this.isRunning) return
+
+    const captureA = options.captureChannelA ?? true
+    const captureB = options.captureChannelB ?? true
 
     try {
       this.activeGainA = options.gainA
@@ -141,97 +232,83 @@ export class AudioIngestionEngine {
       }
       await this.vadEngine.start()
 
-      // 1. Channel A: Local Microphone Capture
-      const audioConstraints: MediaTrackConstraints = {
-        channelCount: 1,
-        sampleRate: 16000,
-        echoCancellation: options.echoCancellation,
-        noiseSuppression: options.noiseSuppression,
-        autoGainControl: false
-      }
-      if (options.deviceIdA && options.deviceIdA !== 'default') {
-        audioConstraints.deviceId = { exact: options.deviceIdA }
-      }
-
-      this.streamChannelA = await navigator.mediaDevices.getUserMedia({
-        audio: audioConstraints,
-        video: false
-      })
-
-      this.sourceNodeA = ctx.createMediaStreamSource(this.streamChannelA)
-      this.gainNodeA = ctx.createGain()
-      this.gainNodeA.gain.value = this.isCoughMuted ? 0.0 : options.gainA
-
-      this.workletNodeA = new AudioWorkletNode(ctx, 'pcm-processor', {
-        processorOptions: { channelId: 'channel_a' }
-      })
-
-      if (this.isCoughMuted) {
-        this.workletNodeA.port.postMessage({ type: 'set-mute', muted: true })
-      }
-
-      this.workletNodeA.port.onmessage = (event) => {
-        const { channelId, pcmData, rmsDb, peakDb, isClipping, timestampMs } = event.data
-        const samples = new Int16Array(pcmData)
-
-        if (!this.isCoughMuted) {
-          this.bufferChannelA.write(samples)
+      // 1. Channel A: Local Microphone Capture (only when routed)
+      if (captureA) {
+        const audioConstraints: MediaTrackConstraints = {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: options.echoCancellation,
+          noiseSuppression: options.noiseSuppression,
+          autoGainControl: false
+        }
+        if (options.deviceIdA && options.deviceIdA !== 'default') {
+          audioConstraints.deviceId = { exact: options.deviceIdA }
         }
 
-        this.callbacks.onLevelMetric({
-          channelId,
-          rmsDb: this.isCoughMuted ? -60 : rmsDb,
-          peakDb: this.isCoughMuted ? -60 : peakDb,
-          isClipping: this.isCoughMuted ? false : isClipping,
-          timestampMs
+        this.streamChannelA = await navigator.mediaDevices.getUserMedia({
+          audio: audioConstraints,
+          video: false
         })
 
-        this.callbacks.onPcmChunk(channelId, samples)
+        this.sourceNodeA = ctx.createMediaStreamSource(this.streamChannelA)
+        this.gainNodeA = ctx.createGain()
+        this.gainNodeA.gain.value = this.isCoughMuted ? 0.0 : options.gainA
+
+        this.workletNodeA = new AudioWorkletNode(ctx, 'pcm-processor', {
+          processorOptions: { channelId: 'channel_a' }
+        })
 
         if (this.isCoughMuted) {
-          return
+          this.workletNodeA.port.postMessage({ type: 'set-mute', muted: true })
         }
 
-        // Feed into 30ms (480-sample) accumulator for Silero VAD
-        for (let i = 0; i < samples.length; i++) {
-          this.vadAccumulatorA[this.vadAccumulatorIndexA++] = samples[i]
-          if (this.vadAccumulatorIndexA >= 480) {
-            this.vadEngine?.processPcmFrame('channel_a', this.vadAccumulatorA, timestampMs)
-            this.vadAccumulatorIndexA = 0
+        this.workletNodeA.port.onmessage = (event) => {
+          const { channelId, pcmData, rmsDb, peakDb, isClipping, timestampMs } = event.data
+          const samples = new Int16Array(pcmData)
+
+          if (!this.isCoughMuted) {
+            this.bufferChannelA.write(samples)
+          }
+
+          this.callbacks.onLevelMetric({
+            channelId,
+            rmsDb: this.isCoughMuted ? -60 : rmsDb,
+            peakDb: this.isCoughMuted ? -60 : peakDb,
+            isClipping: this.isCoughMuted ? false : isClipping,
+            timestampMs
+          })
+
+          this.callbacks.onPcmChunk(channelId, samples)
+
+          if (this.isCoughMuted) {
+            return
+          }
+
+          // Feed into 30ms (480-sample) accumulator for Silero VAD
+          for (let i = 0; i < samples.length; i++) {
+            this.vadAccumulatorA[this.vadAccumulatorIndexA++] = samples[i]
+            if (this.vadAccumulatorIndexA >= 480) {
+              this.vadEngine?.processPcmFrame('channel_a', this.vadAccumulatorA, timestampMs)
+              this.vadAccumulatorIndexA = 0
+            }
           }
         }
+
+        this.sourceNodeA.connect(this.gainNodeA)
+        this.gainNodeA.connect(this.workletNodeA)
       }
 
-      this.sourceNodeA.connect(this.gainNodeA)
-      this.gainNodeA.connect(this.workletNodeA)
+      // 2. Channel B: Native System Audio Loopback / Virtual Loopback Device (only when routed)
+      if (captureB) {
+        this.streamChannelB = await this.acquireChannelBStream(options.deviceIdB)
 
-      // 2. Channel B: System Loopback / Remote Audio
-      try {
-        if (typeof window !== 'undefined' && window.electronAPI?.getDesktopSources) {
-          const sources = await window.electronAPI.getDesktopSources()
-          const primaryScreen = sources[0]
-
-          if (primaryScreen) {
-            this.streamChannelB = await (navigator.mediaDevices as unknown as {
-              getUserMedia: (constraints: unknown) => Promise<MediaStream>
-            }).getUserMedia({
-              audio: {
-                mandatory: {
-                  chromeMediaSource: 'desktop',
-                  chromeMediaSourceId: primaryScreen.id
-                }
-              },
-              video: false
-            }).catch(() => null)
-          }
+        if (!this.streamChannelB && !captureA) {
+          throw new Error(
+            'Unable to capture System Audio Loopback. Check macOS Screen & System Audio Recording permission or configure a virtual loopback device (BlackHole) in Settings -> Audio.'
+          )
         }
-      } catch (loopbackErr) {
-        console.warn('[DUALAI] System audio loopback fallback:', loopbackErr)
-      }
-
-      // Safe bilateral fallback clone for testing without external meeting
-      if (!this.streamChannelB && this.streamChannelA) {
-        this.streamChannelB = this.streamChannelA.clone()
+      } else {
+        this.setLoopbackStatus('inactive')
       }
 
       if (this.streamChannelB) {
@@ -435,6 +512,10 @@ export class AudioIngestionEngine {
       this.streamChannelB.getTracks().forEach((track) => track.stop())
       this.streamChannelB = null
     }
+    if (this.displayVideoTracks.length > 0) {
+      this.displayVideoTracks.forEach((track) => track.stop())
+      this.displayVideoTracks = []
+    }
 
     if (this.sourceNodeA) {
       this.sourceNodeA.disconnect()
@@ -482,6 +563,9 @@ export class AudioIngestionEngine {
     this.bufferChannelA.clear()
     this.bufferChannelB.clear()
     this.isRunning = false
+    if (this.loopbackStatus !== 'unavailable') {
+      this.setLoopbackStatus('inactive')
+    }
   }
 
   public getIsRunning(): boolean {
@@ -490,5 +574,9 @@ export class AudioIngestionEngine {
 
   public getIsVadReady(): boolean {
     return this.vadEngine?.getIsReady() ?? false
+  }
+
+  public getLoopbackStatus(): LoopbackSourceStatus {
+    return this.loopbackStatus
   }
 }

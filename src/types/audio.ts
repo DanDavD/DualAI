@@ -22,6 +22,12 @@ export type LatencyMode =
   | 'sub_second_live'
   | 'sentence_accurate'
 
+export type LoopbackSourceStatus =
+  | 'inactive'
+  | 'native_loopback'
+  | 'virtual_device'
+  | 'unavailable'
+
 export type VADState =
   | 'silence'
   | 'speech_onset'

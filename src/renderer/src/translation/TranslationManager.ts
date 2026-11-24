@@ -1,8 +1,8 @@
 /**
- * DUALAI - Master Translation Orchestrator
- * Coordinates real-time domain translation with Gemini 2.0 Flash and Simulated engine.
- * Maintains sliding dialogue history for cross-speaker bidirectional context memory.
- * Emits incremental token streams and end-to-end latency telemetry.
+ * DUALAI - Zero-Trust Master Translation Orchestrator
+ * Routes live translations strictly through the authenticated DualAI Cloud Gateway
+ * (GatewayTranslationEngine), falling back to SimulatedTranslationEngine only when unsigned.
+ * ZERO Gemini API keys or Google SDKs are ever present in the desktop renderer.
  */
 
 import { DomainId } from '../../../types/domain'
@@ -13,7 +13,7 @@ import {
   DialogueTurn
 } from '../../../types/translation'
 import { TranscriptUtterance } from '../../../types/stt'
-import { GeminiTranslationEngine } from './GeminiTranslationEngine'
+import { GatewayTranslationEngine } from './GatewayTranslationEngine'
 import { SimulatedTranslationEngine, TranslationCallbacks } from './SimulatedTranslationEngine'
 
 export interface TranslationManagerCallbacks {
@@ -22,20 +22,22 @@ export interface TranslationManagerCallbacks {
   onTranslationComplete: (result: TranslationResult) => void
   onTelemetry: (telemetry: TranslationTelemetry) => void
   onError: (error: Error) => void
+  onQuotaExhausted?: (message: string) => void
 }
 
 export class TranslationManager {
   private callbacks: TranslationManagerCallbacks
-  private apiKey?: string
-  private geminiEngine: GeminiTranslationEngine | null = null
+  private gatewayEngine: GatewayTranslationEngine | null = null
   private simulatedEngine: SimulatedTranslationEngine
   private dialogueHistory: DialogueTurn[] = []
   private maxHistoryTurns: number = 20
   private customGlossary: Record<string, string> = {}
 
-  constructor(callbacks: TranslationManagerCallbacks, options?: { apiKey?: string; customGlossary?: Record<string, string> }) {
+  constructor(
+    callbacks: TranslationManagerCallbacks,
+    options?: { accessToken?: string | null; customGlossary?: Record<string, string> }
+  ) {
     this.callbacks = callbacks
-    this.apiKey = options?.apiKey || import.meta.env.VITE_GEMINI_API_KEY
     this.simulatedEngine = new SimulatedTranslationEngine()
 
     if (options?.customGlossary) {
@@ -43,14 +45,18 @@ export class TranslationManager {
       this.simulatedEngine.setCustomGlossary(this.customGlossary)
     }
 
-    if (this.apiKey && this.apiKey.trim().length > 10 && this.apiKey !== 'your_gemini_api_key_here') {
-      this.geminiEngine = new GeminiTranslationEngine(this.apiKey, this.customGlossary)
+    if (options?.accessToken && options.accessToken.trim().length > 20) {
+      this.gatewayEngine = new GatewayTranslationEngine(
+        options.accessToken.trim(),
+        this.customGlossary,
+        callbacks.onQuotaExhausted
+      )
     }
   }
 
   public setCustomGlossary(glossary: Record<string, string>): void {
     this.customGlossary = { ...glossary }
-    this.geminiEngine?.setCustomGlossary(this.customGlossary)
+    this.gatewayEngine?.setCustomGlossary(this.customGlossary)
     this.simulatedEngine.setCustomGlossary(this.customGlossary)
   }
 
@@ -58,12 +64,21 @@ export class TranslationManager {
     return { ...this.customGlossary }
   }
 
-  public setApiKey(key: string): void {
-    this.apiKey = key
-    if (key && key.trim().length > 10 && key !== 'your_gemini_api_key_here') {
-      this.geminiEngine = new GeminiTranslationEngine(key, this.customGlossary)
+  public setAccessToken(token: string | null): void {
+    const cleaned = token?.trim()
+    if (cleaned && cleaned.length > 20) {
+      if (this.gatewayEngine) {
+        this.gatewayEngine.setAccessToken(cleaned)
+      } else {
+        this.gatewayEngine = new GatewayTranslationEngine(
+          cleaned,
+          this.customGlossary,
+          this.callbacks.onQuotaExhausted
+        )
+      }
     } else {
-      this.geminiEngine = null
+      this.gatewayEngine?.cancelActiveStream()
+      this.gatewayEngine = null
     }
   }
 
@@ -73,14 +88,9 @@ export class TranslationManager {
     targetLang: string
   ): Promise<void> {
     const internalCallbacks: TranslationCallbacks = {
-      onStart: (result) => {
-        this.callbacks.onTranslationStart(result)
-      },
-      onToken: (token, accumulatedText) => {
-        this.callbacks.onTranslationToken(token, accumulatedText)
-      },
+      onStart: (result) => this.callbacks.onTranslationStart(result),
+      onToken: (token, accumulatedText) => this.callbacks.onTranslationToken(token, accumulatedText),
       onComplete: (result) => {
-        // Append turn to bidirectional dialogue history
         this.appendDialogueTurn({
           id: `turn-${utterance.id}`,
           channelId: utterance.channelId,
@@ -94,30 +104,21 @@ export class TranslationManager {
         })
         this.callbacks.onTranslationComplete(result)
       },
-      onTelemetry: (telemetry) => {
-        this.callbacks.onTelemetry(telemetry)
-      },
-      onError: (err) => {
-        this.callbacks.onError(err)
-      }
+      onTelemetry: (telemetry) => this.callbacks.onTelemetry(telemetry),
+      onError: (err) => this.callbacks.onError(err)
     }
 
-    if (this.geminiEngine) {
-      try {
-        await this.geminiEngine.translateStream(
-          utterance,
-          domainId,
-          targetLang,
-          this.dialogueHistory,
-          internalCallbacks
-        )
-        return
-      } catch (err) {
-        console.warn('[DUALAI-TRANSLATION] Live Gemini stream failed, falling back to simulated domain engine:', err)
-      }
+    if (this.gatewayEngine) {
+      await this.gatewayEngine.translateStream(
+        utterance,
+        domainId,
+        targetLang,
+        this.dialogueHistory,
+        internalCallbacks
+      )
+      return
     }
 
-    // Default or fallback to high-fidelity simulated engine
     await this.simulatedEngine.translateStream(
       utterance,
       domainId,
@@ -143,11 +144,11 @@ export class TranslationManager {
   }
 
   public cancelActive(): void {
-    this.geminiEngine?.cancelActiveStream()
+    this.gatewayEngine?.cancelActiveStream()
     this.simulatedEngine.cancelActiveStream()
   }
 
-  public isLiveApiAvailable(): boolean {
-    return Boolean(this.geminiEngine)
+  public isGatewayAuthenticated(): boolean {
+    return Boolean(this.gatewayEngine)
   }
 }

@@ -57,6 +57,7 @@ export interface SttClientConfig {
   confidenceThreshold: number
   interimResults: boolean
   smartFormat: boolean
+  endpointingMs?: number
   reconnectMaxAttempts: number
   reconnectBaseDelayMs: number
 }

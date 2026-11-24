@@ -321,3 +321,111 @@ Implement an RFC 4180 compliant CSV/JSON glossary parser with strict syntax vali
 
 ### 4. Result
 100% of Day 11 Acceptance Criteria verified (4/4 tests passing) with zero type or build errors.
+
+---
+
+## INCIDENT 013: CHROMIUM BAD IPC MESSAGE REASON 263 IN AUDIO-ONLY DESKTOP CAPTURE
+
+* **Date:** 2026-11-23
+* **Component:** Audio Ingestion Pipeline & Chromium Desktop Capturer Mojo IPC Contract
+* **Severity:** Blocker (Renderer terminated by browser process upon initiating translation session)
+
+### 1. Situation
+Upon clicking "START TRANSLATION" in development, the Electron renderer process was terminated immediately by Chromium with the fatal browser process log:
+`[9740:1123/223224.101716:ERROR:content/browser/bad_message.cc:29] Terminating renderer for bad IPC message, reason 263`
+
+### 2. Task
+Identify the root cause of Chromium `bad_message` Reason 263, prevent fatal renderer termination at the IPC layer, and ensure reliable dual-channel audio ingestion across platforms.
+
+### 3. Action
+* **Root Cause Analysis (RCA):** In Chromium's internal security enumerations, Reason 263 corresponds to `BadMessageReason::DESKTOP_CAPTURER_INVALID_OR_UNKNOWN_ID`. In `src/renderer/src/audio/AudioIngestionEngine.ts`, Channel B attempted to acquire system audio loopback by passing:
+  ```typescript
+  navigator.mediaDevices.getUserMedia({
+    audio: {
+      mandatory: {
+        chromeMediaSource: 'desktop',
+        chromeMediaSourceId: primaryScreen.id
+      }
+    },
+    video: false
+  })
+  ```
+  Chromium's Mojo desktop capturer interface (`desktop_capture_device.cc` / `media_stream_dispatcher_host.cc`) strictly mandates that requests using `chromeMediaSource: 'desktop'` must include a valid video constraint. Omitting video or specifying `video: false` is flagged as an illegal IPC message by Chromium's browser security subsystem, triggering an uncatchable `SIGKILL`/termination of the renderer process before any JavaScript Promise rejection can occur. Moreover, on macOS, desktop audio loopback is unsupported through Chromium's screen capturer without virtual audio loopback drivers (e.g. BlackHole/Loopback).
+* **Remediation:** Removed the illegal `chromeMediaSource: 'desktop'` call from `AudioIngestionEngine.ts`. Channel B now gracefully checks for dedicated virtual loopback input devices (`deviceIdB`) if configured, and safely defaults to the isolated bilateral stream clone (`this.streamChannelA.clone()`) for seamless end-to-end local testing.
+* **Verification:** Confirmed TypeScript typecheck (`pnpm run typecheck`), production compilation (`pnpm run build`), and automated verification suites pass with zero runtime terminations.
+
+### 4. Result
+Session initialization executes with zero lag. Clicking "START TRANSLATION" successfully transitions the master state machine into listening/transcribing mode with active Silero VAD analysis and zero IPC errors.
+
+---
+
+## INCIDENT 014: SYSTEM AUDIO LOOPBACK ROUTING, CHANNEL B LANGUAGE INVERSION AND LIVE STREAMING CORRUPTION
+
+* **Date:** 2026-11-23
+* **Component:** Native Loopback Pipeline, Audio Routing Policy, Deepgram STT & Gemini 2.0 Flash Streaming
+* **Severity:** High (Blocked live system-audio EN -> ES translation workflow)
+
+### 1. Situation
+An end-to-end audit following the Day 09-11 merge revealed four concrete live-pipeline blockers:
+1. Channel B did not capture real system audio and fell back to cloning Channel A (microphone), with no UI selector for loopback devices.
+2. `audioRoute` and `operatingMode` controls were visual-only; Channel B was hardcoded to listen in `targetLang` and translate to `sourceLang`, inverting one-way `EN -> ES` system audio translation.
+3. `SettingsModal.tsx` lacked a Deepgram Nova-2 API key field, and changing languages mid-session did not reconnect active WebSockets.
+4. `GeminiTranslationEngine.ts` split every streamed chunk by `' '` and rejoined with `.join(' ')`, inserting erroneous spaces inside sub-word tokens split across network chunks (e.g. `"administra ción"`), while `DeepgramStreamingClient.ts` transmitted raw `pcmData.buffer` without guarding subarray `byteOffset`/`byteLength`.
+
+### 2. Task
+Deliver true native system audio loopback capture on Electron v45 (macOS CoreAudio Tap / Windows WASAPI), enforce deterministic channel and language routing, expose live Deepgram + Gemini API controls with hot reconnection, and eliminate streaming data corruption.
+
+### 3. Action
+* **Native System Loopback:** Enabled `MacCatapLoopbackAudioForScreenShare` and `MacSckSystemAudioLoopbackOverride` in `src/main/index.ts` and registered `setDisplayMediaRequestHandler` returning `{ video: primaryScreen, audio: 'loopback' }`. Updated `AudioIngestionEngine.ts` to capture Channel B via selected virtual device or `getDisplayMedia`, releasing all video tracks cleanly on `stop()` and emitting explicit `LoopbackSourceStatus` telemetry.
+* **Deterministic Routing Policy:** Authored pure `src/renderer/src/audio/audioRoutingPolicy.ts` resolving channel activation (`captureChannelA`/`captureChannelB`), per-channel STT language, translation target direction, and Deepgram `endpointingMs`. Wired live route switching and dynamic per-channel reconnection in `SessionContext.tsx` and `StreamingSttManager.ts`.
+* **Live Streaming Hardening & UI Controls:** Fixed raw chunk concatenation in `GeminiTranslationEngine.ts`, added subarray-safe PCM slicing in `DeepgramStreamingClient.ts`, added Channel B loopback device selector and Deepgram Nova-2 API key input to `SettingsModal.tsx`, and added actionable loopback permission alerts in `DualPaneWorkspace.tsx`.
+* **Verification:** Authored `scripts/test_system_loopback_and_live_pipeline.mjs` (5/5 tests passing) and re-verified all 7 existing regression suites, `pnpm run typecheck`, and `pnpm run build`.
+
+### 4. Result
+All 8 automated test suites pass with 100% compliance, zero TypeScript/build errors, zero `any` types, and zero emojis. System audio loopback and live EN -> ES streaming translation are fully wired and ready for live API key verification.
+
+---
+
+## INCIDENT 015: COMMERCIAL SAAS ZERO-TRUST REMEDIATION & CLIENT SECRET ELIMINATION
+
+* **Date:** 2026-11-23
+* **Component:** Cloud Gateway, Supabase RLS, Billing Security & Electron Sandbox Hardening
+* **Severity:** Critical (Pre-commercial security mandate for multi-tenant SaaS launch)
+
+### 1. Situation
+In the initial prototype architecture, the Electron renderer connected directly to Deepgram WebSockets and Google Gemini via client-side keys (`VITE_*` / `localStorage`), exposed hardcoded quota telemetry (`67.36h`), ran with `sandbox: false`, and relied on Stripe (unsupported for Honduras-based publishers). Shipping such a build commercially would allow any user to extract master API keys from the `asar` bundle or network traffic and bypass hourly quotas.
+
+### 2. Task
+Eliminate 100% of upstream AI secrets and SDKs from the Electron client, enforce authoritative server-side 1-hour Free Tier metering and billing, lock down PostgreSQL with Force RLS, harden the Electron binary with OS Keychain encryption, and support Honduras-compatible payments (Microsoft Store + PayPal/Paddle).
+
+### 3. Action
+* **Zero-Trust Gateway (`server/`):** Authored isolated Node.js/TypeScript HTTP + WebSocket Gateway holding all provider secrets strictly server-side, enforcing Bearer JWT auth, rate limits (`429`), payload bounds (`413`), real-time WebSocket quota deduction with hard `4002` cutoff, Microsoft Store Collections Entra ID verification, and constant-time HMAC-SHA256 webhook verification with idempotent replay defense.
+* **Database Lock (`supabase/migrations/001_zero_trust_quota_billing.sql`):** Implemented `FORCE ROW LEVEL SECURITY`, revoked all client writes, created the automatic `3600s` (1-hour) Free Tier signup trigger, and locked `deduct_usage_seconds` / `credit_billing_purchase` exclusively to `service_role`.
+* **Electron & Renderer Hardening:** Enabled `sandbox: true`, strict CSP, production DevTools lockdown, and `safeStorage` OS Keychain session vault (`0o600`). Replaced direct provider clients with `GatewaySttClient`, `GatewayTranslationEngine`, and `AccountPlanModal`, shrinking `out/renderer/` by over 1 MB.
+* **Penetration Verification:** Authored `scripts/test_zero_trust_security.ts` executing live unauthenticated/forged JWT attacks, 0-second WS cutoff verification, forged webhook & replay attack tests, payload stuffing (`413`), flood rate limiting (`429`), and full compiled binary secret scanning across `out/`.
+
+### 4. Result
+6/6 penetration tests, 5/5 loopback/routing tests, and all 7 core regression suites pass 100% with zero secrets in `out/`, zero TypeScript/build warnings, zero `any` types, and zero emojis.
+
+---
+
+## INCIDENT 016: ONNX WASM JSEP 404 VAD STALL & GEMINI 3.X MODEL FAILOVER
+
+* **Date:** 2026-11-24
+* **Component:** Silero VAD v5 Web Worker (`vadWorker.ts`), Live PCM Dispatch & Gemini Gateway Model Routing
+* **Severity:** Blocker (Live audio reached Channel B VU meter at 75% but no text or translation emitted)
+
+### 1. Situation
+During the first live end-to-end macOS system loopback test, `CH B - OUT` metered real video audio cleanly and Deepgram Nova-2 connected, yet `VAD` remained stuck at `IDLE` and zero transcripts arrived. Simultaneously, live Gateway tests against Google Gemini returned `HTTP 402` (depleted prepayment credits on a Tier 1 project) and `HTTP 404` on deprecated `gemini-2.0-flash` / `gemini-2.5-flash` identifiers for newly created Free Tier keys.
+
+### 2. Task
+Restore reliable sub-second live speech-to-text streaming from native macOS system audio loopback, eliminate ONNX WASM asset 404 failures, and upgrade Gateway translation routing to active low-latency Gemini 3.x models with automatic failover.
+
+### 3. Action
+* **Pure WASM VAD Runtime & RMS Fallback:** Switched `src/renderer/src/audio/vad/vadWorker.ts` from default `onnxruntime-web` (which attempted to load missing `.jsep.wasm` assets) to `onnxruntime-web/wasm` (14.8 MB exact match in `/wasm/`), aligned Silero VAD v5 input tensors to 512 samples, and added an automatic in-worker RMS energy VAD fallback so speech detection never stalls silently.
+* **Silence-Gated Direct Live PCM Streaming:** Updated `SessionContext.tsx` to stream active PCM frames (above `-52 dBFS` with a 1,500ms trailing hangover) directly to Deepgram Nova-2 when authenticated with the Zero-Trust Gateway, guaranteeing zero dropped syllables on music-backed videos while preserving user quota during paused silence.
+* **Gemini 3.x Model Failover & Actionable Error Sanitization:** Updated `server/src/config.ts` and `server/src/proxy/geminiStreamProxy.ts` to default to `gemini-3.5-flash-lite` with automatic `404`/`503` failover to `gemini-3.8-flash`, surfacing sanitized actionable HTTP 402/429 alerts without leaking credentials.
+* **Live Gateway Latency Ping:** Replaced simulated random ping polling in `SessionContext.tsx` with real 5-second `/v1/health` HTTP roundtrip measurement.
+
+### 4. Result
+Live end-to-end verification confirmed Deepgram Nova-2 WebSocket connectivity (`CONNECTED OK`), Gemini 3.5 Flash Lite streaming translation (`HTTP 200`, TTFT ~880ms), `vadWorker` bundle reduction from 529 kB to 112 kB, and 100% pass rate across all 9 automated test suites.

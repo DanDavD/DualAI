@@ -6,6 +6,7 @@ import { DualPaneWorkspace } from './components/Workspace/DualPaneWorkspace'
 import { MasterToolbar } from './components/Footer/MasterToolbar'
 import { GlossaryModal } from './components/Modals/GlossaryModal'
 import { SettingsModal } from './components/Modals/SettingsModal'
+import { AccountPlanModal } from './components/Modals/AccountPlanModal'
 
 const WorkspaceContent: React.FC = () => {
   return (
@@ -24,9 +25,10 @@ const WorkspaceContent: React.FC = () => {
       {/* ZONE 4: MASTER TOOLBAR, COUGH/MUTE BUFFER & STATE MACHINE */}
       <MasterToolbar />
 
-      {/* MODALS: MODULE 4 CONFIGURATION MATRIX & CUSTOM GLOSSARY ENGINE */}
+      {/* MODALS: MODULE 4 CONFIGURATION MATRIX, CUSTOM GLOSSARY & ZERO-TRUST ACCOUNT */}
       <GlossaryModal />
       <SettingsModal />
+      <AccountPlanModal />
     </div>
   )
 }

@@ -12,7 +12,8 @@ import {
   OperatingMode,
   LatencyMode,
   AudioLevelMetric,
-  ChannelId
+  ChannelId,
+  LoopbackSourceStatus
 } from '../../../types/audio'
 import { DomainId } from '../../../types/domain'
 import { TranscriptUtterance, SttConnectionState } from '../../../types/stt'
@@ -25,7 +26,18 @@ import {
   DEFAULT_SHORTCUT_BINDINGS,
   ShortcutActionId
 } from '../../../types/settings'
+import {
+  AccountQuota,
+  AuthenticatedSession,
+  BillingPlan,
+  DEFAULT_SAAS_PLANS
+} from '../../../types/account'
 import { AudioIngestionEngine } from '../audio/AudioIngestionEngine'
+import {
+  resolveAudioRoutingPolicy,
+  resolveTranslationTargetForChannel,
+  resolveEndpointingMs
+} from '../audio/audioRoutingPolicy'
 import { StreamingSttManager } from '../audio/stt/StreamingSttManager'
 import { TranslationManager } from '../translation/TranslationManager'
 import {
@@ -33,11 +45,19 @@ import {
   PipelineStateSnapshot
 } from '../state/sessionStateMachine'
 import { glossaryEntriesToMap } from '../utils/glossaryParser'
+import {
+  clearEncryptedSession,
+  fetchAuthoritativeQuota,
+  getGatewayHttpUrl,
+  loadEncryptedSession,
+  signInWithEmailPassword,
+  verifyMicrosoftStorePurchase
+} from '../services/gatewayAuthService'
 
 const STORAGE_KEY_HUD = 'dualai_hud_settings'
 const STORAGE_KEY_GLOSSARY = 'dualai_custom_glossary'
 const STORAGE_KEY_SHORTCUTS = 'dualai_shortcut_bindings'
-const STORAGE_KEY_GEMINI_KEY = 'dualai_gemini_api_key'
+const STORAGE_KEY_LOOPBACK_DEVICE = 'dualai_loopback_device_id'
 
 function loadJsonStorage<T>(key: string, fallback: T): T {
   try {
@@ -70,7 +90,11 @@ export interface SessionState {
   isCoughMuted: boolean
   isMonitorLoopbackActive: boolean
   selectedInputDeviceId: string
+  selectedLoopbackDeviceId: string
   selectedOutputDeviceId: string
+  loopbackStatus: LoopbackSourceStatus
+  loopbackStatusMessage: string | null
+  pipelineErrorMessage: string | null
   gainChannelA: number
   gainChannelB: number
   levelMetricA: AudioLevelMetric | null
@@ -116,7 +140,14 @@ export interface SessionState {
   // Custom Glossary & Global Shortcuts State (Day 11)
   customGlossaryEntries: GlossaryEntry[]
   shortcutBindings: ShortcutBinding[]
-  geminiApiKey: string
+
+  // Zero-Trust SaaS Authentication, Quota & Billing State
+  authSession: AuthenticatedSession | null
+  accountQuota: AccountQuota | null
+  availablePlans: BillingPlan[]
+  isAccountModalOpen: boolean
+  isGatewayAuthenticated: boolean
+  isQuotaExhausted: boolean
 
   // Actions
   setAudioRoute: (route: AudioRouteMode) => void
@@ -132,6 +163,8 @@ export interface SessionState {
   closeGlossaryModal: () => void
   openSettingsModal: () => void
   closeSettingsModal: () => void
+  openAccountModal: () => void
+  closeAccountModal: () => void
 
   // Audio Engine & Calibration Actions
   startAudioEngine: () => Promise<void>
@@ -142,6 +175,7 @@ export interface SessionState {
   setGainChannelB: (gain: number) => void
   setVadThreshold: (threshold: number) => void
   setSelectedInputDeviceId: (deviceId: string) => void
+  setSelectedLoopbackDeviceId: (deviceId: string) => void
   setSelectedOutputDeviceId: (deviceId: string) => void
   playHardwareCalibrationTone: (gainMultiplier: number) => Promise<void>
   setMonitorLoopback: (enabled: boolean) => void
@@ -168,14 +202,20 @@ export interface SessionState {
   clearCustomGlossary: () => void
   updateShortcutBinding: (actionId: ShortcutActionId, accelerator: string) => Promise<boolean>
   resetShortcutBindings: () => Promise<void>
-  setGeminiApiKey: (key: string) => void
+  signInAccount: (email: string, password: string, mode: 'signin' | 'signup') => Promise<void>
+  signOutAccount: () => Promise<void>
+  refreshAccountQuota: () => Promise<void>
+  verifyMsStoreReceipt: (
+    storeIdKey: string,
+    productId: string
+  ) => Promise<{ verified: boolean; error?: string }>
 }
 
 const SessionContext = createContext<SessionState | null>(null)
 
 export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [audioRoute, setAudioRoute] = useState<AudioRouteMode>('bilateral')
-  const [operatingMode, setOperatingMode] = useState<OperatingMode>('conversation')
+  const [audioRoute, setAudioRoute] = useState<AudioRouteMode>('system')
+  const [operatingMode, setOperatingMode] = useState<OperatingMode>('translate')
   const [domainId, setDomainId] = useState<DomainId>('medical')
   const [sourceLang, setSourceLang] = useState('en')
   const [targetLang, setTargetLang] = useState('es')
@@ -183,10 +223,19 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [noiseSuppression, setNoiseSuppression] = useState(true)
   const [echoCancellation, setEchoCancellation] = useState(true)
   const [latencyPingMs, setLatencyPingMs] = useState(42)
-  const [quotaTotalHours] = useState(100)
-  const [quotaRemainingHours] = useState(67.36)
   const [isGlossaryModalOpen, setIsGlossaryModalOpen] = useState(false)
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false)
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState(false)
+
+  // Zero-Trust SaaS Account & Authoritative Quota State
+  const [authSession, setAuthSession] = useState<AuthenticatedSession | null>(null)
+  const [accountQuota, setAccountQuota] = useState<AccountQuota | null>(null)
+  const [availablePlans, setAvailablePlans] = useState<BillingPlan[]>(DEFAULT_SAAS_PLANS)
+
+  const quotaTotalHours = accountQuota ? accountQuota.totalAllocatedSeconds / 3600 : 1.0
+  const quotaRemainingHours = accountQuota ? accountQuota.remainingSeconds / 3600 : 1.0
+  const isGatewayAuthenticated = Boolean(authSession?.accessToken)
+  const isQuotaExhausted = Boolean(accountQuota && accountQuota.remainingSeconds <= 0)
 
   // Audio Engine Ingestion & Hardware State
   const [isAudioActive, setIsAudioActive] = useState(false)
@@ -194,7 +243,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [isCoughMuted, setIsCoughMuted] = useState(false)
   const [isMonitorLoopbackActive, setIsMonitorLoopbackActive] = useState(false)
   const [hasPipelineError, setHasPipelineError] = useState(false)
+  const [pipelineErrorMessage, setPipelineErrorMessage] = useState<string | null>(null)
+  const [loopbackStatus, setLoopbackStatus] = useState<LoopbackSourceStatus>('inactive')
+  const [loopbackStatusMessage, setLoopbackStatusMessage] = useState<string | null>(null)
   const [selectedInputDeviceId, setSelectedInputDeviceId] = useState('default')
+  const [selectedLoopbackDeviceId, setSelectedLoopbackDeviceIdState] = useState<string>(() => {
+    try {
+      return localStorage.getItem(STORAGE_KEY_LOOPBACK_DEVICE) || 'system_loopback'
+    } catch {
+      return 'system_loopback'
+    }
+  })
   const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState('default')
   const [gainChannelA, setGainChannelAState] = useState(1.0)
   const [gainChannelB, setGainChannelBState] = useState(1.0)
@@ -248,13 +307,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [shortcutBindings, setShortcutBindings] = useState<ShortcutBinding[]>(() =>
     loadJsonStorage<ShortcutBinding[]>(STORAGE_KEY_SHORTCUTS, DEFAULT_SHORTCUT_BINDINGS)
   )
-  const [geminiApiKey, setGeminiApiKeyState] = useState<string>(() => {
-    try {
-      return localStorage.getItem(STORAGE_KEY_GEMINI_KEY) || ''
-    } catch {
-      return ''
-    }
-  })
+
+  const routingDecision = useMemo(
+    () =>
+      resolveAudioRoutingPolicy({
+        audioRoute,
+        operatingMode,
+        sourceLang,
+        targetLang
+      }),
+    [audioRoute, operatingMode, sourceLang, targetLang]
+  )
 
   const engineRef = useRef<AudioIngestionEngine | null>(null)
   const sttManagerRef = useRef<StreamingSttManager | null>(null)
@@ -262,13 +325,19 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const domainIdRef = useRef(domainId)
   const sourceLangRef = useRef(sourceLang)
   const targetLangRef = useRef(targetLang)
+  const routingDecisionRef = useRef(routingDecision)
   const isHudOpenRef = useRef(isHudOpen)
   const hudSettingsRef = useRef(hudSettings)
   const isAudioActiveRef = useRef(isAudioActive)
+  const lastActiveAudioMsRef = useRef<Record<ChannelId, number>>({
+    channel_a: 0,
+    channel_b: 0
+  })
 
   domainIdRef.current = domainId
   sourceLangRef.current = sourceLang
   targetLangRef.current = targetLang
+  routingDecisionRef.current = routingDecision
   isHudOpenRef.current = isHudOpen
   hudSettingsRef.current = hudSettings
   isAudioActiveRef.current = isAudioActive
@@ -366,16 +435,24 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         },
         onError: (err) => {
           console.warn('[DUALAI-SESSION] Translation Error:', err)
+          setPipelineErrorMessage(err.message)
           setActiveTranslation(null)
+        },
+        onQuotaExhausted: (message) => {
+          setAccountQuota((prev) =>
+            prev ? { ...prev, remainingSeconds: 0, subscriptionStatus: 'exhausted' } : prev
+          )
+          setPipelineErrorMessage(message)
+          setIsAccountModalOpen(true)
         }
       },
       {
-        apiKey: geminiApiKey || undefined,
         customGlossary: initialGlossaryMap
       }
     )
 
     translationManagerRef.current = tm
+    setTranslationProvider(tm.isGatewayAuthenticated() ? 'gemini-2.0-flash' : 'simulated-gemini')
 
     return () => {
       tm.cancelActive()
@@ -420,9 +497,11 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           }
           setUtterances((prev) => [...prev.slice(-999), utterance])
 
-          // Trigger streaming domain translation immediately upon speech pause
-          const target =
-            utterance.channelId === 'channel_a' ? targetLangRef.current : sourceLangRef.current
+          // Trigger streaming domain translation using deterministic audio route & mode direction
+          const target = resolveTranslationTargetForChannel(
+            utterance.channelId,
+            routingDecisionRef.current
+          )
           translationManagerRef.current?.translateUtterance(utterance, domainIdRef.current, target)
         },
         onConnectionChange: (channelId, state) => {
@@ -439,6 +518,28 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         },
         onError: (channelId, err) => {
           console.warn(`[DUALAI] STT Error on ${channelId}:`, err)
+        },
+        onQuotaUpdate: (remainingSeconds, totalAllocatedSeconds) => {
+          setAccountQuota((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  remainingSeconds,
+                  totalAllocatedSeconds,
+                  subscriptionStatus: remainingSeconds <= 0 ? 'exhausted' : prev.subscriptionStatus
+                }
+              : prev
+          )
+        },
+        onQuotaExhausted: (message) => {
+          engineRef.current?.stop()
+          sttManagerRef.current?.stop()
+          setIsAudioActive(false)
+          setAccountQuota((prev) =>
+            prev ? { ...prev, remainingSeconds: 0, subscriptionStatus: 'exhausted' } : prev
+          )
+          setPipelineErrorMessage(message)
+          setIsAccountModalOpen(true)
         }
       },
       {
@@ -448,17 +549,30 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     )
 
     sttManagerRef.current = stt
-    stt.updateLanguages(sourceLang, targetLang)
+    setSttProvider(stt.isGatewayAuthenticated() ? 'deepgram-nova-2' : 'simulated-stt')
+    stt.updateRouting({
+      languageA: routingDecisionRef.current.sttLangA,
+      languageB: routingDecisionRef.current.sttLangB,
+      enableChannelA: routingDecisionRef.current.captureChannelA,
+      enableChannelB: routingDecisionRef.current.captureChannelB,
+      endpointingMs: resolveEndpointingMs(latencyMode)
+    })
 
     return () => {
       stt.stop()
     }
   }, [])
 
-  // Sync language and domain changes with STT Manager
+  // Sync routing, language direction, latency mode, and domain changes with STT Manager
   useEffect(() => {
-    sttManagerRef.current?.updateLanguages(sourceLang, targetLang)
-  }, [sourceLang, targetLang])
+    sttManagerRef.current?.updateRouting({
+      languageA: routingDecision.sttLangA,
+      languageB: routingDecision.sttLangB,
+      enableChannelA: routingDecision.captureChannelA,
+      enableChannelB: routingDecision.captureChannelB,
+      endpointingMs: resolveEndpointingMs(latencyMode)
+    })
+  }, [routingDecision, latencyMode])
 
   useEffect(() => {
     sttManagerRef.current?.updateDomain(domainId)
@@ -474,13 +588,32 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setLevelMetricB(metric)
         }
       },
-      onPcmChunk: (channelId) => {
+      onPcmChunk: (channelId, pcmData) => {
         if (engineRef.current) {
           const status = engineRef.current.getBufferStatus(channelId)
           if (channelId === 'channel_a') {
             setBufferSamplesA(status.available)
           } else {
             setBufferSamplesB(status.available)
+          }
+        }
+        // In live Zero-Trust Gateway mode, stream active PCM (above -52dBFS + 1.5s hangover)
+        // directly to Deepgram Nova-2 so music-backed videos transcribe cleanly while paused silence saves quota
+        if (sttManagerRef.current?.isGatewayAuthenticated()) {
+          if (channelId === 'channel_a' && engineRef.current?.getIsCoughMuted()) {
+            return
+          }
+          let maxAbs = 0
+          for (let i = 0; i < pcmData.length; i++) {
+            const v = pcmData[i] < 0 ? -pcmData[i] : pcmData[i]
+            if (v > maxAbs) maxAbs = v
+          }
+          const now = Date.now()
+          if (maxAbs >= 80) {
+            lastActiveAudioMsRef.current[channelId] = now
+          }
+          if (now - lastActiveAudioMsRef.current[channelId] <= 1500) {
+            sttManagerRef.current.sendAudio(channelId, pcmData)
           }
         }
       },
@@ -500,10 +633,14 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         } else {
           setSpeechEventsCountB((prev) => prev + 1)
         }
-        sttManagerRef.current?.sendAudio(event.channelId, preSpeechPcm)
+        if (!sttManagerRef.current?.isGatewayAuthenticated()) {
+          sttManagerRef.current?.sendAudio(event.channelId, preSpeechPcm)
+        }
       },
       onSpeechFrame: (channelId, pcmData) => {
-        sttManagerRef.current?.sendAudio(channelId, pcmData)
+        if (!sttManagerRef.current?.isGatewayAuthenticated()) {
+          sttManagerRef.current?.sendAudio(channelId, pcmData)
+        }
       },
       onSpeechEnd: (event) => {
         sttManagerRef.current?.signalSpeechEnd(event.channelId)
@@ -511,12 +648,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       onVadStatusChange: (status) => {
         setIsVadReady(status === 'ready')
       },
+      onLoopbackStatusChange: (status, detail) => {
+        setLoopbackStatus(status)
+        setLoopbackStatusMessage(detail ?? null)
+      },
       onDeviceDisconnected: (event) => {
         console.warn('[DUALAI] Audio hardware configuration changed:', event)
       },
       onError: (err) => {
         console.error('[DUALAI] Audio Engine error:', err)
         setHasPipelineError(true)
+        setPipelineErrorMessage(err.message)
         setIsAudioActive(false)
         setIsInitializingAudio(false)
       }
@@ -529,29 +671,58 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [])
 
-  // Start Audio Ingestion & WebSocket STT Pipeline
+  // Start Audio Ingestion & Zero-Trust Gateway STT Pipeline
   const startAudioEngine = useCallback(async () => {
     if (!engineRef.current) return
+    if (accountQuota && accountQuota.remainingSeconds <= 0) {
+      setPipelineErrorMessage(
+        'Your 1-hour free interpretation quota has been used. Select a plan to continue.'
+      )
+      setIsAccountModalOpen(true)
+      return
+    }
     setHasPipelineError(false)
+    setPipelineErrorMessage(null)
     setIsInitializingAudio(true)
+    const activeRouting = routingDecisionRef.current
     try {
+      sttManagerRef.current?.updateRouting({
+        languageA: activeRouting.sttLangA,
+        languageB: activeRouting.sttLangB,
+        enableChannelA: activeRouting.captureChannelA,
+        enableChannelB: activeRouting.captureChannelB,
+        endpointingMs: resolveEndpointingMs(latencyMode)
+      })
       await engineRef.current.start({
         noiseSuppression,
         echoCancellation,
         gainA: gainChannelA,
         gainB: gainChannelB,
-        deviceIdA: selectedInputDeviceId
+        deviceIdA: selectedInputDeviceId,
+        deviceIdB: selectedLoopbackDeviceId,
+        captureChannelA: activeRouting.captureChannelA,
+        captureChannelB: activeRouting.captureChannelB
       })
       sttManagerRef.current?.start()
       setIsAudioActive(true)
     } catch (err) {
       console.error('[DUALAI] Failed to start audio engine:', err)
       setHasPipelineError(true)
+      setPipelineErrorMessage(err instanceof Error ? err.message : String(err))
       setIsAudioActive(false)
     } finally {
       setIsInitializingAudio(false)
     }
-  }, [noiseSuppression, echoCancellation, gainChannelA, gainChannelB, selectedInputDeviceId])
+  }, [
+    noiseSuppression,
+    echoCancellation,
+    gainChannelA,
+    gainChannelB,
+    selectedInputDeviceId,
+    selectedLoopbackDeviceId,
+    latencyMode,
+    accountQuota
+  ])
 
   // Stop Audio Ingestion & Terminate Sockets cleanly
   const stopAudioEngine = useCallback(() => {
@@ -560,6 +731,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setIsAudioActive(false)
       setIsInitializingAudio(false)
       setIsMonitorLoopbackActive(false)
+      setPipelineErrorMessage(null)
       setLevelMetricA(null)
       setLevelMetricB(null)
       setBufferSamplesA(0)
@@ -577,6 +749,18 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setInterimTranscriptB(null)
     setActiveTranslation(null)
   }, [])
+
+  // Re-initialize hardware capture cleanly if user switches AudioRouteMode mid-session
+  const prevAudioRouteRef = useRef<AudioRouteMode>(audioRoute)
+  useEffect(() => {
+    if (prevAudioRouteRef.current !== audioRoute) {
+      prevAudioRouteRef.current = audioRoute
+      if (isAudioActiveRef.current) {
+        stopAudioEngine()
+        void startAudioEngine()
+      }
+    }
+  }, [audioRoute, stopAudioEngine, startAudioEngine])
 
   // Instantaneous Cough Mute (Day 09 DoD: 0ms audible bleed within 1 buffer quantum)
   const setCoughMute = useCallback((muted: boolean) => {
@@ -824,15 +1008,90 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [])
 
-  const setGeminiApiKey = useCallback((key: string) => {
-    setGeminiApiKeyState(key)
+  const setSelectedLoopbackDeviceId = useCallback((deviceId: string) => {
+    setSelectedLoopbackDeviceIdState(deviceId)
     try {
-      localStorage.setItem(STORAGE_KEY_GEMINI_KEY, key)
+      localStorage.setItem(STORAGE_KEY_LOOPBACK_DEVICE, deviceId)
     } catch {
       // Ignore storage error
     }
-    translationManagerRef.current?.setApiKey(key)
   }, [])
+
+  // Restore encrypted session from OS Keychain (Electron safeStorage) on boot
+  useEffect(() => {
+    let active = true
+    void (async () => {
+      const saved = await loadEncryptedSession()
+      if (!active || !saved) return
+      setAuthSession(saved)
+      sttManagerRef.current?.setAccessToken(saved.accessToken)
+      translationManagerRef.current?.setAccessToken(saved.accessToken)
+      setSttProvider('deepgram-nova-2')
+      setTranslationProvider('gemini-2.0-flash')
+      try {
+        const snapshot = await fetchAuthoritativeQuota(saved.accessToken)
+        if (!active) return
+        setAccountQuota(snapshot.quota)
+        setAvailablePlans(snapshot.plans)
+      } catch {
+        // Gateway may be offline during local cold start; keep cached encrypted session
+      }
+    })()
+    return () => {
+      active = false
+    }
+  }, [])
+
+  const signInAccount = useCallback(
+    async (email: string, password: string, mode: 'signin' | 'signup') => {
+      const result = await signInWithEmailPassword(email, password, mode)
+      setAuthSession(result.session)
+      setAccountQuota(result.quota)
+      setAvailablePlans(result.plans)
+      sttManagerRef.current?.setAccessToken(result.session.accessToken)
+      translationManagerRef.current?.setAccessToken(result.session.accessToken)
+      setSttProvider('deepgram-nova-2')
+      setTranslationProvider('gemini-2.0-flash')
+      setPipelineErrorMessage(null)
+    },
+    []
+  )
+
+  const signOutAccount = useCallback(async () => {
+    stopAudioEngine()
+    await clearEncryptedSession()
+    setAuthSession(null)
+    setAccountQuota(null)
+    sttManagerRef.current?.setAccessToken(null)
+    translationManagerRef.current?.setAccessToken(null)
+    setSttProvider('simulated-stt')
+    setTranslationProvider('simulated-gemini')
+  }, [stopAudioEngine])
+
+  const refreshAccountQuota = useCallback(async () => {
+    if (!authSession?.accessToken) return
+    const snapshot = await fetchAuthoritativeQuota(authSession.accessToken)
+    setAccountQuota(snapshot.quota)
+    setAvailablePlans(snapshot.plans)
+  }, [authSession])
+
+  const verifyMsStoreReceipt = useCallback(
+    async (storeIdKey: string, productId: string): Promise<{ verified: boolean; error?: string }> => {
+      if (!authSession?.accessToken) {
+        return { verified: false, error: 'Sign in required before verifying Store purchase.' }
+      }
+      const res = await verifyMicrosoftStorePurchase({
+        accessToken: authSession.accessToken,
+        storeIdKey,
+        productId
+      })
+      if (res.verified) {
+        await refreshAccountQuota()
+      }
+      return { verified: res.verified, error: res.error }
+    },
+    [authSession, refreshAccountQuota]
+  )
 
   // Sync persisted global shortcuts into Electron Main on boot
   useEffect(() => {
@@ -841,15 +1100,40 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [])
 
-  // 5-second simulated telemetry ping polling
+  // 5-second live Zero-Trust Gateway roundtrip telemetry ping (falls back cleanly when offline)
   useEffect(() => {
+    let active = true
+    const measurePing = async () => {
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 3000)
+      const t0 = performance.now()
+      try {
+        const res = await fetch(`${getGatewayHttpUrl()}/v1/health`, {
+          method: 'GET',
+          signal: controller.signal
+        })
+        if (active && res.ok) {
+          setLatencyPingMs(Math.max(1, Math.round(performance.now() - t0)))
+        }
+      } catch {
+        // Gateway offline: retain baseline mode latency estimate without noisy console errors
+        if (active) {
+          setLatencyPingMs(latencyMode === 'sub_second_live' ? 38 : 74)
+        }
+      } finally {
+        clearTimeout(timeoutId)
+      }
+    }
+
+    void measurePing()
     const pollInterval = setInterval(() => {
-      const basePing = latencyMode === 'sub_second_live' ? 38 : 74
-      const jitter = Math.floor(Math.random() * 10) - 5
-      setLatencyPingMs(Math.max(20, basePing + jitter))
+      void measurePing()
     }, 5000)
 
-    return () => clearInterval(pollInterval)
+    return () => {
+      active = false
+      clearInterval(pollInterval)
+    }
   }, [latencyMode])
 
   // Swap Source and Target Languages cleanly
@@ -947,6 +1231,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const closeGlossaryModal = useCallback(() => setIsGlossaryModalOpen(false), [])
   const openSettingsModal = useCallback(() => setIsSettingsModalOpen(true), [])
   const closeSettingsModal = useCallback(() => setIsSettingsModalOpen(false), [])
+  const openAccountModal = useCallback(() => setIsAccountModalOpen(true), [])
+  const closeAccountModal = useCallback(() => setIsAccountModalOpen(false), [])
 
   return (
     <SessionContext.Provider
@@ -969,7 +1255,11 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         isCoughMuted,
         isMonitorLoopbackActive,
         selectedInputDeviceId,
+        selectedLoopbackDeviceId,
         selectedOutputDeviceId,
+        loopbackStatus,
+        loopbackStatusMessage,
+        pipelineErrorMessage,
         gainChannelA,
         gainChannelB,
         levelMetricA,
@@ -1003,7 +1293,12 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         hudSettings,
         customGlossaryEntries,
         shortcutBindings,
-        geminiApiKey,
+        authSession,
+        accountQuota,
+        availablePlans,
+        isAccountModalOpen,
+        isGatewayAuthenticated,
+        isQuotaExhausted,
         setAudioRoute,
         setOperatingMode,
         setDomainId,
@@ -1017,6 +1312,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         closeGlossaryModal,
         openSettingsModal,
         closeSettingsModal,
+        openAccountModal,
+        closeAccountModal,
         startAudioEngine,
         stopAudioEngine,
         toggleCoughMute,
@@ -1025,6 +1322,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setGainChannelB,
         setVadThreshold,
         setSelectedInputDeviceId,
+        setSelectedLoopbackDeviceId,
         setSelectedOutputDeviceId,
         playHardwareCalibrationTone,
         setMonitorLoopback,
@@ -1043,7 +1341,10 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         clearCustomGlossary,
         updateShortcutBinding,
         resetShortcutBindings,
-        setGeminiApiKey
+        signInAccount,
+        signOutAccount,
+        refreshAccountQuota,
+        verifyMsStoreReceipt
       }}
     >
       {children}

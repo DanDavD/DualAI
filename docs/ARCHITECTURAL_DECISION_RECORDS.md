@@ -323,3 +323,49 @@ We implement a **modular 4-tab Configuration Matrix Modal (`SettingsModal.tsx`)*
 ### Consequences
 * **Positive:** Keeps the primary dual-pane workspace 100% focused on interpretation while delivering enterprise hardware calibration, glossary accuracy, and regulatory transparency.
 * **Negative:** OS global shortcuts may conflict with platform-reserved bindings; mitigated via live registration status feedback and one-click default reset.
+
+---
+
+## ADR-013: NATIVE SYSTEM AUDIO LOOPBACK, DETERMINISTIC ROUTING POLICY AND LIVE STREAMING REMEDIATION
+
+### Status
+Accepted
+
+### Context
+Legacy Chromium `chromeMediaSource: 'desktop'` audio-only constraints trigger fatal renderer termination (`bad_message` Reason 263) and do not support macOS system audio loopback. Furthermore, Channel B previously fell back silently to cloning Channel A (microphone), had hardcoded inverted language direction (`targetLang -> sourceLang`) even during single-channel system translation, and lacked in-app Deepgram API key management or live socket rebinding.
+
+### Decision
+We implement a **native Electron v45 system audio loopback pipeline** governed by a **pure deterministic audio routing policy (`audioRoutingPolicy.ts`)**:
+1. **Native OS Loopback Interception (`src/main/index.ts`):** Enables macOS CoreAudio Process Tap and ScreenCaptureKit loopback switches (`MacCatapLoopbackAudioForScreenShare`, `MacSckSystemAudioLoopbackOverride`) and registers `session.defaultSession.setDisplayMediaRequestHandler` resolving `{ video: primaryScreen, audio: 'loopback' }`, paired with explicit media/display-capture permission handlers.
+2. **Priority-Ordered Channel B Ingestion (`AudioIngestionEngine.ts`):** Attempts explicitly selected virtual loopback devices (e.g. BlackHole / VB-Cable) first, then invokes `navigator.mediaDevices.getDisplayMedia` with minimal video constraints (`16x16 @ 1fps`, video tracks disabled while active and cleanly stopped on teardown) to extract the live system audio track. Eliminates silent microphone cloning and surfaces explicit `LoopbackSourceStatus` telemetry (`native_loopback`, `virtual_device`, `unavailable`, `inactive`) with actionable UI alerts.
+3. **Deterministic Route & Direction Matrix (`audioRoutingPolicy.ts`):** Single-channel routes (`system`, `app`, `mic`) and one-way `translate` mode strictly enforce `sourceLang -> targetLang` on all active channels. Two-way bilateral inversion (`A: source -> target`, `B: target -> source`) activates exclusively under `bilateral` + `conversation`.
+4. **Live API Controls & Streaming Reliability:** Exposes both Deepgram Nova-2 and Gemini 2.0 Flash API keys in Settings Tab 2 with live/simulator status badges and hot socket reconnection (`StreamingSttManager.setApiKey` & `updateRouting`), wires `LatencyMode` into Deepgram `endpointing`, fixes Gemini sub-word chunk concatenation (`accumulatedText += chunkText`), and slices pooled PCM `ArrayBuffer` views cleanly prior to binary WebSocket transmission.
+
+### Consequences
+* **Positive:** True system-wide audio capture on macOS (13+/14.2+) and Windows without mandatory third-party drivers, zero renderer IPC crashes, accurate EN -> ES system translation out of the box, and zero mid-word corruption during live Gemini streaming.
+* **Negative:** Native macOS system audio capture requires one-time user authorization under macOS System Settings -> Privacy & Security -> Screen & System Audio Recording; mitigated with an actionable diagnostic banner and optional virtual loopback device selector in Settings Tab 1.
+
+---
+
+## ADR-014: ZERO-TRUST CLOUD GATEWAY, POSTGRESQL FORCE RLS QUOTAS AND HONDURAS-COMPATIBLE BILLING
+
+### Status
+Accepted
+
+### Context
+Scaling DualAI to hundreds of paying non-technical users with a 1-hour Free Tier and paid hourly plans makes client-side API key configuration unviable and insecure. Any `VITE_*` secret or provider SDK bundled inside Electron (`asar`) can be extracted via DevTools, Wireshark, or binary inspection, exposing Deepgram and Gemini accounts to unlimited financial abuse. Furthermore, Stripe is unavailable to Honduras-based publishers, requiring native Microsoft Store (MSIX) and globally accessible Merchant-of-Record / PayPal payout channels.
+
+### Decision
+We implement a **100% Zero-Trust Cloud Gateway architecture (`server/`)** backed by **PostgreSQL Force RLS (`supabase/migrations/001_zero_trust_quota_billing.sql`)** and **hardened Electron OS Keychain storage**:
+1. **Zero Client Secrets & SDK Removal:** Eliminated `DeepgramStreamingClient.ts`, `GeminiTranslationEngine.ts`, `@google/genai` renderer imports, `VITE_DEEPGRAM_API_KEY`, `VITE_GEMINI_API_KEY`, and all manual API key inputs from the desktop UI. The Electron renderer bundle (`out/renderer/`) shrinks by >1 MB and contains zero upstream provider credentials or endpoints.
+2. **Server-Only Proxy & Real-Time Metering (`server/`):**
+   - `ws(s)://<gateway>/v1/stt`: Authenticates via Bearer JWT (`Sec-WebSocket-Protocol: ['dualai-auth', jwt]`), relays binary PCM to Deepgram Nova-2 using server-only `DEEPGRAM_API_KEY`, bills elapsed active seconds atomically on the server, and force-closes with WebSocket code `4002` (`QUOTA_EXHAUSTED`) at 0 seconds.
+   - `POST /v1/translate`: Validates Bearer JWT, payload limits (`<= 4,000` chars), and active quota before streaming Gemini 2.0 Flash SSE tokens using server-only `GEMINI_API_KEY` with Zero-Data Retention.
+   - Global IP/user token-bucket rate limiting (`429`) and per-plan concurrent session limits (`4003`).
+3. **Database Lock (`supabase/migrations/001_zero_trust_quota_billing.sql`):** `FORCE ROW LEVEL SECURITY` on all tables (`plans`, `user_quotas`, `usage_ledger`, `billing_events`), read-only `SELECT` strictly on `auth.uid() = user_id`, zero client mutating grants, automatic 1-hour (`3,600s`) signup trigger, and `service_role`-only atomic RPCs (`deduct_usage_seconds`, `credit_billing_purchase`).
+4. **Honduras-Compatible Multi-Provider Billing (`server/src/billing/billingVerifier.ts`):** Native Windows MSIX **Microsoft Store Collections v9.0 API** (Entra ID server-to-server entitlement check) paired with constant-time HMAC-SHA256 webhook verification for **PayPal / Paddle** (macOS & Web), protected by idempotent `UNIQUE(provider, external_transaction_id)` replay guards.
+5. **Electron Binary Hardening (`src/main/index.ts`):** Enforced `sandbox: true`, `contextIsolation: true`, `nodeIntegration: false`, strict CSP excluding upstream AI APIs, production DevTools lockdown (`app.isPackaged`), and OS Keychain / DPAPI encrypted session storage via `Electron safeStorage` (`0o600`).
+
+### Consequences
+* **Positive:** Complete immunity against client-side API key theft, network sniffing, DB tampering, and receipt replay; frictionless 1-hour Free Tier onboarding for non-technical users; Honduras-compatible monetization via Microsoft Store and PayPal/Paddle.
+* **Negative:** Requires deploying and operating the lightweight `server/` Gateway (e.g. Railway / Fly.io) alongside Supabase in production.

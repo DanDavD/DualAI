@@ -63,6 +63,17 @@ const electronBridgeApi: ElectronBridgeApi = {
     return ipcRenderer.invoke(IPC_CHANNELS.SHORTCUT_UPDATE_BINDINGS, bindings)
   },
 
+  // Zero-Trust OS Keychain Encrypted Session Vault
+  storeEncryptedSession: async (serializedSession: string): Promise<boolean> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AUTH_STORE_SESSION, serializedSession)
+  },
+  loadEncryptedSession: async (): Promise<string | null> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AUTH_LOAD_SESSION)
+  },
+  clearEncryptedSession: async (): Promise<boolean> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AUTH_CLEAR_SESSION)
+  },
+
   // Event Listeners (Main -> Renderer)
   onShortcutMute: (callback: () => void): (() => void) => {
     const handler = (): void => callback()

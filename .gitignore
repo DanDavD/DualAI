@@ -18,6 +18,8 @@ out
 .env
 .env.local
 .env.*.local
+server/.env
+server/dist
 
 # OS Files
 .DS_Store

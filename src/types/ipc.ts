@@ -36,7 +36,12 @@ export const IPC_CHANNELS = {
   HUD_UPDATE_CONFIG: 'dualai:hud-update-config',
   HUD_UPDATE_TRANSCRIPT: 'dualai:hud-update-transcript',
   HUD_BOUNDS_CHANGED: 'dualai:hud-bounds-changed',
-  HUD_STATUS_CHANGED: 'dualai:hud-status-changed'
+  HUD_STATUS_CHANGED: 'dualai:hud-status-changed',
+
+  // Zero-Trust OS Keychain Session Vault (Electron safeStorage)
+  AUTH_STORE_SESSION: 'dualai:auth-store-session',
+  AUTH_LOAD_SESSION: 'dualai:auth-load-session',
+  AUTH_CLEAR_SESSION: 'dualai:auth-clear-session'
 } as const
 
 export type IpcChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS]
@@ -102,6 +107,11 @@ export interface ElectronBridgeApi {
 
   // Global Shortcuts Registration (Day 11)
   updateGlobalShortcuts: (bindings: ShortcutBinding[]) => Promise<ShortcutRegistrationReport>
+
+  // Zero-Trust OS Keychain Encrypted Session Vault (Electron safeStorage)
+  storeEncryptedSession: (serializedSession: string) => Promise<boolean>
+  loadEncryptedSession: () => Promise<string | null>
+  clearEncryptedSession: () => Promise<boolean>
 
   // Event Listeners (Main -> Renderer)
   onShortcutMute: (callback: () => void) => () => void
