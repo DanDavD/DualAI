@@ -66,12 +66,21 @@ export async function handleSttWebSocketProxy(params: {
   const language = ALLOWED_LANGUAGES.has(requestedLang) ? requestedLang : 'en'
   const rawEndpointing = Number(parsedUrl.searchParams.get('endpointing') || '250')
   const endpointing = Math.max(150, Math.min(1200, Number.isFinite(rawEndpointing) ? rawEndpointing : 250))
+  const rawSampleRate = Number(parsedUrl.searchParams.get('sampleRate') || '16000')
+  const sampleRate = [16000, 24000, 44100, 48000].includes(rawSampleRate) ? rawSampleRate : 16000
   const channelMode = parsedUrl.searchParams.get('route') || 'system'
+
+  if (config.nodeEnv !== 'production') {
+    console.log(
+      `[DUALAI-GATEWAY] WS /v1/stt connected (lang=${language}, rate=${sampleRate}Hz, endpointing=${endpointing}ms)`
+    )
+  }
 
   let upstreamSocket: WebSocket | null = null
   let meterTimer: ReturnType<typeof setInterval> | null = null
   let lastMeterTimestamp = Date.now()
   let receivedAudioInWindow = false
+  let loggedFirstAudio = false
   let cleanedUp = false
 
   const cleanup = (closeCode?: number, closeReason?: string): void => {
@@ -169,7 +178,7 @@ export async function handleSttWebSocketProxy(params: {
     const queryParams = new URLSearchParams({
       model: 'nova-2',
       encoding: 'linear16',
-      sample_rate: '16000',
+      sample_rate: String(sampleRate),
       channels: '1',
       interim_results: 'true',
       smart_format: 'true',
@@ -181,6 +190,12 @@ export async function handleSttWebSocketProxy(params: {
     upstreamSocket = new WebSocket(deepgramUrl, {
       headers: {
         Authorization: `Token ${config.deepgramApiKey}`
+      }
+    })
+
+    upstreamSocket.on('open', () => {
+      if (config.nodeEnv !== 'production') {
+        console.log(`[DUALAI-GATEWAY] Upstream Deepgram Nova-2 open (lang=${language}, rate=${sampleRate}Hz)`)
       }
     })
 
@@ -225,6 +240,10 @@ export async function handleSttWebSocketProxy(params: {
 
     if (isBinary) {
       receivedAudioInWindow = true
+      if (!loggedFirstAudio && config.nodeEnv !== 'production') {
+        loggedFirstAudio = true
+        console.log('[DUALAI-GATEWAY] WS /v1/stt receiving live binary PCM frames')
+      }
       if (upstreamSocket && upstreamSocket.readyState === WebSocket.OPEN) {
         upstreamSocket.send(data, { binary: true })
       }

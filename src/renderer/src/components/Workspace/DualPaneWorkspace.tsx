@@ -1,60 +1,112 @@
 /**
- * DUALAI - Zone 3 Dual-Pane Split Workspace & Virtualized Feed
- * Synchronized 50/50 resizable split interface with persistent width memory,
- * high-contrast critical entity highlighting, inline action rail, smart auto-scroll,
- * and virtualized windowing supporting 1,000+ utterances without frame drops.
+ * DUALAI - Zone 3 Clean Boxless Dual-Pane Split Workspace (CARD-15)
+ * Maximizes vertical reading real estate with zero developer test clutter,
+ * calm borderless flowing transcript rows, persistent scrollable history
+ * (phone numbers, emails, clinical figures remain accessible), smart auto-scroll,
+ * and a clear plain-English audio source picker when idle.
  */
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
-  Activity,
-  ShieldCheck,
-  Layers,
   ArrowDownCircle,
-  Trash2,
   Filter,
   CheckCircle2,
-  Radio,
-  SlidersHorizontal,
-  BookmarkCheck
+  Mic,
+  Volume2,
+  ArrowRightLeft,
+  AppWindow,
+  MessageSquare
 } from 'lucide-react'
+import { AudioRouteMode } from '../../../../types/audio'
+import { SUPPORTED_LANGUAGES } from '../../../../types/language'
 import { useSession } from '../../context/SessionContext'
 import { SplitDivider } from './SplitDivider'
 import { UtteranceCard } from './UtteranceCard'
 import { TranslationCard } from './TranslationCard'
-import { TranscriptUtterance } from '../../../../types/stt'
 import { TranslationResult } from '../../../../types/translation'
+import {
+  resolveAudioRoutingPolicy,
+  resolveTranslationTargetForChannel
+} from '../../audio/audioRoutingPolicy'
 
-const ESTIMATED_ITEM_HEIGHT = 120
-const OVERSCAN_COUNT = 5
+const ESTIMATED_ITEM_HEIGHT = 84
+const OVERSCAN_COUNT = 6
 const STORAGE_KEY_SPLIT = 'dualai_workspace_split_ratio'
+
+const EMPTY_STATE_ROUTES: Array<{
+  id: AudioRouteMode
+  title: string
+  subtitle: string
+  icon: React.ComponentType<{ className?: string; strokeWidth?: number }>
+}> = [
+  {
+    id: 'mic',
+    title: 'Microphone',
+    subtitle: 'Capture your voice directly through your microphone',
+    icon: Mic
+  },
+  {
+    id: 'system',
+    title: 'System Audio',
+    subtitle: 'Capture audio from videos, browser tabs, Zoom, or Teams',
+    icon: Volume2
+  },
+  {
+    id: 'bilateral',
+    title: 'Microphone and system audio',
+    subtitle: 'Your voice on the mic plus the other person from system audio',
+    icon: ArrowRightLeft
+  },
+  {
+    id: 'app',
+    title: 'Audio from one app',
+    subtitle: 'Focus capture on a single video call or browser session',
+    icon: AppWindow
+  }
+]
+
+function getLanguageDisplay(code: string): string {
+  const found = SUPPORTED_LANGUAGES.find((l) => l.code === code)
+  return found ? found.nativeName : code.toUpperCase()
+}
 
 export const DualPaneWorkspace: React.FC = () => {
   const {
+    audioRoute,
+    setAudioRoute,
+    operatingMode,
+    setOperatingMode,
+    latencyMode,
     sourceLang,
     targetLang,
-    domainId,
-    isAudioActive,
-    startAudioEngine,
-    stopAudioEngine,
     loopbackStatus,
     loopbackStatusMessage,
     pipelineErrorMessage,
-    isGatewayAuthenticated,
-    openAccountModal,
     openSettingsModal,
     utterances,
     interimTranscriptA,
     interimTranscriptB,
     translations,
+    streamingTranslations,
+    draftTranslationA,
+    draftTranslationB,
     activeTranslation,
-    clearTranscripts,
-    triggerDomainTestTranslation,
     addGlossaryEntry
   } = useSession()
 
   const containerRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+
+  const routingDecision = useMemo(
+    () =>
+      resolveAudioRoutingPolicy({
+        audioRoute,
+        operatingMode,
+        sourceLang,
+        targetLang
+      }),
+    [audioRoute, operatingMode, sourceLang, targetLang]
+  )
 
   // 1. Resizable Split Ratio with Persistent Width Memory
   const [splitRatio, setSplitRatio] = useState<number>(() => {
@@ -105,7 +157,7 @@ export const DualPaneWorkspace: React.FC = () => {
   const handleAddToGlossary = useCallback(
     (sourceTerm: string, targetTerm: string) => {
       addGlossaryEntry(sourceTerm, targetTerm)
-      setGlossaryNotification(`Injected "${sourceTerm}" -> "${targetTerm}" into prompt glossary`)
+      setGlossaryNotification(`Added "${sourceTerm}" -> "${targetTerm}" to custom glossary`)
       setTimeout(() => setGlossaryNotification(null), 3000)
     },
     [addGlossaryEntry]
@@ -122,67 +174,83 @@ export const DualPaneWorkspace: React.FC = () => {
       const effectiveUtterance = speakerOverrides[u.id]
         ? { ...u, speakerLabel: speakerOverrides[u.id] }
         : u
+      const effectiveTarget = resolveTranslationTargetForChannel(u.channelId, routingDecision)
+      const isOppositeDirection =
+        routingDecision.isBilateralTwoWay && u.channelId === 'channel_b'
+
+      const finalTranslation = translationMap.get(u.id)
+      const inFlightTranslation = streamingTranslations[u.id]
+      const effectiveTranslation = finalTranslation || inFlightTranslation
+      const isRowStreaming = !finalTranslation && Boolean(inFlightTranslation)
+
       return {
         id: u.id,
         utterance: effectiveUtterance,
-        translation: translationMap.get(u.id),
-        isFlagged: flaggedIds.has(u.id)
+        translation: effectiveTranslation,
+        isRowStreaming,
+        isFlagged: flaggedIds.has(u.id),
+        effectiveTarget,
+        isOppositeDirection
       }
     })
 
     if (filterFlaggedOnly) {
       return items.filter((item) => item.isFlagged)
     }
-
     return items
-  }, [utterances, translations, speakerOverrides, flaggedIds, filterFlaggedOnly])
+  }, [
+    utterances,
+    translations,
+    streamingTranslations,
+    speakerOverrides,
+    flaggedIds,
+    filterFlaggedOnly,
+    routingDecision
+  ])
 
-  // 4. Virtualized Windowing Engine (Supports 1,000+ items smoothly)
-  const [scrollTop, setScrollTop] = useState(0)
-  const [viewportHeight, setViewportHeight] = useState(600)
-
-  // 5. Smart Auto-Scroll Behavior
+  // 4. Smart Auto-Scroll & Virtualization State
   const [isAutoScrollActive, setIsAutoScrollActive] = useState(true)
   const [unreadCount, setUnreadCount] = useState(0)
+  const [scrollTop, setScrollTop] = useState(0)
+  const [viewportHeight, setViewportHeight] = useState(600)
   const prevItemsLengthRef = useRef(pairedItems.length)
 
-  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
-    const target = e.currentTarget
-    const currentScrollTop = target.scrollTop
-    setScrollTop(currentScrollTop)
-
-    const distanceFromBottom = target.scrollHeight - currentScrollTop - target.clientHeight
-    const isAtBottom = distanceFromBottom <= 40
-
-    if (isAtBottom) {
-      setIsAutoScrollActive(true)
-      setUnreadCount(0)
-    } else {
-      setIsAutoScrollActive(false)
-    }
-  }
-
-  // Update viewport measurement on resize
   useEffect(() => {
-    if (!scrollContainerRef.current) return
-    const ro = new ResizeObserver((entries) => {
+    const el = scrollContainerRef.current
+    if (!el) return
+    const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         setViewportHeight(entry.contentRect.height)
       }
     })
-    ro.observe(scrollContainerRef.current)
-    return () => ro.disconnect()
+    observer.observe(el)
+    return () => observer.disconnect()
   }, [])
 
-  // Handle incoming items and auto-scroll
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current
+    if (!el) return
+
+    setScrollTop(el.scrollTop)
+
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    const isAtBottom = distanceFromBottom <= 36
+
+    if (isAtBottom) {
+      if (!isAutoScrollActive) {
+        setIsAutoScrollActive(true)
+        setUnreadCount(0)
+      }
+    } else if (isAutoScrollActive) {
+      setIsAutoScrollActive(false)
+    }
+  }, [isAutoScrollActive])
+
   useEffect(() => {
     const hasNewItems = pairedItems.length > prevItemsLengthRef.current
     prevItemsLengthRef.current = pairedItems.length
 
-    if (!scrollContainerRef.current) return
-
-    if (isAutoScrollActive) {
-      // Smoothly stick to bottom
+    if (isAutoScrollActive && scrollContainerRef.current) {
       requestAnimationFrame(() => {
         if (scrollContainerRef.current) {
           scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight
@@ -191,7 +259,16 @@ export const DualPaneWorkspace: React.FC = () => {
     } else if (hasNewItems) {
       setUnreadCount((prev) => prev + 1)
     }
-  }, [pairedItems, activeTranslation, interimTranscriptA, interimTranscriptB, isAutoScrollActive])
+  }, [
+    pairedItems,
+    activeTranslation,
+    streamingTranslations,
+    draftTranslationA,
+    draftTranslationB,
+    interimTranscriptA,
+    interimTranscriptB,
+    isAutoScrollActive
+  ])
 
   const scrollToBottom = useCallback(() => {
     if (scrollContainerRef.current) {
@@ -204,7 +281,7 @@ export const DualPaneWorkspace: React.FC = () => {
     }
   }, [])
 
-  // Calculate visible virtualization range
+  // Virtualized visible window
   const totalItems = pairedItems.length
   const startIndex = Math.max(0, Math.floor(scrollTop / ESTIMATED_ITEM_HEIGHT) - OVERSCAN_COUNT)
   const visibleCount = Math.ceil(viewportHeight / ESTIMATED_ITEM_HEIGHT) + 2 * OVERSCAN_COUNT
@@ -214,129 +291,31 @@ export const DualPaneWorkspace: React.FC = () => {
   const bottomSpacerHeight = Math.max(0, (totalItems - endIndex) * ESTIMATED_ITEM_HEIGHT)
   const visibleItems = pairedItems.slice(startIndex, endIndex)
 
+  const hasLiveContent =
+    pairedItems.length > 0 ||
+    Boolean(interimTranscriptA) ||
+    Boolean(interimTranscriptB) ||
+    Boolean(draftTranslationA) ||
+    Boolean(draftTranslationB) ||
+    Boolean(activeTranslation)
+
+  const sourceDisplayName = getLanguageDisplay(sourceLang)
+  const targetDisplayName = getLanguageDisplay(targetLang)
+  const isLiveMode = latencyMode === 'sub_second_live'
+
   return (
     <div
       ref={containerRef}
-      className="flex-1 flex flex-col h-full bg-surface-base text-text-primary overflow-hidden font-sans"
+      className="relative flex-1 flex flex-col h-full bg-surface-base text-text-primary overflow-hidden font-sans"
     >
-      {/* Workspace Sub-Toolbar: Controls & Filters */}
-      <div className="flex h-10 items-center justify-between border-b border-surface-border bg-surface-panel px-4 text-xs font-mono select-none">
-        {/* Left Controls: Test Injection & Audio Ingestion Status */}
-        <div className="flex items-center space-x-2">
-          <button
-            type="button"
-            onClick={isAudioActive ? stopAudioEngine : startAudioEngine}
-            className={`flex items-center space-x-1.5 px-2.5 py-1 rounded font-bold border transition ${
-              isAudioActive
-                ? 'bg-accent-crimson/15 text-accent-crimson border-accent-crimson/30 hover:bg-accent-crimson/25'
-                : 'bg-accent-emerald/15 text-accent-emerald border-accent-emerald/30 hover:bg-accent-emerald/25'
-            }`}
-          >
-            <Radio className="h-3 w-3" strokeWidth={2} />
-            <span>{isAudioActive ? 'STOP CAPTURE' : 'START AUDIO CAPTURE'}</span>
-          </button>
-
-          <span className="text-surface-border">|</span>
-
-          {/* Quick Domain Test Triggers */}
-          <span className="text-text-muted text-[11px]">Inject Domain:</span>
-          <button
-            type="button"
-            onClick={() => triggerDomainTestTranslation('medical')}
-            className="px-2 py-0.5 rounded bg-surface-base border border-surface-border hover:border-accent-emerald/50 hover:text-accent-emerald text-text-secondary transition flex items-center space-x-1 text-[11px]"
-            title="Inject clinical utterance with ICD-10 anatomical directives"
-          >
-            <Activity className="h-2.5 w-2.5 text-accent-emerald" />
-            <span>Medical</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => triggerDomainTestTranslation('legal')}
-            className="px-2 py-0.5 rounded bg-surface-base border border-surface-border hover:border-accent-steel/50 hover:text-accent-steel text-text-secondary transition flex items-center space-x-1 text-[11px]"
-            title="Inject courtroom utterance with verbatim legal terms"
-          >
-            <ShieldCheck className="h-2.5 w-2.5 text-accent-steel" />
-            <span>Legal</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => triggerDomainTestTranslation('technical')}
-            className="px-2 py-0.5 rounded bg-surface-base border border-surface-border hover:border-accent-amber/50 hover:text-accent-amber text-text-secondary transition flex items-center space-x-1 text-[11px]"
-            title="Inject software engineering utterance"
-          >
-            <Layers className="h-2.5 w-2.5 text-accent-amber" />
-            <span>Tech</span>
-          </button>
-        </div>
-
-        {/* Right Controls: Live Engine Telemetry, Filters & Actions */}
-        <div className="flex items-center space-x-2.5">
-          <button
-            type="button"
-            onClick={openAccountModal}
-            className="hidden lg:flex items-center space-x-1.5 px-2 py-0.5 rounded border border-surface-border bg-surface-base text-[10px] text-text-secondary hover:border-accent-steel transition"
-            title="Zero-Trust Cloud Gateway Status & Interpretation Quota"
-          >
-            <span
-              className={
-                isGatewayAuthenticated ? 'text-accent-emerald font-bold' : 'text-accent-amber'
-              }
-            >
-              {isGatewayAuthenticated ? 'GATEWAY: ZERO-TRUST LIVE' : 'SIGN IN (1H FREE)'}
-            </span>
-            {loopbackStatus !== 'inactive' && (
-              <>
-                <span className="text-surface-border">|</span>
-                <span
-                  className={
-                    loopbackStatus === 'unavailable'
-                      ? 'text-accent-crimson font-bold'
-                      : 'text-accent-emerald'
-                  }
-                >
-                  LOOPBACK: {loopbackStatus === 'native_loopback' ? 'NATIVE' : loopbackStatus === 'virtual_device' ? 'VIRTUAL' : 'BLOCKED'}
-                </span>
-              </>
-            )}
-          </button>
-
-          {/* Flagged Filter Toggle */}
-          <button
-            type="button"
-            onClick={() => setFilterFlaggedOnly(!filterFlaggedOnly)}
-            className={`flex items-center space-x-1 px-2 py-1 rounded border transition ${
-              filterFlaggedOnly
-                ? 'bg-accent-amber/20 text-accent-amber border-accent-amber/50 font-bold'
-                : 'bg-surface-base text-text-secondary border-surface-border hover:text-text-primary'
-            }`}
-            title="Filter feed to show only flagged items"
-          >
-            <Filter className="h-3 w-3" />
-            <span>Flagged ({flaggedIds.size})</span>
-          </button>
-
-          {/* Clear Feed */}
-          <button
-            type="button"
-            onClick={clearTranscripts}
-            disabled={pairedItems.length === 0}
-            className="text-text-muted hover:text-accent-crimson disabled:opacity-40 transition flex items-center space-x-1"
-            title="Clear all transcripts and translations"
-          >
-            <Trash2 className="h-3 w-3" />
-            <span>Clear Feed</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Actionable System Audio Loopback / Pipeline Error Banner */}
+      {/* Actionable System Audio Loopback / Pipeline Error Banner (Shown Only On Error) */}
       {(pipelineErrorMessage || loopbackStatus === 'unavailable') && (
         <div
           role="alert"
-          className="flex items-center justify-between border-b border-accent-crimson/40 bg-accent-crimson/10 px-4 py-2 font-mono text-[11px] text-text-primary"
+          className="flex items-center justify-between border-b border-accent-crimson/40 bg-accent-crimson/10 px-4 py-2 font-mono text-[11px] text-text-primary shrink-0"
         >
           <span className="truncate pr-3">
-            <strong className="text-accent-crimson uppercase mr-2">Audio Pipeline Notice:</strong>
+            <strong className="text-accent-crimson uppercase mr-2">Notice:</strong>
             {pipelineErrorMessage || loopbackStatusMessage}
           </span>
           <button
@@ -344,158 +323,283 @@ export const DualPaneWorkspace: React.FC = () => {
             onClick={openSettingsModal}
             className="shrink-0 rounded border border-accent-crimson/50 bg-surface-panel px-2.5 py-1 text-[10px] font-bold text-text-primary hover:bg-surface-active transition"
           >
-            Open Audio Settings
+            Audio Settings
           </button>
         </div>
       )}
 
-      {/* Pane Column Headers */}
-      <div className="flex border-b border-surface-border bg-surface-base text-[11px] font-mono text-text-secondary select-none">
-        {/* Left Pane Header */}
+      {/* Single Clean Native-Language Pane Indicator Bar (e.g., English | Español) */}
+      <div className="flex h-8 w-full shrink-0 items-center border-b border-surface-border/70 bg-surface-base select-none">
         <div
           style={{ width: `${splitRatio}%` }}
-          className="flex items-center justify-between px-4 py-2 border-r border-surface-border"
+          className="flex h-full items-center space-x-2 border-r border-surface-border/60 px-6"
         >
-          <div className="flex items-center space-x-2">
-            <span className="font-bold text-text-primary uppercase tracking-wider">
-              Original Speech Feed (Source)
-            </span>
-            <span className="text-[10px] px-1.5 py-0.2 rounded bg-surface-panel border border-surface-border text-accent-steel font-bold">
-              {sourceLang.toUpperCase()}
-            </span>
-          </div>
-          <span className="text-text-muted">
-            {pairedItems.length} {pairedItems.length === 1 ? 'utterance' : 'utterances'}
+          <span className="h-1.5 w-1.5 rounded-full bg-accent-steel shrink-0" />
+          <span className="text-xs font-medium text-text-secondary tracking-wide truncate">
+            {sourceDisplayName}
           </span>
         </div>
-
-        {/* Right Pane Header */}
         <div
           style={{ width: `${100 - splitRatio}%` }}
-          className="flex items-center justify-between px-4 py-2"
+          className="flex h-full items-center justify-between px-6"
         >
-          <div className="flex items-center space-x-2">
-            <span className="font-bold text-text-primary uppercase tracking-wider">
-              Simultaneous Translation Feed (Target)
-            </span>
-            <span className="text-[10px] px-1.5 py-0.2 rounded bg-surface-panel border border-surface-border text-accent-emerald font-bold">
-              {targetLang.toUpperCase()}
+          <div className="flex items-center space-x-2 min-w-0">
+            <span className="h-1.5 w-1.5 rounded-full bg-accent-emerald shrink-0" />
+            <span className="text-xs font-medium text-text-secondary tracking-wide truncate">
+              {targetDisplayName}
             </span>
           </div>
-          <div className="flex items-center space-x-1.5 text-text-muted text-[10px]">
-            <span>Split: {Math.round(splitRatio)}% / {100 - Math.round(splitRatio)}%</span>
-          </div>
+
+          {flaggedIds.size > 0 && (
+            <button
+              type="button"
+              onClick={() => setFilterFlaggedOnly(!filterFlaggedOnly)}
+              className={`flex items-center space-x-1.5 rounded-full border px-2.5 py-0.5 font-mono text-[10px] transition ${
+                filterFlaggedOnly
+                  ? 'border-accent-amber bg-accent-amber/20 text-accent-amber font-semibold'
+                  : 'border-surface-border bg-surface-panel text-text-secondary hover:text-text-primary'
+              }`}
+              title="Filter feed to show only flagged items"
+            >
+              <Filter className="h-3 w-3" />
+              <span>
+                {filterFlaggedOnly
+                  ? `Showing ${flaggedIds.size} Flagged`
+                  : `Flagged (${flaggedIds.size})`}
+              </span>
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Synchronized Virtualized Workspace Feed Body */}
+      {/* Synchronized Boxless Dual-Pane Transcript Canvas */}
       <div className="relative flex-1 overflow-hidden">
         <div
           ref={scrollContainerRef}
           onScroll={handleScroll}
           className="h-full w-full overflow-y-auto relative"
         >
-          {/* Top Virtual Spacer */}
-          {topSpacerHeight > 0 && <div style={{ height: `${topSpacerHeight}px` }} />}
+          {hasLiveContent ? (
+            <div className="min-h-full py-3">
+              {/* Top Virtual Spacer */}
+              {topSpacerHeight > 0 && <div style={{ height: `${topSpacerHeight}px` }} />}
 
-          {/* Virtualized Visible Item Rows */}
-          {visibleItems.map((item) => (
-            <div
-              key={item.id}
-              className="flex border-b border-surface-border-subtle hover:bg-surface-active/30 transition-colors"
-            >
-              {/* Left Pane Item Column */}
+              {/* Flowing, Boxless Paired Paragraph Rows (Finalized Typography) */}
+              {visibleItems.map((item) => (
+                <div
+                  key={item.id}
+                  className="flex hover:bg-surface-panel/40 transition-colors"
+                >
+                  {/* Left Pane: Source Speech Paragraph */}
+                  <div
+                    style={{ width: `${splitRatio}%` }}
+                    className="px-6 py-3 border-r border-surface-border/60"
+                  >
+                    <UtteranceCard
+                      utterance={item.utterance}
+                      isInterim={false}
+                      isFlagged={item.isFlagged}
+                      isOppositeDirection={item.isOppositeDirection}
+                      onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
+                    />
+                  </div>
+
+                  {/* Right Pane: Clean Target Translation ("What to Say") */}
+                  <div
+                    style={{ width: `${100 - splitRatio}%` }}
+                    className="px-6 py-3"
+                  >
+                    <TranslationCard
+                      translation={item.translation}
+                      utteranceId={item.id}
+                      isStreaming={item.isRowStreaming}
+                      isDraft={false}
+                      isFlagged={item.isFlagged}
+                      isOppositeDirection={item.isOppositeDirection}
+                      onToggleFlag={handleToggleFlag}
+                      onAddToGlossary={handleAddToGlossary}
+                    />
+                  </div>
+                </div>
+              ))}
+
+              {/* Active Channel A In-Progress Paragraph Row (Softer Draft Font Until 2s Pause Commit) */}
+              {(interimTranscriptA || draftTranslationA) && (
+                <div className="flex bg-surface-panel/25">
+                  <div
+                    style={{ width: `${splitRatio}%` }}
+                    className="px-6 py-3 border-r border-surface-border/60"
+                  >
+                    {interimTranscriptA && (
+                      <UtteranceCard
+                        utterance={interimTranscriptA}
+                        isInterim={true}
+                        onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
+                      />
+                    )}
+                  </div>
+
+                  <div style={{ width: `${100 - splitRatio}%` }} className="px-6 py-3">
+                    {isLiveMode ? (
+                      <TranslationCard
+                        translation={draftTranslationA || undefined}
+                        utteranceId={
+                          draftTranslationA?.utteranceId ||
+                          interimTranscriptA?.id ||
+                          'draft-channel-a'
+                        }
+                        isStreaming={draftTranslationA ? draftTranslationA.isStreaming : true}
+                        isDraft={true}
+                        onToggleFlag={handleToggleFlag}
+                        onAddToGlossary={handleAddToGlossary}
+                      />
+                    ) : (
+                      <TranslationCard
+                        utteranceId={interimTranscriptA?.id || 'accurate-channel-a'}
+                        isWaitingForPause={true}
+                        isDraft={true}
+                        onToggleFlag={handleToggleFlag}
+                        onAddToGlossary={handleAddToGlossary}
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Active Channel B In-Progress Paragraph Row (Softer Draft Font Until 2s Pause Commit) */}
+              {(interimTranscriptB || draftTranslationB) && (
+                <div className="flex bg-surface-panel/25">
+                  <div
+                    style={{ width: `${splitRatio}%` }}
+                    className="px-6 py-3 border-r border-surface-border/60"
+                  >
+                    {interimTranscriptB && (
+                      <UtteranceCard
+                        utterance={interimTranscriptB}
+                        isInterim={true}
+                        isOppositeDirection={routingDecision.isBilateralTwoWay}
+                        onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
+                      />
+                    )}
+                  </div>
+
+                  <div style={{ width: `${100 - splitRatio}%` }} className="px-6 py-3">
+                    {isLiveMode ? (
+                      <TranslationCard
+                        translation={draftTranslationB || undefined}
+                        utteranceId={
+                          draftTranslationB?.utteranceId ||
+                          interimTranscriptB?.id ||
+                          'draft-channel-b'
+                        }
+                        isStreaming={draftTranslationB ? draftTranslationB.isStreaming : true}
+                        isDraft={true}
+                        isOppositeDirection={routingDecision.isBilateralTwoWay}
+                        onToggleFlag={handleToggleFlag}
+                        onAddToGlossary={handleAddToGlossary}
+                      />
+                    ) : (
+                      <TranslationCard
+                        utteranceId={interimTranscriptB?.id || 'accurate-channel-b'}
+                        isWaitingForPause={true}
+                        isDraft={true}
+                        isOppositeDirection={routingDecision.isBilateralTwoWay}
+                        onToggleFlag={handleToggleFlag}
+                        onAddToGlossary={handleAddToGlossary}
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Bottom Virtual Spacer */}
+              {bottomSpacerHeight > 0 && <div style={{ height: `${bottomSpacerHeight}px` }} />}
+            </div>
+          ) : (
+            /* Clean, Calm Empty State: Plain-English Audio Source Picker + Active Mode Guide */
+            <div className="flex h-full w-full">
+              {/* Left Empty Pane: Audio Source Selector */}
               <div
                 style={{ width: `${splitRatio}%` }}
-                className="p-3 border-r border-surface-border flex flex-col justify-start"
+                className="flex flex-col items-center justify-center border-r border-surface-border/60 px-8 py-10"
               >
-                <UtteranceCard
-                  utterance={item.utterance}
-                  isInterim={false}
-                  isFlagged={item.isFlagged}
-                  sourceLang={sourceLang}
-                  onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
-                />
+                <div className="w-full max-w-sm space-y-3">
+                  <p className="text-xs font-medium text-text-secondary px-1">
+                    Choose where the sound comes from
+                  </p>
+                  <div className="space-y-1.5">
+                    {EMPTY_STATE_ROUTES.map((option) => {
+                      const Icon = option.icon
+                      const isSelected = audioRoute === option.id
+                      return (
+                        <button
+                          key={option.id}
+                          type="button"
+                          onClick={() => setAudioRoute(option.id)}
+                          className={`flex w-full items-start space-x-3 rounded-lg border px-3.5 py-2.5 text-left transition ${
+                            isSelected
+                              ? 'border-accent-steel/70 bg-accent-steel/10 text-text-primary'
+                              : 'border-transparent bg-transparent text-text-secondary hover:bg-surface-panel hover:text-text-primary'
+                          }`}
+                        >
+                          <Icon
+                            className={`mt-0.5 h-4 w-4 shrink-0 ${
+                              isSelected ? 'text-accent-steel' : 'text-text-muted'
+                            }`}
+                            strokeWidth={1.75}
+                          />
+                          <div className="space-y-0.5">
+                            <div
+                              className={`text-xs font-semibold ${
+                                isSelected ? 'text-accent-steel' : 'text-text-primary'
+                              }`}
+                            >
+                              {option.title}
+                            </div>
+                            <p className="text-[11px] leading-snug text-text-muted">
+                              {option.subtitle}
+                            </p>
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
               </div>
 
-              {/* Central Divider Placeholder alignment */}
-              <div className="w-0 relative" />
-
-              {/* Right Pane Item Column */}
+              {/* Right Empty Pane: Clear Translation Preview Guide */}
               <div
                 style={{ width: `${100 - splitRatio}%` }}
-                className="p-3 flex flex-col justify-start"
+                className="flex flex-col items-center justify-center px-8 py-10 text-center"
               >
-                <TranslationCard
-                  translation={item.translation}
-                  utteranceId={item.id}
-                  isStreaming={false}
-                  isFlagged={item.isFlagged}
-                  targetLang={targetLang}
-                  onToggleFlag={handleToggleFlag}
-                  onAddToGlossary={handleAddToGlossary}
-                />
-              </div>
-            </div>
-          ))}
-
-          {/* Active Interim Streaming Speech (Pinned to Bottom of List) */}
-          {(interimTranscriptA || interimTranscriptB || activeTranslation) && (
-            <div className="flex border-b border-surface-border-subtle bg-surface-active/20 animate-fadeIn">
-              {/* Left Column Interim Speech */}
-              <div style={{ width: `${splitRatio}%` }} className="p-3 border-r border-surface-border">
-                {interimTranscriptA && (
-                  <UtteranceCard
-                    utterance={interimTranscriptA}
-                    isInterim={true}
-                    sourceLang={sourceLang}
-                    onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
+                <div className="max-w-sm space-y-3">
+                  <MessageSquare
+                    className="mx-auto h-6 w-6 text-accent-steel/80"
+                    strokeWidth={1.5}
                   />
-                )}
-                {interimTranscriptB && (
-                  <UtteranceCard
-                    utterance={interimTranscriptB}
-                    isInterim={true}
-                    sourceLang={targetLang}
-                    onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
-                  />
-                )}
+                  <h2 className="text-sm font-semibold text-text-primary">
+                    {operatingMode === 'translate'
+                      ? `Translating ${sourceDisplayName} to ${targetDisplayName}`
+                      : 'Two-way conversation'}
+                  </h2>
+                  <p className="text-xs leading-relaxed text-text-muted">
+                    {operatingMode === 'translate'
+                      ? `Spoken ${sourceDisplayName} appears on the left. What to say in ${targetDisplayName} flows down here and stays visible for easy reference.`
+                      : `Translations appear here: ${sourceDisplayName} <-> ${targetDisplayName}. Every line stays saved in view so phone numbers, emails, and details are always accessible.`}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setOperatingMode(operatingMode === 'translate' ? 'conversation' : 'translate')
+                    }
+                    className="pt-1 text-[11px] text-text-secondary underline decoration-surface-border underline-offset-4 hover:text-text-primary transition"
+                  >
+                    {operatingMode === 'translate'
+                      ? 'Interpreting two speakers? Switch to Conversation.'
+                      : 'Everyone speaking one language? Switch to Translate.'}
+                  </button>
+                </div>
               </div>
-
-              {/* Right Column Streaming Translation */}
-              <div style={{ width: `${100 - splitRatio}%` }} className="p-3">
-                {activeTranslation && (
-                  <TranslationCard
-                    translation={activeTranslation}
-                    utteranceId={activeTranslation.utteranceId}
-                    isStreaming={true}
-                    targetLang={targetLang}
-                    onToggleFlag={handleToggleFlag}
-                    onAddToGlossary={handleAddToGlossary}
-                  />
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Bottom Virtual Spacer */}
-          {bottomSpacerHeight > 0 && <div style={{ height: `${bottomSpacerHeight}px` }} />}
-
-          {/* Empty State */}
-          {pairedItems.length === 0 && !interimTranscriptA && !interimTranscriptB && !activeTranslation && (
-            <div className="flex flex-col items-center justify-center h-full p-12 text-center text-text-muted space-y-3">
-              <SlidersHorizontal className="h-8 w-8 text-surface-border" strokeWidth={1.5} />
-              <div className="space-y-1">
-                <p className="text-sm font-semibold text-text-secondary font-mono">
-                  Zone 3 Dual Workspace Ready
-                </p>
-                <p className="text-xs text-text-muted max-w-md">
-                  Click <strong className="text-accent-emerald">"START AUDIO CAPTURE"</strong> or use the test domain triggers above (Medical, Legal, Tech) to render synchronized transcripts.
-                </p>
-              </div>
-              <p className="text-[11px] font-mono text-text-muted pt-2 border-t border-surface-border-subtle">
-                Drag the central divider to adjust split width (persisted in localStorage). Numbers and medical units are highlighted in high-contrast bold.
-              </p>
             </div>
           )}
         </div>
@@ -513,29 +617,27 @@ export const DualPaneWorkspace: React.FC = () => {
           />
         </div>
 
-        {/* Floating Smart Auto-Scroll Resume Badge */}
-        {!isAutoScrollActive && (
+        {/* Floating Smart Auto-Scroll Resume Pill */}
+        {!isAutoScrollActive && hasLiveContent && (
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-30">
             <button
               type="button"
               onClick={scrollToBottom}
-              className="flex items-center space-x-2 px-3.5 py-1.5 rounded-full bg-surface-panel border border-accent-steel text-text-primary shadow-lg text-xs font-mono font-medium hover:bg-surface-active transition-transform active:scale-95"
+              className="flex items-center space-x-2 rounded-full border border-accent-steel/60 bg-surface-panel px-4 py-1.5 text-xs font-medium text-text-primary shadow-xl hover:bg-surface-active transition"
             >
-              <ArrowDownCircle className="h-3.5 w-3.5 text-accent-steel animate-bounce" />
+              <ArrowDownCircle className="h-3.5 w-3.5 text-accent-steel" />
               <span>
-                Auto-scroll paused{unreadCount > 0 ? ` (${unreadCount} new)` : ''} - Resume
+                Jump to latest{unreadCount > 0 ? ` (${unreadCount} new)` : ''}
               </span>
             </button>
           </div>
         )}
 
-        {/* Temporary Glossary Saved Toast Notification */}
+        {/* Quiet Glossary Confirmation Toast */}
         {glossaryNotification && (
-          <div className="absolute top-4 right-4 z-40 animate-slideDown">
-            <div className="flex items-center space-x-2 px-3 py-2 rounded bg-surface-panel border border-accent-emerald text-accent-emerald text-xs font-mono shadow-md">
-              <BookmarkCheck className="h-4 w-4" />
-              <span>{glossaryNotification}</span>
-            </div>
+          <div className="absolute bottom-4 right-5 z-30 flex items-center space-x-2 rounded border border-accent-emerald/50 bg-surface-panel px-3 py-1.5 font-mono text-[11px] text-accent-emerald shadow-lg">
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            <span>{glossaryNotification}</span>
           </div>
         )}
       </div>

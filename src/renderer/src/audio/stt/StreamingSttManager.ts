@@ -33,6 +33,7 @@ export interface SttRoutingConfig {
   enableChannelA: boolean
   enableChannelB: boolean
   endpointingMs?: number
+  sampleRate?: number
 }
 
 type SttClientInstance = GatewaySttClient | SimulatedStreamingClient
@@ -48,6 +49,7 @@ export class StreamingSttManager {
   private enableChannelA: boolean = true
   private enableChannelB: boolean = true
   private endpointingMs: number = 250
+  private sampleRate: number = 16000
   private domainId: string = 'medical'
   private confidenceThreshold: number = 0.75
 
@@ -93,19 +95,22 @@ export class StreamingSttManager {
     const enableBChanged = routing.enableChannelB !== this.enableChannelB
     const nextEndpointing = routing.endpointingMs ?? this.endpointingMs
     const endpointingChanged = nextEndpointing !== this.endpointingMs
+    const nextSampleRate = routing.sampleRate ?? this.sampleRate
+    const sampleRateChanged = nextSampleRate !== this.sampleRate
 
     this.languageA = routing.languageA
     this.languageB = routing.languageB
     this.enableChannelA = routing.enableChannelA
     this.enableChannelB = routing.enableChannelB
     this.endpointingMs = nextEndpointing
+    this.sampleRate = nextSampleRate
 
     if (!this.isRunning) return
 
-    if (langAChanged || enableAChanged || endpointingChanged) {
+    if (langAChanged || enableAChanged || endpointingChanged || sampleRateChanged) {
       this.reconnectChannel('channel_a', this.enableChannelA)
     }
-    if (langBChanged || enableBChanged || endpointingChanged) {
+    if (langBChanged || enableBChanged || endpointingChanged || sampleRateChanged) {
       this.reconnectChannel('channel_b', this.enableChannelB)
     }
   }
@@ -221,7 +226,7 @@ export class StreamingSttManager {
     const config: SttClientConfig = {
       model: 'nova-2',
       language,
-      sampleRate: 16000,
+      sampleRate: this.sampleRate,
       confidenceThreshold: this.confidenceThreshold,
       interimResults: true,
       smartFormat: true,

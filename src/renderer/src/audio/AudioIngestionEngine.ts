@@ -579,4 +579,8 @@ export class AudioIngestionEngine {
   public getLoopbackStatus(): LoopbackSourceStatus {
     return this.loopbackStatus
   }
+
+  public getActualSampleRate(): number {
+    return this.audioContext?.sampleRate || 16000
+  }
 }

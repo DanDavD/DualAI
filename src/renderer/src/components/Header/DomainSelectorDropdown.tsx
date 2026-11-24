@@ -93,9 +93,6 @@ export const DomainSelectorDropdown: React.FC = () => {
       >
         <ActiveIcon className="h-3.5 w-3.5 text-text-secondary" strokeWidth={1.5} />
         <span className="font-medium text-text-primary">{activePreset.label}</span>
-        <span className="rounded bg-surface-border px-1 py-0.2 font-mono text-[9px] uppercase tracking-wider text-text-muted">
-          {activePreset.category}
-        </span>
         <ChevronDown
           className={`h-3 w-3 text-text-muted transition-transform duration-150 ${
             isOpen ? 'rotate-180' : ''

@@ -51,7 +51,7 @@ export function resolvePipelineState(inputs: PipelineInputs): PipelineStateSnaps
   if (inputs.hasError) {
     return {
       state: 'error',
-      label: 'PIPELINE ERROR',
+      label: 'Audio error',
       bufferMs,
       isLive: false,
       accentToken: 'crimson'
@@ -61,7 +61,7 @@ export function resolvePipelineState(inputs: PipelineInputs): PipelineStateSnaps
   if (inputs.isInitializing) {
     return {
       state: 'initializing',
-      label: 'INITIALIZING',
+      label: 'Connecting audio...',
       bufferMs,
       isLive: false,
       accentToken: 'steel'
@@ -71,7 +71,7 @@ export function resolvePipelineState(inputs: PipelineInputs): PipelineStateSnaps
   if (!inputs.isAudioActive) {
     return {
       state: 'idle',
-      label: 'IDLE',
+      label: 'Ready',
       bufferMs: 0,
       isLive: false,
       accentToken: 'muted'
@@ -81,7 +81,7 @@ export function resolvePipelineState(inputs: PipelineInputs): PipelineStateSnaps
   if (inputs.isMuted) {
     return {
       state: 'muted',
-      label: 'COUGH MUTE (0dB)',
+      label: 'Muted',
       bufferMs: 0,
       isLive: true,
       accentToken: 'crimson'
@@ -91,7 +91,7 @@ export function resolvePipelineState(inputs: PipelineInputs): PipelineStateSnaps
   if (inputs.sttStatusA === 'reconnecting' || inputs.sttStatusB === 'reconnecting') {
     return {
       state: 'reconnecting',
-      label: 'RECONNECTING',
+      label: 'Reconnecting...',
       bufferMs,
       isLive: true,
       accentToken: 'amber'
@@ -101,7 +101,7 @@ export function resolvePipelineState(inputs: PipelineInputs): PipelineStateSnaps
   if (inputs.isTranslating) {
     return {
       state: 'translating',
-      label: 'TRANSLATING',
+      label: 'Translating',
       bufferMs,
       isLive: true,
       accentToken: 'emerald'
@@ -111,7 +111,7 @@ export function resolvePipelineState(inputs: PipelineInputs): PipelineStateSnaps
   if (inputs.isSpeechActiveA || inputs.isSpeechActiveB || inputs.hasInterimTranscript) {
     return {
       state: 'transcribing',
-      label: 'TRANSCRIBING',
+      label: 'Recognizing voice',
       bufferMs,
       isLive: true,
       accentToken: 'steel'
@@ -120,7 +120,7 @@ export function resolvePipelineState(inputs: PipelineInputs): PipelineStateSnaps
 
   return {
     state: 'listening',
-    label: 'LISTENING',
+    label: 'Listening',
     bufferMs: Math.max(bufferMs, 30),
     isLive: true,
     accentToken: 'emerald'

@@ -314,6 +314,9 @@ export async function createGatewayServer(
 
     const user = await authVerifier.verifyToken(token)
     if (!user) {
+      if (config.nodeEnv !== 'production') {
+        console.warn('[DUALAI-GATEWAY] WS /v1/stt rejected: 401 Unauthorized (missing or expired token)')
+      }
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
       socket.destroy()
       return

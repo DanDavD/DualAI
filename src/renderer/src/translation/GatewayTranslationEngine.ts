@@ -5,6 +5,7 @@
  * Zero Google GenAI SDK or Gemini API keys exist in the Electron renderer binary.
  */
 
+import { ChannelId } from '../../../types/audio'
 import { DomainId } from '../../../types/domain'
 import {
   DialogueTurn,
@@ -15,9 +16,19 @@ import { TranscriptUtterance } from '../../../types/stt'
 import { TranslationCallbacks } from './SimulatedTranslationEngine'
 import { getGatewayHttpUrl } from '../services/gatewayAuthService'
 
+export interface TranslateStreamOptions {
+  isDraft?: boolean
+}
+
+function isAbortError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  return err.name === 'AbortError' || err.message.toLowerCase().includes('aborted')
+}
+
 export class GatewayTranslationEngine {
   private accessToken: string
-  private abortController: AbortController | null = null
+  private finalControllers: Map<string, AbortController> = new Map()
+  private draftControllers: Map<ChannelId, AbortController> = new Map()
   private customGlossary?: Record<string, string>
   private onQuotaExhausted?: (message: string) => void
 
@@ -44,13 +55,27 @@ export class GatewayTranslationEngine {
     domainId: DomainId,
     targetLang: string,
     dialogueHistory: DialogueTurn[],
-    callbacks: TranslationCallbacks
+    callbacks: TranslationCallbacks,
+    options?: TranslateStreamOptions
   ): Promise<void> {
-    this.cancelActiveStream()
-    this.abortController = new AbortController()
+    const isDraft = Boolean(options?.isDraft)
+    const controller = new AbortController()
+
+    if (isDraft) {
+      // Live draft previews only cancel an earlier draft on the SAME channel
+      this.cancelDraftPreview(utterance.channelId)
+      this.draftControllers.set(utterance.channelId, controller)
+    } else {
+      // Committed paragraphs NEVER cancel other committed paragraphs
+      const existingSameId = this.finalControllers.get(utterance.id)
+      if (existingSameId) {
+        existingSameId.abort()
+      }
+      this.finalControllers.set(utterance.id, controller)
+    }
 
     const startTime = performance.now()
-    const translationId = `trans-${utterance.id}`
+    const translationId = isDraft ? `draft-${utterance.id}` : `trans-${utterance.id}`
 
     const initialResult: TranslationResult = {
       id: translationId,
@@ -81,7 +106,7 @@ export class GatewayTranslationEngine {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.accessToken}`
         },
-        signal: this.abortController.signal,
+        signal: controller.signal,
         body: JSON.stringify({
           sourceText: utterance.text,
           sourceLang: utterance.language,
@@ -96,6 +121,10 @@ export class GatewayTranslationEngine {
           customGlossary: this.customGlossary
         })
       })
+
+      if (controller.signal.aborted) {
+        return
+      }
 
       if (response.status === 402) {
         const errData = (await response.json().catch(() => ({}))) as { message?: string }
@@ -119,13 +148,15 @@ export class GatewayTranslationEngine {
 
       while (true) {
         const { done, value } = await reader.read()
-        if (done || this.abortController?.signal.aborted) break
+        if (done || controller.signal.aborted) break
 
         sseBuffer += decoder.decode(value, { stream: true })
         const events = sseBuffer.split('\n\n')
         sseBuffer = events.pop() || ''
 
         for (const rawEvent of events) {
+          if (controller.signal.aborted) break
+
           let eventType = 'message'
           let dataLine = ''
 
@@ -165,6 +196,10 @@ export class GatewayTranslationEngine {
         }
       }
 
+      if (controller.signal.aborted) {
+        return
+      }
+
       const trimmedFinalText = accumulatedText.trim()
       const finalWordTokens: TranslationToken[] = trimmedFinalText
         ? trimmedFinalText.split(/\s+/).map((word, idx) => ({
@@ -202,18 +237,40 @@ export class GatewayTranslationEngine {
         timestampMs: Date.now()
       })
     } catch (err) {
-      if (!this.abortController?.signal.aborted) {
+      if (!controller.signal.aborted && !isAbortError(err)) {
         callbacks.onError(err as Error)
       }
     } finally {
-      this.abortController = null
+      if (isDraft) {
+        if (this.draftControllers.get(utterance.channelId) === controller) {
+          this.draftControllers.delete(utterance.channelId)
+        }
+      } else if (this.finalControllers.get(utterance.id) === controller) {
+        this.finalControllers.delete(utterance.id)
+      }
     }
   }
 
-  public cancelActiveStream(): void {
-    if (this.abortController) {
-      this.abortController.abort()
-      this.abortController = null
+  public cancelDraftPreview(channelId?: ChannelId): void {
+    if (channelId) {
+      const ctrl = this.draftControllers.get(channelId)
+      if (ctrl) {
+        ctrl.abort()
+        this.draftControllers.delete(channelId)
+      }
+      return
     }
+    for (const ctrl of this.draftControllers.values()) {
+      ctrl.abort()
+    }
+    this.draftControllers.clear()
+  }
+
+  public cancelActiveStream(): void {
+    this.cancelDraftPreview()
+    for (const ctrl of this.finalControllers.values()) {
+      ctrl.abort()
+    }
+    this.finalControllers.clear()
   }
 }
