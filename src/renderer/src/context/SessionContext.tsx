@@ -32,7 +32,10 @@ import {
   AccountQuota,
   AuthenticatedSession,
   BillingPlan,
-  DEFAULT_SAAS_PLANS
+  CheckoutProvider,
+  CheckoutSessionResult,
+  DEFAULT_SAAS_PLANS,
+  PlanId
 } from '../../../types/account'
 import { AudioIngestionEngine } from '../audio/AudioIngestionEngine'
 import {
@@ -64,6 +67,7 @@ import {
 import {
   clearEncryptedSession,
   computeSilentRefreshDelayMs,
+  createBillingCheckoutSession,
   fetchAuthoritativeQuota,
   getGatewayHttpUrl,
   loadEncryptedSession,
@@ -242,6 +246,10 @@ export interface SessionState {
   requestPasswordResetAccount: (email: string) => Promise<string>
   resendVerificationEmailAccount: (email: string) => Promise<string>
   refreshAccountQuota: () => Promise<void>
+  startPlanCheckout: (
+    planId: PlanId,
+    provider: CheckoutProvider
+  ) => Promise<CheckoutSessionResult>
   verifyMsStoreReceipt: (
     storeIdKey: string,
     productId: string
@@ -1650,6 +1658,20 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setAvailablePlans(snapshot.plans)
   }, [authSession])
 
+  const startPlanCheckout = useCallback(
+    async (planId: PlanId, provider: CheckoutProvider): Promise<CheckoutSessionResult> => {
+      if (!authSession?.accessToken) {
+        return { ok: false, error: 'Sign in first before starting checkout.' }
+      }
+      return createBillingCheckoutSession({
+        accessToken: authSession.accessToken,
+        planId,
+        provider
+      })
+    },
+    [authSession]
+  )
+
   const verifyMsStoreReceipt = useCallback(
     async (storeIdKey: string, productId: string): Promise<{ verified: boolean; error?: string }> => {
       if (!authSession?.accessToken) {
@@ -1927,6 +1949,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         requestPasswordResetAccount,
         resendVerificationEmailAccount,
         refreshAccountQuota,
+        startPlanCheckout,
         verifyMsStoreReceipt
       }}
     >

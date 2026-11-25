@@ -1,0 +1,16 @@
+# Keep secrets, local artifacts, Electron desktop bundles, and tests out of Gateway Docker image
+.git
+.env
+.env.*
+server/.env
+server/dist
+node_modules
+out
+dist
+dist-electron
+scripts
+src
+docs
+*.log
+*.vault
+.DS_Store

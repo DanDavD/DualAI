@@ -585,3 +585,25 @@ Execute all four CARD-17 Technical Scope items and verify 100% pass across an ex
 
 ### 4. Result
 `pnpm run typecheck`, `pnpm run build`, `pnpm run security:gate`, `scripts/test_zero_trust_security.ts` (9/9 PASS), and all 12 automated suites passed at 100% with zero secrets in git index or `out/`, zero PII in security logs, zero emojis, and zero explicit `any` types.
+
+---
+
+## INCIDENT 023: CLOUD GATEWAY DEPLOYMENT READINESS, GRACEFUL WS DRAIN & LIVE CHECKOUT INTEGRATION (CARD-18)
+
+* **Date:** 2026-11-24
+* **Component:** `server/Dockerfile`, `.dockerignore`, `railway.toml`, `fly.toml`, `server/src/config.ts`, `server/src/index.ts`, `server/src/billing/billingVerifier.ts`, `AccountPlanModal.tsx`, `gatewayAuthService.ts`, `SessionContext.tsx`, `scripts/verify_supabase_rls.ts`, `scripts/test_card18_deployment_checkout.ts`
+* **Severity:** Medium (Cloud production deployment readiness and end-to-end checkout flow completion)
+
+### 1. Situation
+Prior to CARD-18, the Zero-Trust Gateway had core proxy, auth, and webhook handlers, but lacked container deployment manifests (`Dockerfile`, `railway.toml`, `fly.toml`), cloud `PORT`/`0.0.0.0` binding, `SIGTERM` graceful WebSocket draining, an executable Supabase Force RLS probe script, and live interactive checkout session creation in `AccountPlanModal.tsx` (which previously displayed only a static placeholder notice on plan click).
+
+### 2. Task
+Complete all four CARD-18 deliverables: author production deployment manifests and graceful WebSocket shutdown, wire live PayPal/Paddle and Microsoft Store MSIX checkout sessions end-to-end, add executable Supabase Force RLS verification, and empirically prove the full signup -> 1-hour free tier -> active metering -> 0s cutoff -> purchase credit -> restored streaming lifecycle.
+
+### 3. Action
+* **Cloud Deployment & Graceful Shutdown:** Authored non-root multi-stage `server/Dockerfile`, `.dockerignore`, `railway.toml`, `fly.toml`, and `docs/DEPLOYMENT_RUNBOOK.md`; updated `server/src/config.ts` to honor cloud `PORT` and bind `0.0.0.0` in production; added `SIGTERM`/`SIGINT` graceful shutdown emitting `SERVER_RESTARTING` + WS close code `1001` (`Going Away`).
+* **Live Checkout Flow:** Added `POST /v1/billing/checkout-session` in `billingVerifier.ts` and `server/src/index.ts`, exposed `startPlanCheckout()` via `gatewayAuthService.ts` and `SessionContext.tsx`, and upgraded `AccountPlanModal.tsx` with PayPal / Paddle / Microsoft Store selector, secure external HTTPS checkout launch, Sync Quota action, and inline Microsoft Store Collections v9.0 receipt verification form.
+* **Verification:** Authored `scripts/verify_supabase_rls.ts` (`pnpm run verify:rls`) and `scripts/test_card18_deployment_checkout.ts` (4/4 PASS) covering graceful WS 1001 drain, Supabase Force RLS, idempotent Microsoft Store v9.0 + PayPal webhook credits, and the full end-to-end SaaS lifecycle.
+
+### 4. Result
+`pnpm run typecheck`, `pnpm run build`, `pnpm run build:gateway`, `pnpm run security:gate`, `pnpm run verify:rls`, `scripts/test_card18_deployment_checkout.ts` (4/4 PASS), and all 13 automated project suites passed at 100% with zero errors, zero secrets, zero emojis, and zero explicit `any` types.
