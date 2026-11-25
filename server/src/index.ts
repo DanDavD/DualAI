@@ -22,7 +22,7 @@ import {
   isOriginAllowed
 } from './security/securityLogger.js'
 import { PLAN_CATALOG, QuotaStore, createQuotaStore } from './quota/quotaStore.js'
-import { BillingVerifier } from './billing/billingVerifier.js'
+import { BillingVerifier, CheckoutProvider } from './billing/billingVerifier.js'
 import { handleSttWebSocketProxy } from './proxy/deepgramWsProxy.js'
 import { handleSonioxWebSocketProxy } from './proxy/sonioxWsProxy.js'
 import { handleGeminiTranslateStream, TranslateProxyPayload } from './proxy/geminiStreamProxy.js'
@@ -102,12 +102,14 @@ export async function createGatewayServer(
     quotaStore?: QuotaStore
     rateLimiter?: GatewayRateLimiter
     onSecurityEvent?: SecurityEventSink
+    billingFetchImpl?: typeof fetch
   }
 ): Promise<RunningGatewayServer> {
   const {
     quotaStore: customQuotaStore,
     rateLimiter: customRateLimiter,
     onSecurityEvent,
+    billingFetchImpl,
     ...configOverrides
   } = overrides || {}
 
@@ -115,7 +117,7 @@ export async function createGatewayServer(
   const authVerifier = new AuthVerifier(config)
   const quotaStore = customQuotaStore || createQuotaStore(config)
   const rateLimiter = customRateLimiter || new GatewayRateLimiter()
-  const billingVerifier = new BillingVerifier(config, quotaStore)
+  const billingVerifier = new BillingVerifier(config, quotaStore, billingFetchImpl)
   const securityLogger = new SecurityEventLogger({
     sink: onSecurityEvent,
     silentConsole: config.nodeEnv === 'test' && !onSecurityEvent
@@ -459,6 +461,33 @@ export async function createGatewayServer(
       return
     }
 
+    // POST /v1/billing/checkout-session (Authoritative PayPal / Paddle / Microsoft Store Checkout)
+    if (req.method === 'POST' && pathname === '/v1/billing/checkout-session') {
+      try {
+        const raw = await readRawBody(req, MAX_JSON_BODY_BYTES)
+        const body = JSON.parse(raw.toString('utf-8')) as {
+          planId?: string
+          provider?: CheckoutProvider
+        }
+        const provider: CheckoutProvider =
+          body.provider === 'paddle' || body.provider === 'microsoft_store'
+            ? body.provider
+            : 'paypal'
+        const sessionRes = billingVerifier.createCheckoutSession({
+          userId: user.userId,
+          planId: body.planId || '',
+          provider
+        })
+        sendJson(res, sessionRes.ok ? 200 : 400, sessionRes)
+      } catch {
+        sendJson(res, 400, {
+          code: 'INVALID_CHECKOUT_REQUEST',
+          message: 'Invalid checkout session request body.'
+        })
+      }
+      return
+    }
+
     // POST /v1/billing/microsoft-store/verify (Windows MSIX Native Store Receipt Verification)
     if (req.method === 'POST' && pathname === '/v1/billing/microsoft-store/verify') {
       try {
@@ -598,6 +627,55 @@ export async function createGatewayServer(
   const address = server.address()
   const actualPort = typeof address === 'object' && address ? address.port : config.port
 
+  let isClosing = false
+
+  const closeGracefully = async (): Promise<void> => {
+    if (isClosing) return
+    isClosing = true
+
+    // Notify active WebSocket clients with clean 1001 Going Away so desktops auto-reconnect cleanly
+    const closingNotice = JSON.stringify({
+      type: 'dualai_error',
+      code: 'SERVER_RESTARTING',
+      message: 'Gateway restarting cleanly. Reconnecting automatically...'
+    })
+
+    for (const client of wss.clients) {
+      if (client.readyState === client.OPEN) {
+        try {
+          client.send(closingNotice)
+          client.close(1001, 'Gateway shutting down cleanly')
+        } catch {
+          client.terminate()
+        }
+      } else {
+        client.terminate()
+      }
+    }
+
+    // Allow brief window for 1001 close frames to flush before terminating stragglers
+    if (wss.clients.size > 0) {
+      await new Promise<void>((resolve) => {
+        const deadline = setTimeout(() => {
+          for (const client of wss.clients) {
+            client.terminate()
+          }
+          resolve()
+        }, 400)
+        const check = setInterval(() => {
+          if (wss.clients.size === 0) {
+            clearInterval(check)
+            clearTimeout(deadline)
+            resolve()
+          }
+        }, 25)
+      })
+    }
+
+    await new Promise<void>((resolve) => wss.close(() => resolve()))
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+
   return {
     server,
     wss,
@@ -606,17 +684,11 @@ export async function createGatewayServer(
     wsUrl: `ws://${config.host}:${actualPort}`,
     authVerifier,
     quotaStore,
-    close: async () => {
-      for (const client of wss.clients) {
-        client.terminate()
-      }
-      await new Promise<void>((resolve) => wss.close(() => resolve()))
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-    }
+    close: closeGracefully
   }
 }
 
-// Direct CLI execution entrypoint
+// Direct CLI execution entrypoint with Railway / Fly.io SIGTERM & SIGINT graceful WebSocket drain
 const isDirectRun =
   process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]
 
@@ -624,6 +696,17 @@ if (isDirectRun) {
   createGatewayServer()
     .then((gw) => {
       console.log(`[DUALAI-GATEWAY] Zero-Trust Cloud Gateway active at ${gw.baseUrl}`)
+
+      const handleShutdownSignal = (signal: string) => {
+        console.log(`[DUALAI-GATEWAY] Received ${signal}. Draining active WebSockets cleanly...`)
+        void gw
+          .close()
+          .then(() => process.exit(0))
+          .catch(() => process.exit(1))
+      }
+
+      process.on('SIGTERM', () => handleShutdownSignal('SIGTERM'))
+      process.on('SIGINT', () => handleShutdownSignal('SIGINT'))
     })
     .catch((err) => {
       console.error('[DUALAI-GATEWAY] Fatal startup error:', err instanceof Error ? err.message : err)

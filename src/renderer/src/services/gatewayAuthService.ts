@@ -11,7 +11,10 @@ import {
   AccountQuota,
   AuthenticatedSession,
   BillingPlan,
-  DEFAULT_SAAS_PLANS
+  CheckoutProvider,
+  CheckoutSessionResult,
+  DEFAULT_SAAS_PLANS,
+  PlanId
 } from '../../../types/account'
 
 const GATEWAY_BASE_URL = (
@@ -392,6 +395,33 @@ export async function fetchAuthoritativeQuota(
     quota: data.quota,
     plans: data.plans && data.plans.length > 0 ? data.plans : DEFAULT_SAAS_PLANS
   }
+}
+
+export async function createBillingCheckoutSession(params: {
+  accessToken: string
+  planId: PlanId
+  provider: CheckoutProvider
+}): Promise<CheckoutSessionResult> {
+  const response = await fetch(`${GATEWAY_BASE_URL}/v1/billing/checkout-session`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${params.accessToken}`
+    },
+    body: JSON.stringify({
+      planId: params.planId,
+      provider: params.provider
+    })
+  })
+
+  const data = (await response.json().catch(() => ({}))) as CheckoutSessionResult
+  if (!response.ok || !data.ok) {
+    return {
+      ok: false,
+      error: data.error || `Unable to create checkout session (${response.status}).`
+    }
+  }
+  return data
 }
 
 export async function verifyMicrosoftStorePurchase(params: {

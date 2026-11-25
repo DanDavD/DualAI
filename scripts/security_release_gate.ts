@@ -34,7 +34,7 @@ const LIVE_SECRET_PATTERNS: Array<{ label: string; regex: RegExp }> = [
   {
     label: 'Hardcoded Provider Secret Assignment',
     regex:
-      /\b(?:SONIOX_API_KEY|DEEPGRAM_API_KEY|GEMINI_API_KEY|SUPABASE_SERVICE_ROLE_KEY|MS_STORE_CLIENT_SECRET|BILLING_WEBHOOK_SECRET)\s*=\s*["']?(?!your_|changeme|dualai_test_)[A-Za-z0-9\-_.]{24,}["']?/
+      /\b(?:SONIOX_API_KEY|DEEPGRAM_API_KEY|GEMINI_API_KEY|SUPABASE_SERVICE_ROLE_KEY|MS_STORE_CLIENT_SECRET|BILLING_WEBHOOK_SECRET)[ \t]*=[ \t]*["']?(?!your_|changeme|dualai_test_)[A-Za-z0-9\-_.]{24,}["']?/
   }
 ]
 

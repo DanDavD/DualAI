@@ -23,6 +23,8 @@ export interface GatewayConfig {
   msStoreClientId: string | null
   msStoreClientSecret: string | null
   billingWebhookSecret: string | null
+  paypalCheckoutBaseUrl: string
+  paddleCheckoutBaseUrl: string
   devLocalAuthSecret: string
   quotaMeterIntervalMs: number
 }
@@ -67,8 +69,9 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
   const nodeEnv: GatewayConfig['nodeEnv'] =
     rawEnv === 'production' ? 'production' : rawEnv === 'test' ? 'test' : 'development'
 
-  const port = Number(process.env.GATEWAY_PORT || 8787)
-  const host = process.env.GATEWAY_HOST || '127.0.0.1'
+  const port = Number(process.env.PORT || process.env.GATEWAY_PORT || 8787)
+  const host =
+    process.env.GATEWAY_HOST?.trim() || (nodeEnv === 'production' ? '0.0.0.0' : '127.0.0.1')
   const allowedOrigins = (
     process.env.ALLOWED_ORIGINS || 'http://localhost:5173,app://dualai,file://'
   )
@@ -92,6 +95,10 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
     msStoreClientId: process.env.MS_STORE_CLIENT_ID?.trim() || null,
     msStoreClientSecret: normalizeSecret(process.env.MS_STORE_CLIENT_SECRET),
     billingWebhookSecret: normalizeSecret(process.env.BILLING_WEBHOOK_SECRET),
+    paypalCheckoutBaseUrl:
+      process.env.PAYPAL_CHECKOUT_BASE_URL?.trim() || 'https://checkout.dualai.app/paypal',
+    paddleCheckoutBaseUrl:
+      process.env.PADDLE_CHECKOUT_BASE_URL?.trim() || 'https://checkout.dualai.app/paddle',
     devLocalAuthSecret:
       process.env.DEV_LOCAL_AUTH_SECRET?.trim() || 'dualai_local_dev_hmac_secret_ephemeral',
     quotaMeterIntervalMs: Number(process.env.QUOTA_METER_INTERVAL_MS || 5000),

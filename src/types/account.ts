@@ -4,6 +4,22 @@
  */
 
 export type PlanId = 'free_tier' | 'pro_40h' | 'pro_plus_70h' | 'unlimited'
+export type CheckoutProvider = 'paypal' | 'paddle' | 'microsoft_store'
+
+export interface CheckoutSessionResult {
+  ok: boolean
+  provider?: CheckoutProvider
+  planId?: PlanId
+  planName?: string
+  monthlyPriceUsd?: number
+  includedHours?: number
+  checkoutSessionId?: string
+  checkoutUrl?: string
+  msStoreProductId?: string | null
+  storeUri?: string
+  verificationEndpoint?: string
+  error?: string
+}
 
 export interface BillingPlan {
   id: PlanId

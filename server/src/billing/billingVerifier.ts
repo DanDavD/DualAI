@@ -40,13 +40,99 @@ interface MsCollectionsItem {
   id?: string
 }
 
+export type CheckoutProvider = 'paypal' | 'paddle' | 'microsoft_store'
+
+export interface CheckoutSessionRequest {
+  userId: string
+  planId: string
+  provider: CheckoutProvider
+}
+
+export interface CheckoutSessionResponse {
+  ok: boolean
+  provider?: CheckoutProvider
+  planId?: PlanId
+  planName?: string
+  monthlyPriceUsd?: number
+  includedHours?: number
+  checkoutSessionId?: string
+  checkoutUrl?: string
+  msStoreProductId?: string | null
+  storeUri?: string
+  verificationEndpoint?: string
+  error?: string
+}
+
 export class BillingVerifier {
   private config: GatewayConfig
   private quotaStore: QuotaStore
+  private fetchImpl: typeof fetch
 
-  constructor(config: GatewayConfig, quotaStore: QuotaStore) {
+  constructor(config: GatewayConfig, quotaStore: QuotaStore, fetchImpl?: typeof fetch) {
     this.config = config
     this.quotaStore = quotaStore
+    this.fetchImpl = fetchImpl || fetch
+  }
+
+  /**
+   * Creates an authoritative checkout session payload using server-catalog prices & hours.
+   * Client-supplied amounts are never trusted.
+   */
+  public createCheckoutSession(req: CheckoutSessionRequest): CheckoutSessionResponse {
+    const plan = PLAN_CATALOG[req.planId as PlanId]
+    if (!plan || plan.id === 'free_tier') {
+      return { ok: false, error: 'Select a valid paid plan (pro_40h, pro_plus_70h, or unlimited).' }
+    }
+
+    const checkoutSessionId = `chk_${crypto.randomUUID()}`
+    const includedHours = Math.round(plan.includedSeconds / 3600)
+
+    if (req.provider === 'microsoft_store') {
+      if (!plan.msStoreProductId) {
+        return { ok: false, error: 'Selected plan does not have a Microsoft Store Product ID.' }
+      }
+      return {
+        ok: true,
+        provider: 'microsoft_store',
+        planId: plan.id,
+        planName: plan.name,
+        monthlyPriceUsd: plan.monthlyPriceUsd,
+        includedHours,
+        checkoutSessionId,
+        msStoreProductId: plan.msStoreProductId,
+        storeUri: `ms-windows-store://pdp/?ProductId=${encodeURIComponent(plan.msStoreProductId)}`,
+        verificationEndpoint: '/v1/billing/microsoft-store/verify'
+      }
+    }
+
+    const baseUrl =
+      req.provider === 'paddle'
+        ? this.config.paddleCheckoutBaseUrl
+        : this.config.paypalCheckoutBaseUrl
+
+    let checkoutUrl: string
+    try {
+      const parsed = new URL(baseUrl)
+      parsed.searchParams.set('plan', plan.id)
+      parsed.searchParams.set('session', checkoutSessionId)
+      parsed.searchParams.set('uid', req.userId)
+      parsed.searchParams.set('amount_usd', plan.monthlyPriceUsd.toFixed(2))
+      parsed.searchParams.set('hours', String(includedHours))
+      checkoutUrl = parsed.toString()
+    } catch {
+      return { ok: false, error: 'Checkout provider URL is misconfigured on Gateway.' }
+    }
+
+    return {
+      ok: true,
+      provider: req.provider,
+      planId: plan.id,
+      planName: plan.name,
+      monthlyPriceUsd: plan.monthlyPriceUsd,
+      includedHours,
+      checkoutSessionId,
+      checkoutUrl
+    }
   }
 
   /**
@@ -88,7 +174,7 @@ export class BillingVerifier {
         resource: 'https://onestore.microsoft.com'
       })
 
-      const tokenRes = await fetch(tokenUrl, {
+      const tokenRes = await this.fetchImpl(tokenUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: tokenBody.toString()
@@ -108,7 +194,7 @@ export class BillingVerifier {
       }
 
       // 2. Query Microsoft Store Collections v9.0 API with user's storeIdKey
-      const collectionsRes = await fetch(
+      const collectionsRes = await this.fetchImpl(
         'https://collections.mp.microsoft.com/v9.0/collections/query',
         {
           method: 'POST',

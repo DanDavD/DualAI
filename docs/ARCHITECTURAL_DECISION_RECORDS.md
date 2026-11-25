@@ -482,3 +482,23 @@ We harden the Zero-Trust Gateway (`server/src/`) and desktop client auth lifecyc
 ### Consequences
 * **Positive:** Closes multi-account free-tier farming, guarantees uninterrupted 2-hour+ calls, enforces instant server-side sign-out revocation, prevents CSWSH/cross-origin hijacking, and provides a deterministic pre-release CI/local secret gate.
 * **Negative:** Production deployments must configure `ALLOWED_ORIGINS` accurately for all authorized client origins (`app://dualai`, `file://`, and production web domain if applicable).
+
+---
+
+## ADR-020: CLOUD GATEWAY CONTAINER DEPLOYMENT, GRACEFUL WEBSOCKET DRAIN & LIVE STORE/PAYPAL CHECKOUT PIPELINE (CARD-18)
+
+### Status
+Accepted
+
+### Context
+Moving DualAI from local Zero-Trust Gateway testing to multi-tenant cloud production requires reproducible container deployment manifests (`https://` and `wss://`), clean zero-drop rolling restarts for live WebSockets, executable Supabase Force RLS verification, and an end-to-end checkout session flow supporting Honduras and global payouts (Microsoft Store MSIX Collections API v9.0 + PayPal/Paddle).
+
+### Decision
+We ship a turnkey cloud deployment and live billing stack:
+1. **Multi-Stage Non-Root Container & Railway/Fly Manifests (`server/Dockerfile`, `.dockerignore`, `railway.toml`, `fly.toml`, `docs/DEPLOYMENT_RUNBOOK.md`):** Builds Gateway TypeScript cleanly to `server/dist/index.js` (`pnpm run build:gateway`), binds dynamically to `PORT` / `0.0.0.0` in production, enforces `force_https = true`, exposes `/v1/health` container & platform probes, and handles `SIGTERM`/`SIGINT` by notifying active WebSocket clients (`SERVER_RESTARTING`) and draining cleanly with close code `1001` (`Going Away`).
+2. **Authoritative Live Checkout Sessions (`POST /v1/billing/checkout-session`, `billingVerifier.ts`, `AccountPlanModal.tsx`):** Issues server-authoritative checkout sessions for `paypal`, `paddle`, and `microsoft_store` using catalog prices/hours (never trusting client amounts), launches external HTTPS checkout safely via Electron's external shell handler, and provides inline Microsoft Store Collections v9.0 receipt verification (`POST /v1/billing/microsoft-store/verify`) with idempotent transaction deduplication.
+3. **Executable Supabase Force RLS Auditor (`scripts/verify_supabase_rls.ts`, `pnpm run verify:rls`):** Audits `001_zero_trust_quota_billing.sql` statically across all 4 tables and 2 `service_role`-only RPCs and executes live PostgREST unauthorized `PATCH`/RPC attack probes whenever `SUPABASE_URL` and `SUPABASE_ANON_KEY` are supplied.
+
+### Consequences
+* **Positive:** Single-command cloud deployment to Railway or Fly.io over TLS, zero-downtime WebSocket rolling restarts, verified Honduras-compatible global + Windows Store checkout, and empirical proof of Force RLS protection.
+* **Negative:** Production cloud secrets (`SONIOX_API_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `BILLING_WEBHOOK_SECRET`, and optional Entra ID Store keys) must be provisioned in the Railway/Fly secrets vault per `docs/DEPLOYMENT_RUNBOOK.md`.

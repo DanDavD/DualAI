@@ -15,8 +15,10 @@ import {
   Check,
   CreditCard,
   KeyRound,
-  MailCheck
+  MailCheck,
+  ExternalLink
 } from 'lucide-react'
+import { CheckoutProvider, CheckoutSessionResult, PlanId } from '../../../../types/account'
 import { useSession } from '../../context/SessionContext'
 import { isSupabaseAuthEnabled } from '../../services/gatewayAuthService'
 
@@ -34,7 +36,9 @@ export const AccountPlanModal: React.FC = () => {
     signOutAccount,
     requestPasswordResetAccount,
     resendVerificationEmailAccount,
-    refreshAccountQuota
+    refreshAccountQuota,
+    startPlanCheckout,
+    verifyMsStoreReceipt
   } = useSession()
 
   const [authMode, setAuthMode] = useState<AccountAuthView>('signin')
@@ -44,7 +48,13 @@ export const AccountPlanModal: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [statusNotice, setStatusNotice] = useState<string | null>(null)
   const [pendingVerificationEmail, setPendingVerificationEmail] = useState<string | null>(null)
+  const [checkoutProvider, setCheckoutProvider] = useState<CheckoutProvider>('paypal')
+  const [activeCheckout, setActiveCheckout] = useState<CheckoutSessionResult | null>(null)
   const [checkoutNotice, setCheckoutNotice] = useState<string | null>(null)
+  const [checkoutError, setCheckoutError] = useState<string | null>(null)
+  const [isCheckoutLoading, setIsCheckoutLoading] = useState(false)
+  const [msStoreIdKey, setMsStoreIdKey] = useState('')
+  const [isVerifyingStoreReceipt, setIsVerifyingStoreReceipt] = useState(false)
 
   if (!isAccountModalOpen) return null
 
@@ -109,11 +119,63 @@ export const AccountPlanModal: React.FC = () => {
     }
   }
 
-  const handleSelectPlan = (planName: string, msProductId: string | null) => {
-    if (msProductId) {
-      setCheckoutNotice(
-        `Plan "${planName}" selected. On Windows MSIX, Microsoft Store checkout verifies Product ID ${msProductId} directly with the DualAI Gateway; on macOS/Web, PayPal/Paddle checkout credits hours automatically.`
-      )
+  const handleSelectPlan = async (planId: PlanId, planName: string) => {
+    setCheckoutError(null)
+    setCheckoutNotice(null)
+
+    if (!authSession) {
+      setCheckoutError(`Sign in above before upgrading to "${planName}".`)
+      return
+    }
+
+    setIsCheckoutLoading(true)
+    try {
+      const session = await startPlanCheckout(planId, checkoutProvider)
+      if (!session.ok) {
+        setCheckoutError(session.error || 'Unable to initialize checkout session.')
+        return
+      }
+
+      setActiveCheckout(session)
+
+      if (session.provider === 'microsoft_store') {
+        setCheckoutNotice(
+          `Microsoft Store checkout ready for "${planName}" (Product ID: ${session.msStoreProductId}). Complete purchase in Microsoft Store, then verify your Store ID Key below.`
+        )
+        return
+      }
+
+      if (session.checkoutUrl) {
+        window.open(session.checkoutUrl, '_blank', 'noopener,noreferrer')
+        setCheckoutNotice(
+          `Opened secure ${session.provider === 'paddle' ? 'Paddle' : 'PayPal'} checkout for "${planName}" (Ref: ${session.checkoutSessionId}). Once completed, click Sync Quota to load your hours.`
+        )
+      }
+    } catch (err) {
+      setCheckoutError(err instanceof Error ? err.message : 'Unable to start checkout.')
+    } finally {
+      setIsCheckoutLoading(false)
+    }
+  }
+
+  const handleVerifyMsStoreReceipt = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!activeCheckout?.msStoreProductId) return
+    setCheckoutError(null)
+    setIsVerifyingStoreReceipt(true)
+    try {
+      const res = await verifyMsStoreReceipt(msStoreIdKey.trim(), activeCheckout.msStoreProductId)
+      if (res.verified) {
+        setMsStoreIdKey('')
+        setActiveCheckout(null)
+        setCheckoutNotice('Microsoft Store entitlement verified and hours credited to your account.')
+      } else {
+        setCheckoutError(res.error || 'Microsoft Store receipt verification failed.')
+      }
+    } catch (err) {
+      setCheckoutError(err instanceof Error ? err.message : 'Receipt verification failed.')
+    } finally {
+      setIsVerifyingStoreReceipt(false)
     }
   }
 
@@ -390,14 +452,51 @@ export const AccountPlanModal: React.FC = () => {
           )}
 
           {/* Tiered Plans Matrix (Microsoft Store MSIX + PayPal/Paddle Honduras-Compatible) */}
-          <div className="space-y-2.5">
-            <div className="flex items-center justify-between">
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-text-secondary">
                 Available Interpretation Hour Plans
               </h3>
-              <span className="flex items-center space-x-1 font-mono text-[10px] text-text-muted">
-                <CreditCard className="h-3 w-3" />
-                <span>Microsoft Store (Windows) & PayPal / Paddle (Global)</span>
+              <div
+                role="radiogroup"
+                aria-label="Checkout payment provider"
+                className="flex items-center rounded border border-surface-border bg-surface-base p-0.5 font-mono text-[10px]"
+              >
+                {(
+                  [
+                    { id: 'paypal', label: 'PayPal' },
+                    { id: 'paddle', label: 'Paddle' },
+                    { id: 'microsoft_store', label: 'Microsoft Store' }
+                  ] as Array<{ id: CheckoutProvider; label: string }>
+                ).map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={checkoutProvider === opt.id}
+                    onClick={() => {
+                      setCheckoutProvider(opt.id)
+                      setActiveCheckout(null)
+                      setCheckoutError(null)
+                    }}
+                    className={`rounded px-2 py-1 transition ${
+                      checkoutProvider === opt.id
+                        ? 'bg-accent-steel text-white font-bold'
+                        : 'text-text-secondary hover:text-text-primary'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-1.5 font-mono text-[10px] text-text-muted">
+              <CreditCard className="h-3 w-3 shrink-0" />
+              <span>
+                {checkoutProvider === 'microsoft_store'
+                  ? 'Windows MSIX native billing via Microsoft Store Collections API v9.0'
+                  : 'Global & Honduras-compatible checkout via PayPal / Paddle Merchant of Record'}
               </span>
             </div>
 
@@ -446,10 +545,20 @@ export const AccountPlanModal: React.FC = () => {
                       ) : (
                         <button
                           type="button"
-                          onClick={() => handleSelectPlan(plan.name, plan.msStoreProductId)}
-                          className="w-full rounded bg-accent-steel py-1.5 font-mono text-[11px] font-bold text-white hover:bg-blue-700 transition"
+                          disabled={isCheckoutLoading}
+                          onClick={() => void handleSelectPlan(plan.id, plan.name)}
+                          className="flex w-full items-center justify-center space-x-1.5 rounded bg-accent-steel py-1.5 font-mono text-[11px] font-bold text-white hover:bg-blue-700 disabled:opacity-50 transition"
                         >
-                          {isCurrent ? 'ADD MORE HOURS' : 'UPGRADE VIA STORE / PAYPAL'}
+                          <span>
+                            {isCurrent
+                              ? 'ADD MORE HOURS'
+                              : checkoutProvider === 'microsoft_store'
+                                ? 'BUY IN MICROSOFT STORE'
+                                : checkoutProvider === 'paddle'
+                                  ? 'UPGRADE VIA PADDLE'
+                                  : 'UPGRADE VIA PAYPAL'}
+                          </span>
+                          <ExternalLink className="h-3 w-3" />
                         </button>
                       )}
                     </div>
@@ -458,10 +567,81 @@ export const AccountPlanModal: React.FC = () => {
               })}
             </div>
 
-            {checkoutNotice && (
-              <div className="rounded border border-accent-steel/40 bg-accent-steel/10 p-3 font-mono text-[11px] text-text-primary">
-                {checkoutNotice}
+            {checkoutError && (
+              <div
+                role="alert"
+                className="rounded border border-accent-crimson/40 bg-accent-crimson/10 p-3 font-mono text-[11px] text-accent-crimson"
+              >
+                {checkoutError}
               </div>
+            )}
+
+            {checkoutNotice && (
+              <div
+                role="status"
+                className="flex flex-wrap items-center justify-between gap-2 rounded border border-accent-steel/40 bg-accent-steel/10 p-3 font-mono text-[11px] text-text-primary"
+              >
+                <span>{checkoutNotice}</span>
+                {authSession && activeCheckout?.provider !== 'microsoft_store' && (
+                  <button
+                    type="button"
+                    onClick={() => void refreshAccountQuota()}
+                    className="flex items-center space-x-1 rounded border border-accent-steel/60 bg-surface-base px-2.5 py-1 text-[10px] font-bold text-text-primary hover:bg-surface-active transition"
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                    <span>Sync Quota Now</span>
+                  </button>
+                )}
+              </div>
+            )}
+
+            {activeCheckout?.provider === 'microsoft_store' && activeCheckout.msStoreProductId && (
+              <form
+                onSubmit={(e) => void handleVerifyMsStoreReceipt(e)}
+                className="rounded-lg border border-surface-border bg-surface-base p-4 space-y-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="font-mono text-[11px] font-bold text-text-primary">
+                      Microsoft Store Collections v9.0 Receipt Verification
+                    </p>
+                    <p className="font-mono text-[10px] text-text-muted">
+                      Product ID: {activeCheckout.msStoreProductId} ({activeCheckout.planName})
+                    </p>
+                  </div>
+                  {activeCheckout.storeUri && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        window.open(activeCheckout.storeUri, '_blank', 'noopener,noreferrer')
+                      }
+                      className="flex items-center space-x-1 rounded border border-surface-border bg-surface-panel px-2.5 py-1 font-mono text-[10px] text-text-secondary hover:text-text-primary transition"
+                    >
+                      <span>Open Store App</span>
+                      <ExternalLink className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <input
+                    type="text"
+                    required
+                    minLength={16}
+                    value={msStoreIdKey}
+                    onChange={(e) => setMsStoreIdKey(e.target.value)}
+                    placeholder="Paste Windows MSIX Store ID Key to credit hours"
+                    aria-label="Microsoft Store ID Key"
+                    className="flex-1 rounded border border-surface-border bg-surface-panel px-3 py-1.5 font-mono text-xs text-text-primary outline-none focus:border-accent-steel"
+                  />
+                  <button
+                    type="submit"
+                    disabled={isVerifyingStoreReceipt}
+                    className="rounded bg-accent-emerald px-3.5 py-1.5 font-mono text-[11px] font-bold text-black hover:opacity-90 disabled:opacity-50 transition"
+                  >
+                    {isVerifyingStoreReceipt ? 'VERIFYING...' : 'VERIFY RECEIPT'}
+                  </button>
+                </div>
+              </form>
             )}
           </div>
         </div>

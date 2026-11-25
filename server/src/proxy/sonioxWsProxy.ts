@@ -194,14 +194,16 @@ export async function handleSonioxWebSocketProxy(params: {
     rateLimiter.releaseSession(user.userId, sessionId)
 
     if (upstreamSocket) {
-      upstreamSocket.removeAllListeners()
-      if (
-        upstreamSocket.readyState === WebSocket.OPEN ||
-        upstreamSocket.readyState === WebSocket.CONNECTING
-      ) {
-        upstreamSocket.close(1000, 'Proxy session closed')
-      }
+      const sock = upstreamSocket
       upstreamSocket = null
+      sock.removeAllListeners()
+      // Swallow teardown errors when closing a mid-handshake CONNECTING upstream socket
+      sock.on('error', () => undefined)
+      if (sock.readyState === WebSocket.OPEN) {
+        sock.close(1000, 'Proxy session closed')
+      } else if (sock.readyState === WebSocket.CONNECTING) {
+        sock.terminate()
+      }
     }
 
     if (
