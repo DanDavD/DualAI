@@ -416,7 +416,7 @@ function registerSecurityHeaders(): void {
   const isDev = Boolean(process.env['ELECTRON_RENDERER_URL'])
   const connectSources = isDev
     ? "'self' http://127.0.0.1:8787 ws://127.0.0.1:8787 http://localhost:8787 ws://localhost:8787 ws://localhost:5173 https://*.supabase.co blob: data:"
-    : "'self' https://*.dualai.app wss://*.dualai.app https://*.supabase.co blob: data:"
+    : "'self' https://*.universalaisync.com wss://*.universalaisync.com https://*.dualai.app wss://*.dualai.app https://*.supabase.co blob: data:"
 
   const scriptSources = isDev
     ? "'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:"

@@ -1,0 +1,63 @@
+# ============================================================================
+# DUALAI - Production Cross-Platform Desktop Packaging Configuration
+# Produces native macOS (.dmg) and Windows (.exe NSIS) installers.
+# Strictly excludes server/, scripts/, docs/, supabase/, and any .env files.
+# ============================================================================
+
+appId: com.universalaisync.dualai
+productName: DualAI
+copyright: Copyright (c) 2026 Universal AI Sync
+
+directories:
+  output: dist
+
+files:
+  - out/**/*
+  - package.json
+  - "!server/**"
+  - "!scripts/**"
+  - "!docs/**"
+  - "!supabase/**"
+  - "!**/*.env*"
+  - "!**/*.map"
+
+asar: true
+
+mac:
+  category: public.app-category.productivity
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  artifactName: DualAI-${version}-${arch}.${ext}
+  extendInfo:
+    NSMicrophoneUsageDescription: DualAI requires microphone access to capture spoken audio for real-time simultaneous translation.
+    NSScreenCaptureUsageDescription: DualAI requires system audio capture permission to translate live video calls and meetings natively without virtual audio drivers.
+  target:
+    - target: dmg
+      arch:
+        - arm64
+
+dmg:
+  title: DualAI ${version}
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+win:
+  artifactName: DualAI-${version}-${arch}-setup.${ext}
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: DualAI

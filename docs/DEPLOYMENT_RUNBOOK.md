@@ -11,7 +11,7 @@ Configure these environment variables inside Railway Variables or Fly.io Secrets
 | Variable | Required | Purpose |
 | :--- | :--- | :--- |
 | `NODE_ENV` | Yes (`production`) | Disables `/v1/auth/dev-signin`, enforces `ALLOWED_ORIGINS`, HSTS, and TLS |
-| `ALLOWED_ORIGINS` | Yes | Comma-separated allowlist (e.g. `app://dualai,file://,https://app.dualai.app`) |
+| `ALLOWED_ORIGINS` | Yes | Comma-separated allowlist (e.g. `app://dualai,file://,https://dualai.universalaisync.com`) |
 | `SONIOX_API_KEY` | Yes | Primary unified real-time STT + 15-speaker diarization + 2-way translation |
 | `SONIOX_MODEL` | Optional | Defaults to `stt-rt-v6` |
 | `SUPABASE_URL` | Yes | Production Supabase project URL (`https://<ref>.supabase.co`) |
@@ -69,7 +69,7 @@ curl -fsS https://dualai-cloud-gateway.fly.dev/v1/health
 Before building installers (`pnpm run build:win` / `pnpm run build:mac`), set the public non-secret client build variables:
 
 ```bash
-export VITE_GATEWAY_URL="https://api.dualai.app"
+export VITE_GATEWAY_URL="https://api.universalaisync.com"
 export VITE_SUPABASE_URL="https://<ref>.supabase.co"
 export VITE_SUPABASE_ANON_KEY="<public_supabase_anon_key>"
 pnpm run build && pnpm run security:gate
