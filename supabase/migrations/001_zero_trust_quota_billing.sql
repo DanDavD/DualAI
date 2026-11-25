@@ -49,7 +49,7 @@ VALUES
     'Pro (40 Hours)',
     '40 hours/month of unified multi-speaker live translation across 60+ languages.',
     144000,
-    6.99,
+    8.99,
     '9NBLGGH4DUAL40H',
     1
   ),
@@ -58,7 +58,7 @@ VALUES
     'Pro+ (70 Hours)',
     '70 hours/month for active medical, legal, and business interpreters.',
     252000,
-    9.99,
+    14.99,
     '9NBLGGH4DUAL70H',
     1
   ),
@@ -67,7 +67,7 @@ VALUES
     'Unlimited',
     'Unlimited monthly interpretation for full-time interpreters (single-user fair use).',
     576000,
-    19.99,
+    24.99,
     '9NBLGGH4DUALUNL',
     1
   )

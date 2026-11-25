@@ -222,7 +222,7 @@ async function runCard18Suite(): Promise<void> {
       includedHours: number
     }
     assert.equal(paypalSession.ok, true)
-    assert.equal(paypalSession.monthlyPriceUsd, 6.99)
+    assert.equal(paypalSession.monthlyPriceUsd, 8.99)
     assert.equal(paypalSession.includedHours, 40)
     assert.ok(paypalSession.checkoutUrl.startsWith('https://'))
     assert.ok(paypalSession.checkoutUrl.includes(`uid=${userSession.user.userId}`))

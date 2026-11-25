@@ -7,7 +7,7 @@
  *    normalization -> ZERO premature fragmentation, instant commit ONLY on genuine language switch
  * 3. Real async settle timer coalescing + video pause anti-triplication + exact clause replay suppression
  * 4. 48 kHz -> 16 kHz linear PCM downsampling accuracy & 67% bandwidth reduction
- * 5. Competitive pricing catalog alignment ($0 / $6.99 / $9.99 / $19.99) & Governance audit
+ * 5. Competitive pricing catalog alignment ($0 / $8.99 / $14.99 / $24.99) & Governance audit
  */
 
 import assert from 'node:assert/strict'
@@ -240,11 +240,11 @@ async function run(): Promise<void> {
   console.log('[TEST 5] Auditing competitive SaaS plan catalog & Governance (Zero Emojis, Zero any)...')
   assert.equal(PLAN_CATALOG.free_tier.monthlyPriceUsd, 0)
   assert.equal(PLAN_CATALOG.free_tier.includedSeconds, 3600)
-  assert.equal(PLAN_CATALOG.pro_40h.monthlyPriceUsd, 6.99)
+  assert.equal(PLAN_CATALOG.pro_40h.monthlyPriceUsd, 8.99)
   assert.equal(PLAN_CATALOG.pro_40h.includedSeconds, 144000)
-  assert.equal(PLAN_CATALOG.pro_plus_70h.monthlyPriceUsd, 9.99)
+  assert.equal(PLAN_CATALOG.pro_plus_70h.monthlyPriceUsd, 14.99)
   assert.equal(PLAN_CATALOG.pro_plus_70h.includedSeconds, 252000)
-  assert.equal(PLAN_CATALOG.unlimited.monthlyPriceUsd, 19.99)
+  assert.equal(PLAN_CATALOG.unlimited.monthlyPriceUsd, 24.99)
   assert.equal(PLAN_CATALOG.unlimited.isUnlimitedFairUse, true)
   assert.equal(PLAN_CATALOG.unlimited.maxConcurrentSessions, 1, 'Unlimited plan enforces 1 concurrent session anti-sharing lock')
 
@@ -262,7 +262,7 @@ async function run(): Promise<void> {
     assert.ok(!emojiRegex.test(src), `Emoji detected in ${rel}`)
     assert.ok(!explicitAnyRegex.test(src), `Explicit any detected in ${rel}`)
   }
-  console.log(`  Pricing ($0/$6.99/$9.99/$19.99) + ${files.length} audited engine files (0 emojis, 0 any): VERIFIED`)
+  console.log(`  Pricing ($0/$8.99/$14.99/$24.99) + ${files.length} audited engine files (0 emojis, 0 any): VERIFIED`)
   console.log('PASS: Test 5 satisfied.\n')
 
   console.log('==================================================================')

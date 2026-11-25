@@ -69,7 +69,7 @@ export const DEFAULT_SAAS_PLANS: BillingPlan[] = [
     name: 'Pro (40 Hours)',
     description: '40 hours/month of unified multi-speaker live translation across 60+ languages.',
     includedSeconds: 144000,
-    monthlyPriceUsd: 6.99,
+    monthlyPriceUsd: 8.99,
     msStoreProductId: '9NBLGGH4DUAL40H',
     maxConcurrentSessions: 1
   },
@@ -78,7 +78,7 @@ export const DEFAULT_SAAS_PLANS: BillingPlan[] = [
     name: 'Pro+ (70 Hours)',
     description: '70 hours/month for active medical, legal, and business interpreters.',
     includedSeconds: 252000,
-    monthlyPriceUsd: 9.99,
+    monthlyPriceUsd: 14.99,
     msStoreProductId: '9NBLGGH4DUAL70H',
     maxConcurrentSessions: 1
   },
@@ -87,7 +87,7 @@ export const DEFAULT_SAAS_PLANS: BillingPlan[] = [
     name: 'Unlimited',
     description: 'Unlimited monthly interpretation for full-time interpreters (single-user fair use).',
     includedSeconds: 576000,
-    monthlyPriceUsd: 19.99,
+    monthlyPriceUsd: 24.99,
     msStoreProductId: '9NBLGGH4DUALUNL',
     maxConcurrentSessions: 1,
     isUnlimitedFairUse: true
