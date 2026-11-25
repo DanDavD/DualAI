@@ -413,3 +413,47 @@ We introduce a **2-Second Pause Paragraph Accumulator (`paragraphAccumulator.ts`
 ### Consequences
 * **Positive:** Eliminates `AbortError` alerts and stuck rows, prevents 1-second sentence fragmentation, gives interpreters unmistakable visual feedback between evolving drafts and finalized text, and keeps the workspace visually serene.
 * **Negative:** Live mode issues incremental preview calls during long monologues; mitigated via smart text-change deduplication and `120ms`/`420ms` debounce thresholds.
+
+---
+
+## ADR-017: SONIOX UNIFIED REAL-TIME ENGINE MIGRATION (MULTI-SPEAKER DIARIZATION, TWO-WAY AUTO-LANGUAGE & COMPETITIVE PRICING)
+
+### Status
+Accepted
+
+### Context
+Benchmarking DualAI against commercial real-time interpreters revealed two structural limitations of the two-hop Deepgram Nova-2 + Gemini HTTP SSE pipeline:
+1. **Multi-Speaker & Bilingual Limitations:** Single-language STT locks out secondary languages in mixed calls (e.g., 2 Spanish speakers + 1 English speaker on one System Audio feed), lacks speaker separation, and adds double-hop network latency for every translation.
+2. **Commercial Unit Economics:** Deepgram Nova-3 Multi + Diarize + Gemini (~$0.60–$0.70/hr) makes competitive Microsoft Store pricing ($6.99/40h, $9.99/70h, $19.99 Unlimited) unsustainable.
+
+### Decision
+We migrate the primary Zero-Trust Cloud Gateway engine to **Soniox Unified Real-Time WebSocket (`stt-rt-v6`)** (`server/src/proxy/sonioxWsProxy.ts`) paired with client-side 16 kHz PCM downsampling and a unified multi-speaker stream assembler (`sonioxStreamAssembler.ts`):
+1. **Single-WebSocket Unified Pipeline:** Authenticates strictly server-side via `Authorization: Bearer ${SONIOX_API_KEY}` against `wss://stt-rt.soniox.com/transcribe-websocket`, enabling `enable_speaker_diarization: true` (up to 15 speakers), `enable_language_identification: true`, `enable_endpoint_detection: true` (`max_endpoint_delay_ms: 2000`), domain + glossary context injection, and native `two_way` (Conversation) or `one_way` (Translate) simultaneous translation in one connection.
+2. **16 kHz Downsampling & Silence-Gated Keepalive:** `pcmDownsampler.ts` converts 48 kHz/44.1 kHz OS audio 3:1 to 16 kHz `pcm_s16le` (-67% bandwidth), lowers the active voice gate to capture soft voices cleanly, and sends `{"type":"keepalive"}` during silence so users pay zero audio tokens on pauses.
+3. **Multi-Speaker Reconciliation & Color Coding:** `SonioxStreamAssembler` splits turns instantaneously on speaker or language changes, reconciles trailing finalized translation tokens arriving milliseconds after `<end>`, and applies calm color tinting across Speakers 1, 2, 3, and 4+ without adding boxes or per-message titles.
+4. **Competitive SaaS Pricing Matrix:** Updates `PLAN_CATALOG`, `DEFAULT_SAAS_PLANS`, and Supabase migration `001` to Free Trial ($0 / 1h), Pro ($6.99 / 40h), Pro+ ($9.99 / 70h), and Unlimited ($19.99 / single-session fair use), undercutting Apple Store competitors by 20%–33% while preserving healthy unit margins (~$0.11–$0.18/hr API cost + 0% Microsoft Store commission via external Paddle/PayPal checkout).
+
+### Consequences
+* **Positive:** Sub-200ms single-hop live translation, accurate 3+ speaker mixed-language detection on a single audio channel, ~70% lower AI COGS, and zero client-side provider secrets.
+* **Negative:** Requires setting `SONIOX_API_KEY` in `server/.env` on the Cloud Gateway; Deepgram + Gemini remains cleanly isolated as a fallback only if `SONIOX_API_KEY` is unset.
+
+---
+
+## ADR-018: LIVE TYPOGRAPHY PERSONALIZATION, MULTI-VIEW WORKSPACE LAYOUTS & HUD SYNCHRONIZATION (CARD-16)
+
+### Status
+Accepted
+
+### Context
+Interpreters work across vastly different visual environments (full-screen dual monitors, narrow half-screen sidebars beside Zoom/Teams, bright clinical rooms, or extended 4-hour sessions requiring larger or high-legibility typography). Hardcoding a single font size, line height, and 50/50 split layout limits readability and forces interpreters to choose between workspace comfort and Teleprompter HUD consistency.
+
+### Decision
+We implement a **zero-latency client-side Typography & Layout Personalization Engine (`typographyPreferences.ts`)** backed by persisted `localStorage` preferences (`dualai_workspace_display_settings`) and synchronized live into the Floating Teleprompter HUD:
+1. **Zero-Latency Inline Typography & Independent Per-Language Color Invariance (`UtteranceCard.tsx`, `TranslationCard.tsx`, `DualPaneWorkspace.tsx`):** Supports 4 curated font families (`Inter`, `Geist Mono`, `System Sans`, `High-Legibility`), continuous `13px–28px` font scaling, 3 line-spacing presets (`Compact`, `Standard`, `Relaxed`), and user-editable fluorescent per-language colors (`languageAColor` / `languageBColor`) via preset swatches and native color pickers. `resolveTurnPaneColors()` resolves Original (left) and Translation (right) colors independently from each pane's own normalized base ISO language so each language strictly maintains its assigned palette whether it appears as source speech or translation, regardless of speaker count.
+2. **Separated Layout & Text Menus + Staggered Linear Cascade (`WorkspaceLayoutPopover.tsx`, `TextPersonalizationPopover.tsx`, `SubHeader.tsx`, `DualPaneWorkspace.tsx`):** Decouples Workspace Layout switching (`Dual-Pane 50/50`, `Translation Focus`, `Compact Stacked`) from Typography & Colors, strips technical toggle clutter and the diagnostic SubHeader VU bar, removes redundant custom window buttons in favor of native macOS/Windows controls, renders non-selectable (`select-none`) 60fps rows, labels workspace panes cleanly as `Original` (left) and `Translation` (right), and cascades each translation one step below its original for effortless top-to-bottom linear reading.
+3. **Whole-Word BPE Merging, 2s Same-Language Paragraph Coalescing & Strict Language Locking (`sonioxStreamAssembler.ts`, `sonioxWsProxy.ts`):** Merges Soniox BPE sub-word tokens into whole words prior to emission, enables `language_hints_strict: true`, coalesces rapid same-language `<end>` bursts and speaker-ID jitter across a 2,000ms settle window (splitting immediately only on genuine finalized language switches or `<fin>`), and enforces authoritative-only anti-duplication commits.
+4. **Automatic Teleprompter HUD Synchronization (`SessionContext.tsx`, `TeleprompterHud.tsx`):** Font family, scaled font size (`+6px` stage boost clamped to `14px–48px`), and line spacing synchronize automatically over Electron IPC (`sendHudConfig`) while preserving independent HUD opacity, line limit, click-through lock, and screen bounds.
+
+### Consequences
+* **Positive:** Adapts instantly to every monitor size and interpreter visual preference with zero layout flicker, zero server overhead, and unified main-window + floating HUD ergonomics.
+* **Negative:** None; defaults strictly maintain the minimal matte Zinc/Slate DAW aesthetic until customized by the user.

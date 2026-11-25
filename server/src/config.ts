@@ -12,6 +12,8 @@ export interface GatewayConfig {
   port: number
   host: string
   allowedOrigins: string[]
+  sonioxApiKey: string | null
+  sonioxModel: string
   deepgramApiKey: string | null
   geminiApiKey: string | null
   geminiModel: string
@@ -77,6 +79,8 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
     port: Number.isFinite(port) && port > 0 ? port : 8787,
     host,
     allowedOrigins,
+    sonioxApiKey: normalizeSecret(process.env.SONIOX_API_KEY),
+    sonioxModel: process.env.SONIOX_MODEL?.trim() || 'stt-rt-v6',
     deepgramApiKey: normalizeSecret(process.env.DEEPGRAM_API_KEY),
     geminiApiKey: normalizeSecret(process.env.GEMINI_API_KEY),
     geminiModel: process.env.GEMINI_MODEL?.trim() || 'gemini-3.5-flash-lite',

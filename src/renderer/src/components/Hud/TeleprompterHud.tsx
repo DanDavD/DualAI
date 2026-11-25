@@ -17,6 +17,10 @@ import {
 } from 'lucide-react'
 import { HudSettings, DEFAULT_HUD_SETTINGS } from '../../../../types/settings'
 import { TranscriptPayload } from '../../../../types/ipc'
+import {
+  resolveFontFamilyCss,
+  resolveLineSpacingMetrics
+} from '../../utils/typographyPreferences'
 
 const STORAGE_KEY_HUD = 'dualai_hud_settings'
 
@@ -154,6 +158,11 @@ export const TeleprompterHud: React.FC = () => {
   const visibleLines = lines.slice(-settings.lineLimit)
   const zincBackground = `rgba(9, 9, 11, ${settings.opacity})`
   const borderAlpha = Math.max(0.25, settings.opacity * 0.9)
+  const fontMetrics = resolveFontFamilyCss(settings.fontFamily || 'geist_mono')
+  const lineMetrics = resolveLineSpacingMetrics(settings.lineSpacing || 'standard')
+  const isHighContrast = Boolean(settings.highContrast)
+  const showSpeakers = settings.showSpeakerLabels ?? true
+  const showTimes = Boolean(settings.showTimestamps)
 
   return (
     <div
@@ -304,9 +313,10 @@ export const TeleprompterHud: React.FC = () => {
         ref={scrollRef}
         className="flex-1 overflow-y-auto px-4 py-3 space-y-2"
         style={{
-          fontFamily: 'var(--font-mono)',
+          fontFamily: fontMetrics.fontFamily,
+          letterSpacing: fontMetrics.letterSpacing,
           fontSize: `${settings.fontSizePx}px`,
-          lineHeight: 1.38
+          lineHeight: lineMetrics.hudLineHeight
         }}
       >
         {visibleLines.length === 0 ? (
@@ -317,23 +327,43 @@ export const TeleprompterHud: React.FC = () => {
             <p className="mt-1 font-mono text-[11px] text-text-muted flex items-center space-x-1">
               <MousePointerClick className="h-3 w-3 inline" />
               <span>
-                Showing up to {settings.lineLimit} sentences at {settings.fontSizePx}px Geist Mono.
+                Showing up to {settings.lineLimit} sentences at {settings.fontSizePx}px.
               </span>
             </p>
           </div>
         ) : (
           visibleLines.map((line, index) => {
             const isNewest = index === visibleLines.length - 1
+            const formattedTime = new Date(line.timestampMs).toLocaleTimeString([], {
+              hour12: false,
+              hour: '2-digit',
+              minute: '2-digit'
+            })
             return (
               <div
                 key={line.id}
-                className={`transition-opacity ${isNewest ? 'text-text-primary opacity-100' : 'text-text-secondary opacity-70'}`}
+                className={`transition-opacity ${
+                  isHighContrast
+                    ? isNewest
+                      ? 'text-white opacity-100'
+                      : 'text-zinc-200 opacity-85'
+                    : isNewest
+                      ? 'text-text-primary opacity-100'
+                      : 'text-text-secondary opacity-70'
+                }`}
               >
-                <span className="mr-2 rounded border border-surface-border bg-surface-base/75 px-1.5 py-0.5 align-middle text-[10px] font-bold uppercase text-accent-emerald">
-                  {line.speakerLabel}
-                </span>
+                {showSpeakers && (
+                  <span className="mr-2 rounded border border-surface-border bg-surface-base/75 px-1.5 py-0.5 align-middle font-mono text-[10px] font-bold uppercase text-accent-emerald">
+                    {line.speakerLabel}
+                  </span>
+                )}
+                {showTimes && (
+                  <span className="mr-2 align-middle font-mono text-[10px] text-text-muted">
+                    {formattedTime}
+                  </span>
+                )}
                 <span
-                  className="font-medium tracking-tight"
+                  className={isHighContrast ? 'font-semibold tracking-tight' : 'font-medium tracking-tight'}
                   style={{
                     textShadow: '0 1px 3px rgba(0, 0, 0, 0.85)'
                   }}

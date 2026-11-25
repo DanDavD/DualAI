@@ -13,6 +13,40 @@ export type SystemPipelineState =
   | 'reconnecting'
   | 'error'
 
+export type WorkspaceFontFamily = 'inter' | 'geist_mono' | 'system_sans' | 'high_legibility'
+
+export type WorkspaceLineSpacing = 'compact' | 'standard' | 'relaxed'
+
+export type WorkspaceViewMode = 'dual' | 'target_only' | 'stacked'
+
+export interface WorkspaceDisplaySettings {
+  fontFamily: WorkspaceFontFamily
+  fontSizePx: number // 13 to 28
+  lineSpacing: WorkspaceLineSpacing
+  highContrast: boolean
+  viewMode: WorkspaceViewMode
+  languageAColor: string // Hex color for primary language (sourceLang) regardless of speaker count
+  languageBColor: string // Hex color for secondary language (targetLang) regardless of speaker count
+  showTimestamps: boolean
+  showSpeakerLabels: boolean
+  showLatencyBadges: boolean
+  syncTypographyToHud: boolean
+}
+
+export const DEFAULT_WORKSPACE_DISPLAY_SETTINGS: WorkspaceDisplaySettings = {
+  fontFamily: 'inter',
+  fontSizePx: 15,
+  lineSpacing: 'standard',
+  highContrast: false,
+  viewMode: 'dual',
+  languageAColor: '#ffffff',
+  languageBColor: '#ffaa00',
+  showTimestamps: false,
+  showSpeakerLabels: false,
+  showLatencyBadges: false,
+  syncTypographyToHud: true
+}
+
 export interface HudBounds {
   x: number
   y: number
@@ -26,6 +60,11 @@ export interface HudSettings {
   lineLimit: 2 | 4 | 6
   isClickThrough: boolean
   bounds: HudBounds
+  fontFamily?: WorkspaceFontFamily
+  lineSpacing?: WorkspaceLineSpacing
+  highContrast?: boolean
+  showSpeakerLabels?: boolean
+  showTimestamps?: boolean
 }
 
 export interface GlossaryEntry {
@@ -108,5 +147,10 @@ export const DEFAULT_HUD_SETTINGS: HudSettings = {
     y: 80,
     width: 760,
     height: 220
-  }
+  },
+  fontFamily: 'geist_mono',
+  lineSpacing: 'standard',
+  highContrast: false,
+  showSpeakerLabels: true,
+  showTimestamps: false
 }

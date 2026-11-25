@@ -6,6 +6,7 @@
  */
 
 import { ChannelId } from '../../../../types/audio'
+import { DomainId } from '../../../../types/domain'
 import {
   SttClientCallbacks,
   SttClientConfig,
@@ -14,6 +15,11 @@ import {
   TranscriptUtterance
 } from '../../../../types/stt'
 import { getGatewayWsUrl } from '../../services/gatewayAuthService'
+import {
+  SonioxRawToken,
+  SonioxStreamAssembler,
+  UnifiedTurnSnapshot
+} from './sonioxStreamAssembler'
 
 interface RelayedWord {
   word: string
@@ -27,11 +33,14 @@ interface RelayedGatewayMessage {
   type?: string
   code?: string
   message?: string
+  provider?: string
   remainingSeconds?: number
   totalAllocatedSeconds?: number
   duration?: number
   is_final?: boolean
   speech_final?: boolean
+  tokens?: SonioxRawToken[]
+  finished?: boolean
   channel?: {
     alternatives?: Array<{
       transcript: string
@@ -44,6 +53,9 @@ interface RelayedGatewayMessage {
 export interface GatewaySttExtraCallbacks {
   onQuotaUpdate?: (remainingSeconds: number, totalAllocatedSeconds: number) => void
   onQuotaExhausted?: (message: string) => void
+  onUnifiedDraft?: (snapshot: UnifiedTurnSnapshot) => void
+  onUnifiedCommit?: (snapshot: UnifiedTurnSnapshot) => void
+  onUnifiedCommitUpdate?: (snapshot: UnifiedTurnSnapshot) => void
 }
 
 export class GatewaySttClient {
@@ -59,6 +71,8 @@ export class GatewaySttClient {
   private speechStartTimestamp: number = 0
   private currentUtteranceId: string = ''
   private isManuallyClosed: boolean = false
+  private activeProvider: 'soniox-unified' | 'deepgram-nova-2' = 'soniox-unified'
+  private sonioxAssembler: SonioxStreamAssembler
 
   constructor(
     channelId: ChannelId,
@@ -70,6 +84,22 @@ export class GatewaySttClient {
     this.config = config
     this.accessToken = accessToken
     this.callbacks = callbacks
+    this.sonioxAssembler = new SonioxStreamAssembler(
+      {
+        channelId: this.channelId,
+        sourceLang: this.config.language,
+        targetLang: this.config.targetLanguage || 'es',
+        operatingMode: this.config.operatingMode || 'conversation',
+        domainId: (this.config.domainId as DomainId) || 'general',
+        confidenceThreshold: this.config.confidenceThreshold,
+        sameLanguageSettleMs: 2000
+      },
+      {
+        onUnifiedDraft: (snap) => this.callbacks.onUnifiedDraft?.(snap),
+        onUnifiedCommit: (snap) => this.callbacks.onUnifiedCommit?.(snap),
+        onUnifiedCommitUpdate: (snap) => this.callbacks.onUnifiedCommitUpdate?.(snap)
+      }
+    )
   }
 
   public connect(): void {
@@ -92,10 +122,18 @@ export class GatewaySttClient {
     try {
       const queryParams = new URLSearchParams({
         language: this.config.language,
+        sourceLang: this.config.language,
+        targetLang: this.config.targetLanguage || 'es',
+        mode: this.config.operatingMode || 'conversation',
+        domain: this.config.domainId || 'general',
         endpointing: String(this.config.endpointingMs ?? 250),
+        endpointDelayMs: '2000',
         sampleRate: String(this.config.sampleRate || 16000),
         channel: this.channelId
       })
+      if (this.config.glossaryTerms && this.config.glossaryTerms.length > 0) {
+        queryParams.set('terms', this.config.glossaryTerms.slice(0, 40).join(','))
+      }
       const wsUrl = `${getGatewayWsUrl()}/v1/stt?${queryParams.toString()}`
 
       // Authenticate via WebSocket subprotocol (never place JWT inside URL query string)
@@ -170,7 +208,23 @@ export class GatewaySttClient {
   public signalSpeechEnd(): void {
     this.speechStartTimestamp = 0
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify({ type: 'Finalize' }))
+      // Only send legacy Deepgram Finalize from local VAD;
+      // Soniox uses semantic endpointing + explicit pause finalization (finalizeTurn)
+      if (this.activeProvider === 'deepgram-nova-2') {
+        this.socket.send(JSON.stringify({ type: 'Finalize' }))
+      }
+    }
+  }
+
+  /**
+   * Explicitly tells Soniox to finalize all pending words once audio goes silent
+   * for >2s (e.g. when a video is paused), preventing stale provisional tails from repeating.
+   */
+  public finalizeTurn(): void {
+    this.speechStartTimestamp = 0
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      const msgType = this.activeProvider === 'deepgram-nova-2' ? 'Finalize' : 'finalize'
+      this.socket.send(JSON.stringify({ type: msgType }))
     }
   }
 
@@ -181,6 +235,11 @@ export class GatewaySttClient {
       const data = JSON.parse(event.data) as RelayedGatewayMessage
 
       if (data.type === 'dualai_quota') {
+        if (data.provider === 'soniox-unified') {
+          this.activeProvider = 'soniox-unified'
+        } else if (data.provider === 'deepgram-nova-2') {
+          this.activeProvider = 'deepgram-nova-2'
+        }
         if (
           typeof data.remainingSeconds === 'number' &&
           typeof data.totalAllocatedSeconds === 'number'
@@ -197,6 +256,32 @@ export class GatewaySttClient {
           )
         } else {
           this.callbacks.onError(new Error(data.message || 'Gateway STT error'))
+        }
+        return
+      }
+
+      // Primary Unified Engine: Soniox Real-Time Token Stream (STT + Diarization + 2-Way Translation)
+      if (data.type === 'soniox_tokens' && Array.isArray(data.tokens)) {
+        this.activeProvider = 'soniox-unified'
+        const now = performance.now()
+        const latencyMs =
+          this.speechStartTimestamp > 0
+            ? Math.max(15, Math.round(now - this.speechStartTimestamp))
+            : 45
+
+        this.sonioxAssembler.ingestTokens(data.tokens)
+
+        this.callbacks.onTelemetry({
+          channelId: this.channelId,
+          latencyMs,
+          tokensCount: data.tokens.length,
+          connectionState: this.connectionState,
+          reconnectCount: this.reconnectAttempts,
+          provider: 'soniox-unified'
+        })
+
+        if (data.finished) {
+          this.sonioxAssembler.flushActiveTurn()
         }
         return
       }
@@ -284,7 +369,9 @@ export class GatewaySttClient {
     this.stopKeepalive()
     this.keepaliveTimer = setInterval(() => {
       if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-        this.socket.send(JSON.stringify({ type: 'KeepAlive' }))
+        // Lowercase "keepalive" satisfies Soniox spec; Deepgram proxy accepts KeepAlive/keepalive
+        const keepaliveType = this.activeProvider === 'deepgram-nova-2' ? 'KeepAlive' : 'keepalive'
+        this.socket.send(JSON.stringify({ type: keepaliveType }))
       }
     }, 5000)
   }
@@ -312,6 +399,7 @@ export class GatewaySttClient {
     this.isManuallyClosed = true
     this.clearReconnectTimer()
     this.stopKeepalive()
+    this.sonioxAssembler.reset()
 
     if (this.socket) {
       this.socket.onopen = null

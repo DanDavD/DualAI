@@ -13,6 +13,7 @@ import { GatewayRateLimiter } from './security/rateLimiter.js'
 import { PLAN_CATALOG, QuotaStore, createQuotaStore } from './quota/quotaStore.js'
 import { BillingVerifier } from './billing/billingVerifier.js'
 import { handleSttWebSocketProxy } from './proxy/deepgramWsProxy.js'
+import { handleSonioxWebSocketProxy } from './proxy/sonioxWsProxy.js'
 import { handleGeminiTranslateStream, TranslateProxyPayload } from './proxy/geminiStreamProxy.js'
 
 const MAX_JSON_BODY_BYTES = 64 * 1024 // 64 KB strict cap
@@ -113,8 +114,10 @@ export async function createGatewayServer(
       sendJson(res, 200, {
         status: 'ok',
         mode: config.nodeEnv,
-        sttConfigured: Boolean(config.deepgramApiKey),
-        translationConfigured: Boolean(config.geminiApiKey),
+        activeEngine: config.sonioxApiKey ? 'soniox-unified' : 'deepgram-gemini',
+        sonioxConfigured: Boolean(config.sonioxApiKey),
+        sttConfigured: Boolean(config.sonioxApiKey || config.deepgramApiKey),
+        translationConfigured: Boolean(config.sonioxApiKey || config.geminiApiKey),
         supabaseAuthConfigured: Boolean(config.supabaseUrl && config.supabaseServiceRoleKey),
         msStoreConfigured: Boolean(
           config.msStoreTenantId && config.msStoreClientId && config.msStoreClientSecret
@@ -323,14 +326,25 @@ export async function createGatewayServer(
     }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
-      void handleSttWebSocketProxy({
-        clientSocket: ws,
-        req,
-        user,
-        config,
-        quotaStore,
-        rateLimiter
-      })
+      if (config.sonioxApiKey) {
+        void handleSonioxWebSocketProxy({
+          clientSocket: ws,
+          req,
+          user,
+          config,
+          quotaStore,
+          rateLimiter
+        })
+      } else {
+        void handleSttWebSocketProxy({
+          clientSocket: ws,
+          req,
+          user,
+          config,
+          quotaStore,
+          rateLimiter
+        })
+      }
     })
   })
 

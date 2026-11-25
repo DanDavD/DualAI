@@ -28,6 +28,10 @@ import {
   resolveAudioRoutingPolicy,
   resolveTranslationTargetForChannel
 } from '../../audio/audioRoutingPolicy'
+import {
+  resolveLineSpacingMetrics,
+  resolveTurnPaneColors
+} from '../../utils/typographyPreferences'
 
 const ESTIMATED_ITEM_HEIGHT = 84
 const OVERSCAN_COUNT = 6
@@ -91,6 +95,7 @@ export const DualPaneWorkspace: React.FC = () => {
     draftTranslationA,
     draftTranslationB,
     activeTranslation,
+    workspaceDisplaySettings,
     addGlossaryEntry
   } = useSession()
 
@@ -175,13 +180,19 @@ export const DualPaneWorkspace: React.FC = () => {
         ? { ...u, speakerLabel: speakerOverrides[u.id] }
         : u
       const effectiveTarget = resolveTranslationTargetForChannel(u.channelId, routingDecision)
-      const isOppositeDirection =
-        routingDecision.isBilateralTwoWay && u.channelId === 'channel_b'
-
       const finalTranslation = translationMap.get(u.id)
       const inFlightTranslation = streamingTranslations[u.id]
       const effectiveTranslation = finalTranslation || inFlightTranslation
       const isRowStreaming = !finalTranslation && Boolean(inFlightTranslation)
+
+      const { originalColor, translationColor } = resolveTurnPaneColors({
+        spokenLang: u.language || effectiveTranslation?.sourceLang || sourceLang,
+        translatedLang: effectiveTranslation?.targetLang,
+        sourceLang,
+        targetLang,
+        operatingMode,
+        settings: workspaceDisplaySettings
+      })
 
       return {
         id: u.id,
@@ -190,7 +201,8 @@ export const DualPaneWorkspace: React.FC = () => {
         isRowStreaming,
         isFlagged: flaggedIds.has(u.id),
         effectiveTarget,
-        isOppositeDirection
+        originalColor,
+        translationColor
       }
     })
 
@@ -205,7 +217,11 @@ export const DualPaneWorkspace: React.FC = () => {
     speakerOverrides,
     flaggedIds,
     filterFlaggedOnly,
-    routingDecision
+    routingDecision,
+    sourceLang,
+    targetLang,
+    operatingMode,
+    workspaceDisplaySettings
   ])
 
   // 4. Smart Auto-Scroll & Virtualization State
@@ -281,14 +297,36 @@ export const DualPaneWorkspace: React.FC = () => {
     }
   }, [])
 
+  const lineMetrics = resolveLineSpacingMetrics(workspaceDisplaySettings.lineSpacing)
+  const viewMode = workspaceDisplaySettings.viewMode
+  const isDualView = viewMode === 'dual'
+  const isTargetOnlyView = viewMode === 'target_only'
+  const isStackedView = viewMode === 'stacked'
+  const rowPaddingClass = lineMetrics.rowPaddingClass
+  const dividerBorderClass = workspaceDisplaySettings.highContrast
+    ? 'border-surface-border'
+    : 'border-surface-border/60'
+
+  // Dynamic virtualization item height scales cleanly with Font Size, Line Spacing & Linear Cascade
+  const effectiveItemHeight = Math.round(
+    ESTIMATED_ITEM_HEIGHT *
+      (workspaceDisplaySettings.fontSizePx / 15) *
+      (isTargetOnlyView ? 1 : 1.55) *
+      (workspaceDisplaySettings.lineSpacing === 'relaxed'
+        ? 1.18
+        : workspaceDisplaySettings.lineSpacing === 'compact'
+          ? 0.85
+          : 1)
+  )
+
   // Virtualized visible window
   const totalItems = pairedItems.length
-  const startIndex = Math.max(0, Math.floor(scrollTop / ESTIMATED_ITEM_HEIGHT) - OVERSCAN_COUNT)
-  const visibleCount = Math.ceil(viewportHeight / ESTIMATED_ITEM_HEIGHT) + 2 * OVERSCAN_COUNT
+  const startIndex = Math.max(0, Math.floor(scrollTop / effectiveItemHeight) - OVERSCAN_COUNT)
+  const visibleCount = Math.ceil(viewportHeight / effectiveItemHeight) + 2 * OVERSCAN_COUNT
   const endIndex = Math.min(totalItems, startIndex + visibleCount)
 
-  const topSpacerHeight = startIndex * ESTIMATED_ITEM_HEIGHT
-  const bottomSpacerHeight = Math.max(0, (totalItems - endIndex) * ESTIMATED_ITEM_HEIGHT)
+  const topSpacerHeight = startIndex * effectiveItemHeight
+  const bottomSpacerHeight = Math.max(0, (totalItems - endIndex) * effectiveItemHeight)
   const visibleItems = pairedItems.slice(startIndex, endIndex)
 
   const hasLiveContent =
@@ -302,6 +340,25 @@ export const DualPaneWorkspace: React.FC = () => {
   const sourceDisplayName = getLanguageDisplay(sourceLang)
   const targetDisplayName = getLanguageDisplay(targetLang)
   const isLiveMode = latencyMode === 'sub_second_live'
+
+  const renderFlagFilterPill = () =>
+    flaggedIds.size > 0 ? (
+      <button
+        type="button"
+        onClick={() => setFilterFlaggedOnly(!filterFlaggedOnly)}
+        className={`flex items-center space-x-1.5 rounded-full border px-2.5 py-0.5 font-mono text-[10px] transition ${
+          filterFlaggedOnly
+            ? 'border-accent-amber bg-accent-amber/20 text-accent-amber font-semibold'
+            : 'border-surface-border bg-surface-panel text-text-secondary hover:text-text-primary'
+        }`}
+        title="Filter feed to show only flagged items"
+      >
+        <Filter className="h-3 w-3" />
+        <span>
+          {filterFlaggedOnly ? `Showing ${flaggedIds.size} Flagged` : `Flagged (${flaggedIds.size})`}
+        </span>
+      </button>
+    ) : null
 
   return (
     <div
@@ -328,52 +385,57 @@ export const DualPaneWorkspace: React.FC = () => {
         </div>
       )}
 
-      {/* Single Clean Native-Language Pane Indicator Bar (e.g., English | Español) */}
-      <div className="flex h-8 w-full shrink-0 items-center border-b border-surface-border/70 bg-surface-base select-none">
-        <div
-          style={{ width: `${splitRatio}%` }}
-          className="flex h-full items-center space-x-2 border-r border-surface-border/60 px-6"
-        >
-          <span className="h-1.5 w-1.5 rounded-full bg-accent-steel shrink-0" />
-          <span className="text-xs font-medium text-text-secondary tracking-wide truncate">
-            {sourceDisplayName}
-          </span>
-        </div>
-        <div
-          style={{ width: `${100 - splitRatio}%` }}
-          className="flex h-full items-center justify-between px-6"
-        >
-          <div className="flex items-center space-x-2 min-w-0">
-            <span className="h-1.5 w-1.5 rounded-full bg-accent-emerald shrink-0" />
-            <span className="text-xs font-medium text-text-secondary tracking-wide truncate">
-              {targetDisplayName}
-            </span>
-          </div>
-
-          {flaggedIds.size > 0 && (
-            <button
-              type="button"
-              onClick={() => setFilterFlaggedOnly(!filterFlaggedOnly)}
-              className={`flex items-center space-x-1.5 rounded-full border px-2.5 py-0.5 font-mono text-[10px] transition ${
-                filterFlaggedOnly
-                  ? 'border-accent-amber bg-accent-amber/20 text-accent-amber font-semibold'
-                  : 'border-surface-border bg-surface-panel text-text-secondary hover:text-text-primary'
-              }`}
-              title="Filter feed to show only flagged items"
+      {/* Clean Functional Pane Indicator Bar: Original (Left) | Translation (Right) */}
+      <div className={`flex h-8 w-full shrink-0 items-center border-b ${dividerBorderClass} bg-surface-base select-none`}>
+        {isDualView ? (
+          <>
+            <div
+              style={{ width: `${splitRatio}%` }}
+              className={`flex h-full items-center space-x-2 border-r ${dividerBorderClass} px-6`}
             >
-              <Filter className="h-3 w-3" />
-              <span>
-                {filterFlaggedOnly
-                  ? `Showing ${flaggedIds.size} Flagged`
-                  : `Flagged (${flaggedIds.size})`}
+              <span className="h-1.5 w-1.5 rounded-full bg-accent-steel shrink-0" />
+              <span className="text-xs font-medium text-text-secondary tracking-wide truncate">
+                Original
               </span>
-            </button>
-          )}
-        </div>
+            </div>
+            <div
+              style={{ width: `${100 - splitRatio}%` }}
+              className="flex h-full items-center justify-between px-6"
+            >
+              <div className="flex items-center space-x-2 min-w-0">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent-emerald shrink-0" />
+                <span className="text-xs font-medium text-text-secondary tracking-wide truncate">
+                  Translation
+                </span>
+              </div>
+              {renderFlagFilterPill()}
+            </div>
+          </>
+        ) : isTargetOnlyView ? (
+          <div className="flex h-full w-full items-center justify-between px-6">
+            <div className="flex items-center space-x-2 min-w-0">
+              <span className="h-1.5 w-1.5 rounded-full bg-accent-emerald shrink-0" />
+              <span className="text-xs font-medium text-text-secondary tracking-wide truncate">
+                Translation
+              </span>
+            </div>
+            {renderFlagFilterPill()}
+          </div>
+        ) : (
+          <div className="flex h-full w-full items-center justify-between px-6">
+            <div className="flex items-center space-x-2 min-w-0">
+              <span className="h-1.5 w-1.5 rounded-full bg-accent-steel shrink-0" />
+              <span className="text-xs font-medium text-text-secondary tracking-wide truncate">
+                Original {'->'} Translation
+              </span>
+            </div>
+            {renderFlagFilterPill()}
+          </div>
+        )}
       </div>
 
-      {/* Synchronized Boxless Dual-Pane Transcript Canvas */}
-      <div className="relative flex-1 overflow-hidden">
+      {/* Synchronized Boxless Transcript Canvas (Non-Selectable, 60fps Fluid Scroll) */}
+      <div className="relative flex-1 overflow-hidden select-none">
         <div
           ref={scrollContainerRef}
           onScroll={handleScroll}
@@ -384,133 +446,408 @@ export const DualPaneWorkspace: React.FC = () => {
               {/* Top Virtual Spacer */}
               {topSpacerHeight > 0 && <div style={{ height: `${topSpacerHeight}px` }} />}
 
-              {/* Flowing, Boxless Paired Paragraph Rows (Finalized Typography) */}
-              {visibleItems.map((item) => (
-                <div
-                  key={item.id}
-                  className="flex hover:bg-surface-panel/40 transition-colors"
-                >
-                  {/* Left Pane: Source Speech Paragraph */}
-                  <div
-                    style={{ width: `${splitRatio}%` }}
-                    className="px-6 py-3 border-r border-surface-border/60"
-                  >
-                    <UtteranceCard
-                      utterance={item.utterance}
-                      isInterim={false}
-                      isFlagged={item.isFlagged}
-                      isOppositeDirection={item.isOppositeDirection}
-                      onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
-                    />
-                  </div>
+              {/* Flowing, Boxless Paired Paragraph Rows */}
+              {visibleItems.map((item) => {
+                if (isTargetOnlyView) {
+                  return (
+                    <div
+                      key={item.id}
+                      className={`px-8 ${rowPaddingClass} hover:bg-surface-panel/40 transition-colors max-w-5xl mx-auto`}
+                    >
+                      <TranslationCard
+                        translation={item.translation}
+                        utteranceId={item.id}
+                        isStreaming={item.isRowStreaming}
+                        isDraft={false}
+                        isFlagged={item.isFlagged}
+                        textColor={item.translationColor}
+                        displaySettings={workspaceDisplaySettings}
+                        onToggleFlag={handleToggleFlag}
+                        onAddToGlossary={handleAddToGlossary}
+                      />
+                    </div>
+                  )
+                }
 
-                  {/* Right Pane: Clean Target Translation ("What to Say") */}
-                  <div
-                    style={{ width: `${100 - splitRatio}%` }}
-                    className="px-6 py-3"
-                  >
-                    <TranslationCard
-                      translation={item.translation}
-                      utteranceId={item.id}
-                      isStreaming={item.isRowStreaming}
-                      isDraft={false}
-                      isFlagged={item.isFlagged}
-                      isOppositeDirection={item.isOppositeDirection}
-                      onToggleFlag={handleToggleFlag}
-                      onAddToGlossary={handleAddToGlossary}
-                    />
-                  </div>
-                </div>
-              ))}
-
-              {/* Active Channel A In-Progress Paragraph Row (Softer Draft Font Until 2s Pause Commit) */}
-              {(interimTranscriptA || draftTranslationA) && (
-                <div className="flex bg-surface-panel/25">
-                  <div
-                    style={{ width: `${splitRatio}%` }}
-                    className="px-6 py-3 border-r border-surface-border/60"
-                  >
-                    {interimTranscriptA && (
+                if (isStackedView) {
+                  return (
+                    <div
+                      key={item.id}
+                      className={`px-6 ${rowPaddingClass} border-b border-surface-border-subtle/60 hover:bg-surface-panel/40 transition-colors space-y-1 max-w-4xl mx-auto`}
+                    >
                       <UtteranceCard
-                        utterance={interimTranscriptA}
-                        isInterim={true}
+                        utterance={item.utterance}
+                        isInterim={false}
+                        isFlagged={item.isFlagged}
+                        isStacked={true}
+                        textColor={item.originalColor}
+                        displaySettings={workspaceDisplaySettings}
                         onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
                       />
-                    )}
-                  </div>
-
-                  <div style={{ width: `${100 - splitRatio}%` }} className="px-6 py-3">
-                    {isLiveMode ? (
                       <TranslationCard
-                        translation={draftTranslationA || undefined}
-                        utteranceId={
-                          draftTranslationA?.utteranceId ||
-                          interimTranscriptA?.id ||
-                          'draft-channel-a'
-                        }
-                        isStreaming={draftTranslationA ? draftTranslationA.isStreaming : true}
-                        isDraft={true}
+                        translation={item.translation}
+                        utteranceId={item.id}
+                        isStreaming={item.isRowStreaming}
+                        isDraft={false}
+                        isFlagged={item.isFlagged}
+                        textColor={item.translationColor}
+                        displaySettings={workspaceDisplaySettings}
                         onToggleFlag={handleToggleFlag}
                         onAddToGlossary={handleAddToGlossary}
                       />
-                    ) : (
-                      <TranslationCard
-                        utteranceId={interimTranscriptA?.id || 'accurate-channel-a'}
-                        isWaitingForPause={true}
-                        isDraft={true}
-                        onToggleFlag={handleToggleFlag}
-                        onAddToGlossary={handleAddToGlossary}
-                      />
-                    )}
-                  </div>
-                </div>
-              )}
+                    </div>
+                  )
+                }
 
-              {/* Active Channel B In-Progress Paragraph Row (Softer Draft Font Until 2s Pause Commit) */}
-              {(interimTranscriptB || draftTranslationB) && (
-                <div className="flex bg-surface-panel/25">
+                return (
                   <div
-                    style={{ width: `${splitRatio}%` }}
-                    className="px-6 py-3 border-r border-surface-border/60"
+                    key={item.id}
+                    className="border-b border-surface-border-subtle/40 hover:bg-surface-panel/30 transition-colors"
                   >
-                    {interimTranscriptB && (
-                      <UtteranceCard
-                        utterance={interimTranscriptB}
-                        isInterim={true}
-                        isOppositeDirection={routingDecision.isBilateralTwoWay}
-                        onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
-                      />
-                    )}
-                  </div>
+                    {/* Step 1: Original Speech (Left Pane) */}
+                    <div className="flex">
+                      <div
+                        style={{ width: `${splitRatio}%` }}
+                        className={`px-6 pt-3 pb-1 border-r ${dividerBorderClass}`}
+                      >
+                        <UtteranceCard
+                          utterance={item.utterance}
+                          isInterim={false}
+                          isFlagged={item.isFlagged}
+                          textColor={item.originalColor}
+                          displaySettings={workspaceDisplaySettings}
+                          onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
+                        />
+                      </div>
+                      <div style={{ width: `${100 - splitRatio}%` }} className="px-6 pt-3 pb-1" />
+                    </div>
 
-                  <div style={{ width: `${100 - splitRatio}%` }} className="px-6 py-3">
-                    {isLiveMode ? (
-                      <TranslationCard
-                        translation={draftTranslationB || undefined}
-                        utteranceId={
-                          draftTranslationB?.utteranceId ||
-                          interimTranscriptB?.id ||
-                          'draft-channel-b'
-                        }
-                        isStreaming={draftTranslationB ? draftTranslationB.isStreaming : true}
-                        isDraft={true}
-                        isOppositeDirection={routingDecision.isBilateralTwoWay}
-                        onToggleFlag={handleToggleFlag}
-                        onAddToGlossary={handleAddToGlossary}
+                    {/* Step 2: Translation Placed One Step Below (Right Pane — Linear Timeline Flow) */}
+                    <div className="flex">
+                      <div
+                        style={{ width: `${splitRatio}%` }}
+                        className={`px-6 pt-1 pb-3 border-r ${dividerBorderClass}`}
                       />
-                    ) : (
-                      <TranslationCard
-                        utteranceId={interimTranscriptB?.id || 'accurate-channel-b'}
-                        isWaitingForPause={true}
-                        isDraft={true}
-                        isOppositeDirection={routingDecision.isBilateralTwoWay}
-                        onToggleFlag={handleToggleFlag}
-                        onAddToGlossary={handleAddToGlossary}
-                      />
-                    )}
+                      <div
+                        style={{ width: `${100 - splitRatio}%` }}
+                        className="px-6 pt-1 pb-3"
+                      >
+                        <TranslationCard
+                          translation={item.translation}
+                          utteranceId={item.id}
+                          isStreaming={item.isRowStreaming}
+                          isDraft={false}
+                          isFlagged={item.isFlagged}
+                          textColor={item.translationColor}
+                          displaySettings={workspaceDisplaySettings}
+                          onToggleFlag={handleToggleFlag}
+                          onAddToGlossary={handleAddToGlossary}
+                        />
+                      </div>
+                    </div>
                   </div>
-                </div>
-              )}
+                )
+              })}
+
+              {/* Active Channel A In-Progress Paragraph Row */}
+              {(interimTranscriptA || draftTranslationA) &&
+                (() => {
+                  const {
+                    originalColor: draftOriginalColorA,
+                    translationColor: draftTranslationColorA
+                  } = resolveTurnPaneColors({
+                    spokenLang:
+                      interimTranscriptA?.language || draftTranslationA?.sourceLang || sourceLang,
+                    translatedLang: draftTranslationA?.targetLang,
+                    sourceLang,
+                    targetLang,
+                    operatingMode,
+                    settings: workspaceDisplaySettings
+                  })
+
+                  if (isTargetOnlyView) {
+                    return (
+                      <div className={`px-8 ${rowPaddingClass} bg-surface-panel/25 max-w-5xl mx-auto`}>
+                        {isLiveMode ? (
+                          <TranslationCard
+                            translation={draftTranslationA || undefined}
+                            utteranceId={
+                              draftTranslationA?.utteranceId ||
+                              interimTranscriptA?.id ||
+                              'draft-channel-a'
+                            }
+                            isStreaming={draftTranslationA ? draftTranslationA.isStreaming : true}
+                            isDraft={true}
+                            textColor={draftTranslationColorA}
+                            displaySettings={workspaceDisplaySettings}
+                            onToggleFlag={handleToggleFlag}
+                            onAddToGlossary={handleAddToGlossary}
+                          />
+                        ) : (
+                          <TranslationCard
+                            utteranceId={interimTranscriptA?.id || 'accurate-channel-a'}
+                            isWaitingForPause={true}
+                            isDraft={true}
+                            textColor={draftTranslationColorA}
+                            displaySettings={workspaceDisplaySettings}
+                            onToggleFlag={handleToggleFlag}
+                            onAddToGlossary={handleAddToGlossary}
+                          />
+                        )}
+                      </div>
+                    )
+                  }
+
+                  if (isStackedView) {
+                    return (
+                      <div className={`px-6 ${rowPaddingClass} bg-surface-panel/25 space-y-1 max-w-4xl mx-auto`}>
+                        {interimTranscriptA && (
+                          <UtteranceCard
+                            utterance={interimTranscriptA}
+                            isInterim={true}
+                            isStacked={true}
+                            textColor={draftOriginalColorA}
+                            displaySettings={workspaceDisplaySettings}
+                            onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
+                          />
+                        )}
+                        {isLiveMode ? (
+                          <TranslationCard
+                            translation={draftTranslationA || undefined}
+                            utteranceId={
+                              draftTranslationA?.utteranceId ||
+                              interimTranscriptA?.id ||
+                              'draft-channel-a'
+                            }
+                            isStreaming={draftTranslationA ? draftTranslationA.isStreaming : true}
+                            isDraft={true}
+                            textColor={draftTranslationColorA}
+                            displaySettings={workspaceDisplaySettings}
+                            onToggleFlag={handleToggleFlag}
+                            onAddToGlossary={handleAddToGlossary}
+                          />
+                        ) : (
+                          <TranslationCard
+                            utteranceId={interimTranscriptA?.id || 'accurate-channel-a'}
+                            isWaitingForPause={true}
+                            isDraft={true}
+                            textColor={draftTranslationColorA}
+                            displaySettings={workspaceDisplaySettings}
+                            onToggleFlag={handleToggleFlag}
+                            onAddToGlossary={handleAddToGlossary}
+                          />
+                        )}
+                      </div>
+                    )
+                  }
+
+                  return (
+                    <div className="bg-surface-panel/20">
+                      <div className="flex">
+                        <div
+                          style={{ width: `${splitRatio}%` }}
+                          className={`px-6 pt-3 pb-1 border-r ${dividerBorderClass}`}
+                        >
+                          {interimTranscriptA && (
+                            <UtteranceCard
+                              utterance={interimTranscriptA}
+                              isInterim={true}
+                              textColor={draftOriginalColorA}
+                              displaySettings={workspaceDisplaySettings}
+                              onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
+                            />
+                          )}
+                        </div>
+                        <div style={{ width: `${100 - splitRatio}%` }} className="px-6 pt-3 pb-1" />
+                      </div>
+
+                      <div className="flex">
+                        <div
+                          style={{ width: `${splitRatio}%` }}
+                          className={`px-6 pt-1 pb-3 border-r ${dividerBorderClass}`}
+                        />
+                        <div style={{ width: `${100 - splitRatio}%` }} className="px-6 pt-1 pb-3">
+                          {isLiveMode ? (
+                            <TranslationCard
+                              translation={draftTranslationA || undefined}
+                              utteranceId={
+                                draftTranslationA?.utteranceId ||
+                                interimTranscriptA?.id ||
+                                'draft-channel-a'
+                              }
+                              isStreaming={draftTranslationA ? draftTranslationA.isStreaming : true}
+                              isDraft={true}
+                              textColor={draftTranslationColorA}
+                              displaySettings={workspaceDisplaySettings}
+                              onToggleFlag={handleToggleFlag}
+                              onAddToGlossary={handleAddToGlossary}
+                            />
+                          ) : (
+                            <TranslationCard
+                              utteranceId={interimTranscriptA?.id || 'accurate-channel-a'}
+                              isWaitingForPause={true}
+                              isDraft={true}
+                              textColor={draftTranslationColorA}
+                              displaySettings={workspaceDisplaySettings}
+                              onToggleFlag={handleToggleFlag}
+                              onAddToGlossary={handleAddToGlossary}
+                            />
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })()}
+
+              {/* Active Channel B In-Progress Paragraph Row */}
+              {(interimTranscriptB || draftTranslationB) &&
+                (() => {
+                  const {
+                    originalColor: draftOriginalColorB,
+                    translationColor: draftTranslationColorB
+                  } = resolveTurnPaneColors({
+                    spokenLang:
+                      interimTranscriptB?.language || draftTranslationB?.sourceLang || sourceLang,
+                    translatedLang: draftTranslationB?.targetLang,
+                    sourceLang,
+                    targetLang,
+                    operatingMode,
+                    settings: workspaceDisplaySettings
+                  })
+
+                  if (isTargetOnlyView) {
+                    return (
+                      <div className={`px-8 ${rowPaddingClass} bg-surface-panel/25 max-w-5xl mx-auto`}>
+                        {isLiveMode ? (
+                          <TranslationCard
+                            translation={draftTranslationB || undefined}
+                            utteranceId={
+                              draftTranslationB?.utteranceId ||
+                              interimTranscriptB?.id ||
+                              'draft-channel-b'
+                            }
+                            isStreaming={draftTranslationB ? draftTranslationB.isStreaming : true}
+                            isDraft={true}
+                            textColor={draftTranslationColorB}
+                            displaySettings={workspaceDisplaySettings}
+                            onToggleFlag={handleToggleFlag}
+                            onAddToGlossary={handleAddToGlossary}
+                          />
+                        ) : (
+                          <TranslationCard
+                            utteranceId={interimTranscriptB?.id || 'accurate-channel-b'}
+                            isWaitingForPause={true}
+                            isDraft={true}
+                            textColor={draftTranslationColorB}
+                            displaySettings={workspaceDisplaySettings}
+                            onToggleFlag={handleToggleFlag}
+                            onAddToGlossary={handleAddToGlossary}
+                          />
+                        )}
+                      </div>
+                    )
+                  }
+
+                  if (isStackedView) {
+                    return (
+                      <div className={`px-6 ${rowPaddingClass} bg-surface-panel/25 space-y-1 max-w-4xl mx-auto`}>
+                        {interimTranscriptB && (
+                          <UtteranceCard
+                            utterance={interimTranscriptB}
+                            isInterim={true}
+                            isStacked={true}
+                            textColor={draftOriginalColorB}
+                            displaySettings={workspaceDisplaySettings}
+                            onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
+                          />
+                        )}
+                        {isLiveMode ? (
+                          <TranslationCard
+                            translation={draftTranslationB || undefined}
+                            utteranceId={
+                              draftTranslationB?.utteranceId ||
+                              interimTranscriptB?.id ||
+                              'draft-channel-b'
+                            }
+                            isStreaming={draftTranslationB ? draftTranslationB.isStreaming : true}
+                            isDraft={true}
+                            textColor={draftTranslationColorB}
+                            displaySettings={workspaceDisplaySettings}
+                            onToggleFlag={handleToggleFlag}
+                            onAddToGlossary={handleAddToGlossary}
+                          />
+                        ) : (
+                          <TranslationCard
+                            utteranceId={interimTranscriptB?.id || 'accurate-channel-b'}
+                            isWaitingForPause={true}
+                            isDraft={true}
+                            textColor={draftTranslationColorB}
+                            displaySettings={workspaceDisplaySettings}
+                            onToggleFlag={handleToggleFlag}
+                            onAddToGlossary={handleAddToGlossary}
+                          />
+                        )}
+                      </div>
+                    )
+                  }
+
+                  return (
+                    <div className="bg-surface-panel/20">
+                      <div className="flex">
+                        <div
+                          style={{ width: `${splitRatio}%` }}
+                          className={`px-6 pt-3 pb-1 border-r ${dividerBorderClass}`}
+                        >
+                          {interimTranscriptB && (
+                            <UtteranceCard
+                              utterance={interimTranscriptB}
+                              isInterim={true}
+                              textColor={draftOriginalColorB}
+                              displaySettings={workspaceDisplaySettings}
+                              onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
+                            />
+                          )}
+                        </div>
+                        <div style={{ width: `${100 - splitRatio}%` }} className="px-6 pt-3 pb-1" />
+                      </div>
+
+                      <div className="flex">
+                        <div
+                          style={{ width: `${splitRatio}%` }}
+                          className={`px-6 pt-1 pb-3 border-r ${dividerBorderClass}`}
+                        />
+                        <div style={{ width: `${100 - splitRatio}%` }} className="px-6 pt-1 pb-3">
+                          {isLiveMode ? (
+                            <TranslationCard
+                              translation={draftTranslationB || undefined}
+                              utteranceId={
+                                draftTranslationB?.utteranceId ||
+                                interimTranscriptB?.id ||
+                                'draft-channel-b'
+                              }
+                              isStreaming={draftTranslationB ? draftTranslationB.isStreaming : true}
+                              isDraft={true}
+                              textColor={draftTranslationColorB}
+                              displaySettings={workspaceDisplaySettings}
+                              onToggleFlag={handleToggleFlag}
+                              onAddToGlossary={handleAddToGlossary}
+                            />
+                          ) : (
+                            <TranslationCard
+                              utteranceId={interimTranscriptB?.id || 'accurate-channel-b'}
+                              isWaitingForPause={true}
+                              isDraft={true}
+                              textColor={draftTranslationColorB}
+                              displaySettings={workspaceDisplaySettings}
+                              onToggleFlag={handleToggleFlag}
+                              onAddToGlossary={handleAddToGlossary}
+                            />
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })()}
 
               {/* Bottom Virtual Spacer */}
               {bottomSpacerHeight > 0 && <div style={{ height: `${bottomSpacerHeight}px` }} />}
@@ -604,18 +941,20 @@ export const DualPaneWorkspace: React.FC = () => {
           )}
         </div>
 
-        {/* Floating Draggable Split Divider Line Overlay */}
-        <div
-          style={{ left: `${splitRatio}%` }}
-          className="absolute top-0 bottom-0 pointer-events-auto"
-        >
-          <SplitDivider
-            splitRatio={splitRatio}
-            onSplitChange={setSplitRatio}
-            onSplitCommit={handleSplitCommit}
-            containerRef={containerRef}
-          />
-        </div>
+        {/* Floating Draggable Split Divider Line Overlay (Only in Dual-Pane 50/50 Mode) */}
+        {isDualView && (
+          <div
+            style={{ left: `${splitRatio}%` }}
+            className="absolute top-0 bottom-0 pointer-events-auto"
+          >
+            <SplitDivider
+              splitRatio={splitRatio}
+              onSplitChange={setSplitRatio}
+              onSplitCommit={handleSplitCommit}
+              containerRef={containerRef}
+            />
+          </div>
+        )}
 
         {/* Floating Smart Auto-Scroll Resume Pill */}
         {!isAutoScrollActive && hasLiveContent && (

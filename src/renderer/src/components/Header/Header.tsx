@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Settings, Minus, Square, X, User } from 'lucide-react'
+import { Settings, User } from 'lucide-react'
 import { AudioRouteSelector } from './AudioRouteSelector'
 import { OperatingModeSegmented } from './OperatingModeSegmented'
 import { DomainSelectorDropdown } from './DomainSelectorDropdown'
@@ -33,10 +33,6 @@ export const Header: React.FC = () => {
     }, 1000)
     return () => clearInterval(timer)
   }, [isAudioActive])
-
-  const handleMinimize = () => window.electronAPI?.minimizeWindow?.()
-  const handleMaximize = () => window.electronAPI?.maximizeWindow?.()
-  const handleClose = () => window.electronAPI?.closeWindow?.()
 
   return (
     <header className="flex h-12 w-full shrink-0 items-center justify-between border-b border-surface-border bg-surface-panel px-4 select-none">
@@ -99,37 +95,6 @@ export const Header: React.FC = () => {
         >
           <Settings className="h-3.5 w-3.5" strokeWidth={1.5} />
         </button>
-
-        {/* Native Window Controls */}
-        <div className="flex items-center space-x-0.5 border-l border-surface-border pl-1.5">
-          <button
-            type="button"
-            onClick={handleMinimize}
-            className="flex h-7 w-7 items-center justify-center rounded text-text-muted hover:bg-surface-active hover:text-text-primary transition"
-            title="Minimize"
-            aria-label="Minimize Window"
-          >
-            <Minus className="h-3 w-3" strokeWidth={1.5} />
-          </button>
-          <button
-            type="button"
-            onClick={handleMaximize}
-            className="flex h-7 w-7 items-center justify-center rounded text-text-muted hover:bg-surface-active hover:text-text-primary transition"
-            title="Maximize / Restore"
-            aria-label="Maximize Window"
-          >
-            <Square className="h-2.5 w-2.5" strokeWidth={1.5} />
-          </button>
-          <button
-            type="button"
-            onClick={handleClose}
-            className="flex h-7 w-7 items-center justify-center rounded text-text-muted hover:bg-accent-crimson/20 hover:text-accent-crimson transition"
-            title="Close"
-            aria-label="Close Window"
-          >
-            <X className="h-3 w-3" strokeWidth={1.5} />
-          </button>
-        </div>
       </div>
     </header>
   )
