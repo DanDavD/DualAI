@@ -457,3 +457,28 @@ We implement a **zero-latency client-side Typography & Layout Personalization En
 ### Consequences
 * **Positive:** Adapts instantly to every monitor size and interpreter visual preference with zero layout flicker, zero server overhead, and unified main-window + floating HUD ergonomics.
 * **Negative:** None; defaults strictly maintain the minimal matte Zinc/Slate DAW aesthetic until customized by the user.
+
+---
+
+## ADR-019: PRODUCTION SECURITY HARDENING — VERIFIED EMAIL GATE, SILENT JWT ROTATION, STRICT ORIGIN & ZERO-PII TELEMETRY (CARD-17)
+
+### Status
+Accepted
+
+### Context
+Ahead of public multi-tenant launch on Microsoft Store and macOS/Web, four remaining SaaS security and abuse vectors had to be closed:
+1. Unverified or throwaway burner email signups could farm unlimited 1-hour free-tier accounts.
+2. Standard 1-hour Supabase JWT lifetimes would expire mid-session during 2-hour+ clinical or courtroom interpretation calls unless silently rotated without dropping live WebSocket audio.
+3. Signing out only cleared local client storage without revoking the JWT server-side, leaving stolen tokens valid until expiry.
+4. Production WebSocket upgrades and HTTP endpoints required strict `ALLOWED_ORIGINS` enforcement, HSTS/TLS enforcement, structured zero-PII security event telemetry, and an automated pre-release secret gate covering both git index/staging and compiled `out/` bundles.
+
+### Decision
+We harden the Zero-Trust Gateway (`server/src/`) and desktop client auth lifecycle (`gatewayAuthService.ts`, `SessionContext.tsx`, `AccountPlanModal.tsx`):
+1. **Verified Email & Disposable-Domain Anti-Abuse Gate (`authVerifier.ts`, `securityLogger.ts`, `AccountPlanModal.tsx`):** Gateway checks Supabase `email_confirmed_at` / `email_verified` claims and blocks unverified accounts from `POST /v1/translate` (`403 EMAIL_NOT_VERIFIED`) and `WS /v1/stt` (`403 Forbidden`), rejects known disposable email domains, and exposes email verification resend + `"Forgot password?"` recovery in `AccountPlanModal`.
+2. **In-Place Silent JWT Refresh & Server-Side Revocation (`GatewaySttClient.ts`, `StreamingSttManager.ts`, `authVerifier.ts`, `server/src/index.ts`):** `SessionContext` schedules silent token rotation 5 minutes prior to expiry (`computeSilentRefreshDelayMs`), rotating `GatewaySttClient` in-place via `updateAccessTokenSilently()` with zero mid-call disconnect and persisting to Electron `safeStorage`. Sign Out invokes `POST /v1/auth/signout` to add the SHA-256 token digest to a server-side revocation denylist (plus upstream Supabase `/auth/v1/logout`), immediately rejecting any replay with `401`.
+3. **Production `ALLOWED_ORIGINS`, HSTS/TLS & Zero-PII Security Event Logging (`securityLogger.ts`, `server/src/index.ts`):** Rejects unauthorized origins (`403`) on both HTTP and WebSocket `/v1/stt` upgrades in production, rejects plaintext proxy downgrades (`426 TLS_REQUIRED`), emits `Strict-Transport-Security`, `Permissions-Policy`, and `Cross-Origin-Resource-Policy` headers, and logs all security events as structured JSON with `scrubPii()` and irreversible 12-char SHA-256 `actorHash` fingerprints (zero raw emails, tokens, or IPs).
+4. **Automated Pre-Release Secret Gate (`scripts/security_release_gate.ts`, `pnpm run security:gate`):** Verifies zero `.env`/vault/key files or live credential patterns in git index/staging and zero secrets or direct upstream provider endpoints in compiled `out/` artifacts.
+
+### Consequences
+* **Positive:** Closes multi-account free-tier farming, guarantees uninterrupted 2-hour+ calls, enforces instant server-side sign-out revocation, prevents CSWSH/cross-origin hijacking, and provides a deterministic pre-release CI/local secret gate.
+* **Negative:** Production deployments must configure `ALLOWED_ORIGINS` accurately for all authorized client origins (`app://dualai`, `file://`, and production web domain if applicable).

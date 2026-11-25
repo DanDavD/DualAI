@@ -102,6 +102,17 @@ export class GatewaySttClient {
     )
   }
 
+  /**
+   * Silently rotates the Bearer JWT in-place without disconnecting an active WebSocket call,
+   * ensuring future automatic reconnections during 2-hour+ sessions always use a fresh token.
+   */
+  public updateAccessTokenSilently(nextToken: string): void {
+    const cleaned = nextToken.trim()
+    if (cleaned.length > 20) {
+      this.accessToken = cleaned
+    }
+  }
+
   public connect(): void {
     if (
       this.socket &&

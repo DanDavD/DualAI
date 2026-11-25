@@ -78,15 +78,28 @@ export class StreamingSttManager {
     return Boolean(this.accessToken && this.accessToken.length > 20)
   }
 
-  public setAccessToken(token: string | null): void {
+  public setAccessToken(token: string | null, options?: { silentRefresh?: boolean }): void {
     const normalized = token && token.trim().length > 20 ? token.trim() : null
     const changed = normalized !== this.accessToken
     this.accessToken = normalized
 
-    if (this.isRunning && changed) {
-      this.reconnectChannel('channel_a', this.enableChannelA)
-      this.reconnectChannel('channel_b', this.enableChannelB)
+    if (!this.isRunning || !changed) {
+      return
     }
+
+    // Silent JWT refresh rotates tokens in-place on live Gateway sockets without interrupting audio
+    if (options?.silentRefresh && normalized) {
+      if (this.clientA instanceof GatewaySttClient) {
+        this.clientA.updateAccessTokenSilently(normalized)
+      }
+      if (this.clientB instanceof GatewaySttClient) {
+        this.clientB.updateAccessTokenSilently(normalized)
+      }
+      return
+    }
+
+    this.reconnectChannel('channel_a', this.enableChannelA)
+    this.reconnectChannel('channel_b', this.enableChannelB)
   }
 
   public updateLanguages(langA: string, langB: string): void {
