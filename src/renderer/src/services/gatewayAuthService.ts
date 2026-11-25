@@ -1,7 +1,9 @@
 /**
- * DUALAI - Zero-Trust Authentication & Quota Service
+ * DUALAI - Zero-Trust Authentication, Silent JWT Refresh & Quota Service (CARD-17 Hardened)
  * Authenticates end users without exposing any upstream AI provider keys.
- * Persists user JWTs exclusively in OS Keychain / DPAPI via Electron safeStorage.
+ * Persists user JWTs exclusively in OS Keychain / DPAPI via Electron safeStorage,
+ * enforces verified email before free-tier activation, supports password reset,
+ * silently rotates tokens prior to expiry, and revokes sessions server-side on Sign Out.
  */
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
@@ -13,11 +15,24 @@ import {
 } from '../../../types/account'
 
 const GATEWAY_BASE_URL = (
-  import.meta.env.VITE_GATEWAY_URL || 'http://127.0.0.1:8787'
+  (typeof import.meta !== 'undefined' && import.meta.env
+    ? import.meta.env.VITE_GATEWAY_URL
+    : undefined) || 'http://127.0.0.1:8787'
 ).replace(/\/$/, '')
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL?.trim() || ''
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim() || ''
+const SUPABASE_URL =
+  (typeof import.meta !== 'undefined' && import.meta.env
+    ? import.meta.env.VITE_SUPABASE_URL
+    : undefined
+  )?.trim() || ''
+const SUPABASE_ANON_KEY =
+  (typeof import.meta !== 'undefined' && import.meta.env
+    ? import.meta.env.VITE_SUPABASE_ANON_KEY
+    : undefined
+  )?.trim() || ''
+
+export const SILENT_REFRESH_LEAD_MS = 5 * 60 * 1000 // Refresh 5 minutes before JWT expiration
+const MIN_REFRESH_DELAY_MS = 10_000
 
 let supabaseClient: SupabaseClient | null = null
 
@@ -27,7 +42,7 @@ function getSupabaseClient(): SupabaseClient | null {
     supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: {
         persistSession: false, // We persist encrypted via Electron safeStorage instead of localStorage
-        autoRefreshToken: true
+        autoRefreshToken: false // Managed deterministically by DualAI silent refresh loop + Keychain sync
       }
     })
   }
@@ -44,6 +59,19 @@ export function getGatewayWsUrl(): string {
 
 export function isSupabaseAuthEnabled(): boolean {
   return Boolean(SUPABASE_URL && SUPABASE_ANON_KEY)
+}
+
+/**
+ * Pure deterministic scheduler computing how many milliseconds to wait before silently
+ * refreshing a session JWT so 2-hour+ live calls never experience mid-session disconnects.
+ */
+export function computeSilentRefreshDelayMs(
+  expiresAtMs: number,
+  nowMs: number = Date.now()
+): number {
+  const remainingMs = expiresAtMs - nowMs
+  const targetDelay = remainingMs - SILENT_REFRESH_LEAD_MS
+  return Math.max(MIN_REFRESH_DELAY_MS, targetDelay)
 }
 
 export async function saveEncryptedSession(session: AuthenticatedSession): Promise<void> {
@@ -64,9 +92,17 @@ export async function loadEncryptedSession(): Promise<AuthenticatedSession | nul
       !parsed.accessToken ||
       !parsed.user?.userId ||
       !parsed.user?.email ||
-      typeof parsed.expiresAtMs !== 'number' ||
-      parsed.expiresAtMs <= Date.now()
+      typeof parsed.expiresAtMs !== 'number'
     ) {
+      await clearEncryptedSession()
+      return null
+    }
+    if (parsed.expiresAtMs <= Date.now()) {
+      // Attempt silent recovery via refresh token if available before discarding expired vault
+      if (parsed.refreshToken) {
+        const recovered = await refreshSessionToken(parsed as AuthenticatedSession)
+        if (recovered) return recovered
+      }
       await clearEncryptedSession()
       return null
     }
@@ -82,11 +118,23 @@ export async function clearEncryptedSession(): Promise<void> {
   }
 }
 
+export type SignInResult =
+  | {
+      emailVerificationRequired: true
+      message: string
+    }
+  | {
+      emailVerificationRequired: false
+      session: AuthenticatedSession
+      quota: AccountQuota
+      plans: BillingPlan[]
+    }
+
 export async function signInWithEmailPassword(
   email: string,
   password: string,
   mode: 'signin' | 'signup'
-): Promise<{ session: AuthenticatedSession; quota: AccountQuota; plans: BillingPlan[] }> {
+): Promise<SignInResult> {
   const sb = getSupabaseClient()
 
   if (sb) {
@@ -95,22 +143,56 @@ export async function signInWithEmailPassword(
         ? await sb.auth.signUp({ email, password })
         : await sb.auth.signInWithPassword({ email, password })
 
-    if (authRes.error || !authRes.data.session || !authRes.data.user) {
-      throw new Error(authRes.error?.message || 'Authentication failed. Check credentials or confirm your email.')
+    if (authRes.error) {
+      throw new Error(authRes.error.message || 'Authentication failed. Check your credentials.')
+    }
+
+    // Supabase signup when Email Confirmation is enforced returns user with null session
+    if (mode === 'signup' && authRes.data.user && !authRes.data.session) {
+      return {
+        emailVerificationRequired: true,
+        message:
+          'Account created. Verify your email address from the confirmation link we sent before activating your 1-hour free tier.'
+      }
+    }
+
+    if (!authRes.data.session || !authRes.data.user) {
+      throw new Error('Authentication failed. Verify your email address and try again.')
+    }
+
+    const emailVerified = Boolean(
+      authRes.data.user.email_confirmed_at || authRes.data.user.confirmed_at
+    )
+
+    if (!emailVerified) {
+      await sb.auth.signOut().catch(() => undefined)
+      return {
+        emailVerificationRequired: true,
+        message:
+          'Your email address is not verified yet. Please confirm your email from your inbox before activating live interpretation.'
+      }
     }
 
     const session: AuthenticatedSession = {
       accessToken: authRes.data.session.access_token,
-      expiresAtMs: (authRes.data.session.expires_at ?? Math.floor(Date.now() / 1000) + 3600) * 1000,
+      refreshToken: authRes.data.session.refresh_token,
+      expiresAtMs:
+        (authRes.data.session.expires_at ?? Math.floor(Date.now() / 1000) + 3600) * 1000,
       user: {
         userId: authRes.data.user.id,
         email: authRes.data.user.email || email,
+        emailVerified,
         authMode: 'supabase'
       }
     }
     await saveEncryptedSession(session)
     const snapshot = await fetchAuthoritativeQuota(session.accessToken)
-    return { session, quota: snapshot.quota, plans: snapshot.plans }
+    return {
+      emailVerificationRequired: false,
+      session,
+      quota: snapshot.quota,
+      plans: snapshot.plans
+    }
   }
 
   // Local development Zero-Trust Gateway sign-in (strictly disabled on production Gateway)
@@ -138,11 +220,153 @@ export async function signInWithEmailPassword(
   const session: AuthenticatedSession = {
     accessToken: data.accessToken,
     expiresAtMs: data.expiresAtMs,
-    user: data.user
+    user: {
+      ...data.user,
+      emailVerified: data.user.emailVerified !== false
+    }
   }
 
   await saveEncryptedSession(session)
-  return { session, quota: data.quota, plans: DEFAULT_SAAS_PLANS }
+  return {
+    emailVerificationRequired: false,
+    session,
+    quota: data.quota,
+    plans: DEFAULT_SAAS_PLANS
+  }
+}
+
+/**
+ * Initiates Supabase password recovery flow with non-enumerating user feedback.
+ */
+export async function requestPasswordReset(email: string): Promise<string> {
+  const cleanEmail = email.trim().toLowerCase()
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    throw new Error('Enter a valid email address to reset your password.')
+  }
+
+  const sb = getSupabaseClient()
+  if (sb) {
+    const { error } = await sb.auth.resetPasswordForEmail(cleanEmail)
+    if (error) {
+      throw new Error(error.message || 'Unable to send password reset email right now.')
+    }
+  }
+
+  return 'If an account exists for that email, a password reset link has been sent to your inbox.'
+}
+
+/**
+ * Resends the Supabase email confirmation message for unverified signups.
+ */
+export async function resendVerificationEmail(email: string): Promise<string> {
+  const cleanEmail = email.trim().toLowerCase()
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    throw new Error('Enter a valid email address first.')
+  }
+
+  const sb = getSupabaseClient()
+  if (sb) {
+    const { error } = await sb.auth.resend({
+      type: 'signup',
+      email: cleanEmail
+    })
+    if (error) {
+      throw new Error(error.message || 'Unable to resend verification email right now.')
+    }
+  }
+
+  return 'Verification email resent. Check your inbox and spam folder, then sign in.'
+}
+
+/**
+ * Silently rotates the session JWT prior to expiration and updates the encrypted OS Keychain.
+ * Returns null if refresh is unavailable so the caller can retain or prompt gracefully.
+ */
+export async function refreshSessionToken(
+  currentSession: AuthenticatedSession
+): Promise<AuthenticatedSession | null> {
+  const sb = getSupabaseClient()
+
+  if (sb && currentSession.user.authMode === 'supabase' && currentSession.refreshToken) {
+    try {
+      const { data, error } = await sb.auth.refreshSession({
+        refresh_token: currentSession.refreshToken
+      })
+      if (error || !data.session || !data.user) {
+        return null
+      }
+      const nextSession: AuthenticatedSession = {
+        accessToken: data.session.access_token,
+        refreshToken: data.session.refresh_token || currentSession.refreshToken,
+        expiresAtMs:
+          (data.session.expires_at ?? Math.floor(Date.now() / 1000) + 3600) * 1000,
+        user: {
+          userId: data.user.id,
+          email: data.user.email || currentSession.user.email,
+          emailVerified: Boolean(data.user.email_confirmed_at || data.user.confirmed_at),
+          authMode: 'supabase'
+        }
+      }
+      await saveEncryptedSession(nextSession)
+      return nextSession
+    } catch {
+      return null
+    }
+  }
+
+  // Gateway-issued session silent refresh
+  try {
+    const response = await fetch(`${GATEWAY_BASE_URL}/v1/auth/refresh`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${currentSession.accessToken}`
+      }
+    })
+    if (!response.ok) return null
+    const data = (await response.json()) as {
+      accessToken?: string
+      expiresAtMs?: number
+      user?: AuthenticatedSession['user']
+    }
+    if (!data.accessToken || typeof data.expiresAtMs !== 'number') {
+      return null
+    }
+    const nextSession: AuthenticatedSession = {
+      accessToken: data.accessToken,
+      refreshToken: currentSession.refreshToken,
+      expiresAtMs: data.expiresAtMs,
+      user: data.user || currentSession.user
+    }
+    await saveEncryptedSession(nextSession)
+    return nextSession
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Revokes the active session server-side (Gateway denylist + Supabase logout) on Sign Out.
+ */
+export async function revokeServerSession(accessToken: string | null): Promise<void> {
+  const tasks: Array<Promise<unknown>> = []
+
+  if (accessToken) {
+    tasks.push(
+      fetch(`${GATEWAY_BASE_URL}/v1/auth/signout`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`
+        }
+      }).catch(() => undefined)
+    )
+  }
+
+  const sb = getSupabaseClient()
+  if (sb) {
+    tasks.push(sb.auth.signOut().catch(() => undefined))
+  }
+
+  await Promise.all(tasks)
 }
 
 export async function fetchAuthoritativeQuota(

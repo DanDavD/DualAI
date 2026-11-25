@@ -15,6 +15,7 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck:server": "tsc --noEmit -p server/tsconfig.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web && npm run typecheck:server",
+    "security:gate": "tsx scripts/security_release_gate.ts",
     "build:win": "npm run build && electron-builder --win",
     "build:mac": "npm run build && electron-builder --mac",
     "build:linux": "npm run build && electron-builder --linux"

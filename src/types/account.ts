@@ -28,10 +28,12 @@ export interface AccountQuota {
 
 export interface AuthenticatedSession {
   accessToken: string
+  refreshToken?: string
   expiresAtMs: number
   user: {
     userId: string
     email: string
+    emailVerified?: boolean
     authMode: 'supabase' | 'local_dev'
   }
 }

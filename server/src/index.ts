@@ -1,7 +1,12 @@
 /**
- * DUALAI ZERO-TRUST CLOUD GATEWAY - Main HTTP & WebSocket Entrypoint
- * Sole architectural owner of Deepgram, Gemini, Supabase Service Role, and Billing secrets.
- * Clients authenticate strictly via Bearer JWT; ZERO provider secrets ever leave this process.
+ * DUALAI ZERO-TRUST CLOUD GATEWAY - Main HTTP & WebSocket Entrypoint (CARD-17 Hardened)
+ * Sole architectural owner of Soniox, Deepgram, Gemini, Supabase Service Role, and Billing secrets.
+ * Enforces:
+ * - Strict ALLOWED_ORIGINS verification on HTTP and WebSocket upgrades
+ * - TLS / HSTS security headers in production
+ * - Verified-email gating before activating free-tier live streaming or inference
+ * - Silent JWT refresh & server-side session revocation on Sign Out
+ * - Structured Zero-PII security event logging
  */
 
 import http, { IncomingMessage, ServerResponse } from 'node:http'
@@ -10,6 +15,12 @@ import { WebSocketServer } from 'ws'
 import { GatewayConfig, loadGatewayConfig } from './config.js'
 import { AuthVerifier } from './security/authVerifier.js'
 import { GatewayRateLimiter } from './security/rateLimiter.js'
+import {
+  SecurityEventLogger,
+  SecurityEventSink,
+  isDisposableEmailDomain,
+  isOriginAllowed
+} from './security/securityLogger.js'
 import { PLAN_CATALOG, QuotaStore, createQuotaStore } from './quota/quotaStore.js'
 import { BillingVerifier } from './billing/billingVerifier.js'
 import { handleSttWebSocketProxy } from './proxy/deepgramWsProxy.js'
@@ -49,14 +60,30 @@ async function readRawBody(req: IncomingMessage, maxBytes: number): Promise<Buff
   })
 }
 
-function applySecurityHeaders(req: IncomingMessage, res: ServerResponse, config: GatewayConfig): void {
+function applySecurityHeaders(
+  req: IncomingMessage,
+  res: ServerResponse,
+  config: GatewayConfig
+): void {
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.setHeader('X-Frame-Options', 'DENY')
   res.setHeader('Referrer-Policy', 'no-referrer')
   res.setHeader('Cache-Control', 'no-store')
+  res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), payment=()')
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-site')
+
+  const forwardedProto = req.headers['x-forwarded-proto']
+  const isHttps =
+    config.nodeEnv === 'production' ||
+    forwardedProto === 'https' ||
+    (Array.isArray(forwardedProto) && forwardedProto.includes('https'))
+
+  if (isHttps) {
+    res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload')
+  }
 
   const origin = req.headers.origin
-  if (origin && (config.allowedOrigins.includes(origin) || config.nodeEnv !== 'production')) {
+  if (origin && isOriginAllowed(origin, config, false)) {
     res.setHeader('Access-Control-Allow-Origin', origin)
     res.setHeader('Vary', 'Origin')
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
@@ -74,19 +101,72 @@ export async function createGatewayServer(
   overrides?: Partial<GatewayConfig> & {
     quotaStore?: QuotaStore
     rateLimiter?: GatewayRateLimiter
+    onSecurityEvent?: SecurityEventSink
   }
 ): Promise<RunningGatewayServer> {
-  const { quotaStore: customQuotaStore, rateLimiter: customRateLimiter, ...configOverrides } =
-    overrides || {}
+  const {
+    quotaStore: customQuotaStore,
+    rateLimiter: customRateLimiter,
+    onSecurityEvent,
+    ...configOverrides
+  } = overrides || {}
 
   const config = loadGatewayConfig(configOverrides)
   const authVerifier = new AuthVerifier(config)
   const quotaStore = customQuotaStore || createQuotaStore(config)
   const rateLimiter = customRateLimiter || new GatewayRateLimiter()
   const billingVerifier = new BillingVerifier(config, quotaStore)
+  const securityLogger = new SecurityEventLogger({
+    sink: onSecurityEvent,
+    silentConsole: config.nodeEnv === 'test' && !onSecurityEvent
+  })
 
   const server = http.createServer(async (req, res) => {
     applySecurityHeaders(req, res, config)
+
+    const parsedUrl = new URL(req.url || '/', 'http://localhost')
+    const pathname = parsedUrl.pathname
+    const clientIp = req.socket.remoteAddress || 'unknown'
+    const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin : undefined
+
+    // Enforce TLS in production when behind reverse proxy terminating TLS
+    if (config.nodeEnv === 'production') {
+      const forwardedProto = req.headers['x-forwarded-proto']
+      const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto
+      if (proto && proto.toLowerCase() === 'http') {
+        securityLogger.log({
+          level: 'warn',
+          event: 'tls_downgrade_rejected',
+          route: pathname,
+          status: 426,
+          actorId: clientIp,
+          reason: 'Plaintext HTTP request rejected in production'
+        })
+        sendJson(res, 426, {
+          code: 'TLS_REQUIRED',
+          message: 'HTTPS is strictly required in production.'
+        })
+        return
+      }
+
+      // Enforce strict ALLOWED_ORIGINS whenever a browser/Electron Origin header is present
+      if (originHeader && !isOriginAllowed(originHeader, config, true)) {
+        securityLogger.log({
+          level: 'warn',
+          event: 'http_origin_rejected',
+          route: pathname,
+          status: 403,
+          actorId: clientIp,
+          reason: 'Origin not present in ALLOWED_ORIGINS',
+          origin: originHeader
+        })
+        sendJson(res, 403, {
+          code: 'ORIGIN_NOT_ALLOWED',
+          message: 'Request origin is not authorized.'
+        })
+        return
+      }
+    }
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204)
@@ -94,13 +174,17 @@ export async function createGatewayServer(
       return
     }
 
-    const parsedUrl = new URL(req.url || '/', 'http://localhost')
-    const pathname = parsedUrl.pathname
-    const clientIp = req.socket.remoteAddress || 'unknown'
-
     // Global IP rate-limit guard
     const ipLimit = rateLimiter.consume(`ip:${clientIp}`, 1)
     if (!ipLimit.allowed) {
+      securityLogger.log({
+        level: 'warn',
+        event: 'rate_limit_triggered',
+        route: pathname,
+        status: 429,
+        actorId: clientIp,
+        reason: 'IP request rate limit exceeded'
+      })
       res.setHeader('Retry-After', String(ipLimit.retryAfterSec))
       sendJson(res, 429, {
         code: 'RATE_LIMITED',
@@ -139,12 +223,34 @@ export async function createGatewayServer(
       }
       try {
         const raw = await readRawBody(req, MAX_JSON_BODY_BYTES)
-        const parsed = JSON.parse(raw.toString('utf-8')) as { email?: string }
+        const parsed = JSON.parse(raw.toString('utf-8')) as {
+          email?: string
+          emailVerified?: boolean
+          ttlSeconds?: number
+        }
         if (!parsed.email) {
           sendJson(res, 400, { code: 'INVALID_EMAIL', message: 'Email is required.' })
           return
         }
-        const session = authVerifier.mintDevSessionToken(parsed.email)
+        if (isDisposableEmailDomain(parsed.email)) {
+          securityLogger.log({
+            level: 'warn',
+            event: 'auth_disposable_email_blocked',
+            route: pathname,
+            status: 403,
+            actorId: clientIp,
+            reason: 'Disposable email provider blocked from free-tier signup'
+          })
+          sendJson(res, 403, {
+            code: 'DISPOSABLE_EMAIL_NOT_ALLOWED',
+            message: 'Disposable email addresses cannot be used to activate a free-tier account.'
+          })
+          return
+        }
+        const session = authVerifier.mintDevSessionToken(parsed.email, undefined, {
+          emailVerified: parsed.emailVerified ?? true,
+          ttlSeconds: parsed.ttlSeconds
+        })
         const quota = await quotaStore.getOrCreateUserQuota(session.user.userId)
         sendJson(res, 200, {
           accessToken: session.accessToken,
@@ -169,6 +275,14 @@ export async function createGatewayServer(
         const sig = Array.isArray(sigHeader) ? sigHeader[0] : sigHeader
 
         if (!billingVerifier.verifyWebhookSignature(raw, sig)) {
+          securityLogger.log({
+            level: 'warn',
+            event: 'webhook_signature_failed',
+            route: pathname,
+            status: 401,
+            actorId: clientIp,
+            reason: 'Invalid HMAC-SHA256 billing webhook signature'
+          })
           sendJson(res, 401, {
             code: 'INVALID_WEBHOOK_SIGNATURE',
             message: 'Cryptographic webhook signature verification failed.'
@@ -210,6 +324,14 @@ export async function createGatewayServer(
     const token = authVerifier.extractBearerToken(req.headers.authorization)
     const user = await authVerifier.verifyToken(token)
     if (!user) {
+      securityLogger.log({
+        level: 'warn',
+        event: 'auth_unauthorized',
+        route: pathname,
+        status: 401,
+        actorId: clientIp,
+        reason: 'Missing, expired, forged, or revoked Bearer token'
+      })
       sendJson(res, 401, {
         code: 'UNAUTHORIZED',
         message: 'Valid Bearer authentication token required.'
@@ -219,10 +341,66 @@ export async function createGatewayServer(
 
     const userLimit = rateLimiter.consume(`user:${user.userId}`, 1)
     if (!userLimit.allowed) {
+      securityLogger.log({
+        level: 'warn',
+        event: 'rate_limit_triggered',
+        route: pathname,
+        status: 429,
+        actorId: user.userId,
+        reason: 'Authenticated user rate limit exceeded'
+      })
       res.setHeader('Retry-After', String(userLimit.retryAfterSec))
       sendJson(res, 429, {
         code: 'USER_RATE_LIMITED',
         message: 'Account request rate limit exceeded.'
+      })
+      return
+    }
+
+    // POST /v1/auth/signout (Server-side immediate JWT revocation + upstream Supabase logout)
+    if (req.method === 'POST' && pathname === '/v1/auth/signout') {
+      await authVerifier.revokeSessionToken(token, user.expiresAtMs)
+      securityLogger.log({
+        level: 'info',
+        event: 'auth_session_revoked',
+        route: pathname,
+        status: 200,
+        actorId: user.userId,
+        reason: 'Session revoked server-side on sign out'
+      })
+      sendJson(res, 200, { revoked: true })
+      return
+    }
+
+    // POST /v1/auth/refresh (Silent JWT refresh preventing mid-session disconnects on 2h+ calls)
+    if (req.method === 'POST' && pathname === '/v1/auth/refresh') {
+      if (user.authMode === 'local_dev' && config.nodeEnv !== 'production') {
+        const refreshed = authVerifier.mintDevSessionToken(user.email, user.userId, {
+          emailVerified: user.emailVerified
+        })
+        securityLogger.log({
+          level: 'info',
+          event: 'auth_token_refreshed',
+          route: pathname,
+          status: 200,
+          actorId: user.userId,
+          reason: 'Silent session JWT rotated cleanly'
+        })
+        sendJson(res, 200, {
+          accessToken: refreshed.accessToken,
+          expiresAtMs: refreshed.expiresAtMs,
+          user: refreshed.user
+        })
+        return
+      }
+      // Supabase sessions refresh directly via Supabase refresh_token; return verified status
+      sendJson(res, 200, {
+        user: {
+          userId: user.userId,
+          email: user.email,
+          emailVerified: user.emailVerified,
+          authMode: user.authMode
+        }
       })
       return
     }
@@ -232,7 +410,11 @@ export async function createGatewayServer(
       try {
         const quota = await quotaStore.getOrCreateUserQuota(user.userId)
         sendJson(res, 200, {
-          user: { userId: user.userId, email: user.email },
+          user: {
+            userId: user.userId,
+            email: user.email,
+            emailVerified: user.emailVerified
+          },
           quota,
           plans: Object.values(PLAN_CATALOG)
         })
@@ -242,15 +424,34 @@ export async function createGatewayServer(
       return
     }
 
-    // POST /v1/translate (Streaming Gemini 2.0 Flash SSE Proxy)
+    // POST /v1/translate (Streaming Gemini SSE Proxy - blocks unverified emails!)
     if (req.method === 'POST' && pathname === '/v1/translate') {
+      if (!user.emailVerified) {
+        securityLogger.log({
+          level: 'warn',
+          event: 'auth_email_unverified_blocked',
+          route: pathname,
+          status: 403,
+          actorId: user.userId,
+          reason: 'Unverified email account blocked from live translation'
+        })
+        sendJson(res, 403, {
+          code: 'EMAIL_NOT_VERIFIED',
+          message: 'Please verify your email address before activating live interpretation.'
+        })
+        return
+      }
+
       try {
         const raw = await readRawBody(req, MAX_JSON_BODY_BYTES)
         const payload = JSON.parse(raw.toString('utf-8')) as TranslateProxyPayload
         await handleGeminiTranslateStream({ payload, res, user, config, quotaStore })
       } catch (err) {
         if (err instanceof Error && err.message === 'PAYLOAD_TOO_LARGE') {
-          sendJson(res, 413, { code: 'PAYLOAD_TOO_LARGE', message: 'Request body exceeds 64KB limit.' })
+          sendJson(res, 413, {
+            code: 'PAYLOAD_TOO_LARGE',
+            message: 'Request body exceeds 64KB limit.'
+          })
           return
         }
         sendJson(res, 400, { code: 'INVALID_JSON', message: 'Invalid JSON request payload.' })
@@ -275,7 +476,10 @@ export async function createGatewayServer(
         })
         sendJson(res, result.verified ? 200 : 400, result)
       } catch {
-        sendJson(res, 400, { code: 'INVALID_REQUEST', message: 'Invalid Microsoft Store receipt body.' })
+        sendJson(res, 400, {
+          code: 'INVALID_REQUEST',
+          message: 'Invalid Microsoft Store receipt body.'
+        })
       }
       return
     }
@@ -301,6 +505,25 @@ export async function createGatewayServer(
       return
     }
 
+    const clientIp = req.socket.remoteAddress || 'unknown'
+    const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin : undefined
+
+    // Enforce strict WebSocket Origin allowlist in production (CSWSH defense)
+    if (config.nodeEnv === 'production' && !isOriginAllowed(originHeader, config, true)) {
+      securityLogger.log({
+        level: 'warn',
+        event: 'ws_origin_rejected',
+        route: '/v1/stt',
+        status: 403,
+        actorId: clientIp,
+        reason: 'WebSocket Origin rejected by ALLOWED_ORIGINS policy',
+        origin: originHeader || 'missing'
+      })
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
+      socket.destroy()
+      return
+    }
+
     // Accept Bearer JWT via Authorization header OR Sec-WebSocket-Protocol ['dualai-auth', <jwt>]
     // Never accept tokens in URL query strings so access logs never capture credentials
     let token = authVerifier.extractBearerToken(req.headers.authorization)
@@ -317,10 +540,30 @@ export async function createGatewayServer(
 
     const user = await authVerifier.verifyToken(token)
     if (!user) {
-      if (config.nodeEnv !== 'production') {
-        console.warn('[DUALAI-GATEWAY] WS /v1/stt rejected: 401 Unauthorized (missing or expired token)')
-      }
+      securityLogger.log({
+        level: 'warn',
+        event: 'auth_unauthorized',
+        route: '/v1/stt',
+        status: 401,
+        actorId: clientIp,
+        reason: 'WebSocket upgrade rejected: invalid or revoked token'
+      })
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
+      socket.destroy()
+      return
+    }
+
+    // Block unverified email accounts from activating free-tier live streaming (CARD-17 DoD)
+    if (!user.emailVerified) {
+      securityLogger.log({
+        level: 'warn',
+        event: 'auth_email_unverified_blocked',
+        route: '/v1/stt',
+        status: 403,
+        actorId: user.userId,
+        reason: 'Unverified email account blocked from live STT WebSocket streaming'
+      })
+      socket.write('HTTP/1.1 403 Forbidden\r\nX-DualAI-Error: EMAIL_NOT_VERIFIED\r\n\r\n')
       socket.destroy()
       return
     }

@@ -69,7 +69,9 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
 
   const port = Number(process.env.GATEWAY_PORT || 8787)
   const host = process.env.GATEWAY_HOST || '127.0.0.1'
-  const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,app://dualai')
+  const allowedOrigins = (
+    process.env.ALLOWED_ORIGINS || 'http://localhost:5173,app://dualai,file://'
+  )
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)

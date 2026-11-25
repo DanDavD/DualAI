@@ -63,9 +63,14 @@ import {
 } from '../utils/typographyPreferences'
 import {
   clearEncryptedSession,
+  computeSilentRefreshDelayMs,
   fetchAuthoritativeQuota,
   getGatewayHttpUrl,
   loadEncryptedSession,
+  refreshSessionToken,
+  requestPasswordReset,
+  resendVerificationEmail,
+  revokeServerSession,
   signInWithEmailPassword,
   verifyMicrosoftStorePurchase
 } from '../services/gatewayAuthService'
@@ -228,8 +233,14 @@ export interface SessionState {
   clearCustomGlossary: () => void
   updateShortcutBinding: (actionId: ShortcutActionId, accelerator: string) => Promise<boolean>
   resetShortcutBindings: () => Promise<void>
-  signInAccount: (email: string, password: string, mode: 'signin' | 'signup') => Promise<void>
+  signInAccount: (
+    email: string,
+    password: string,
+    mode: 'signin' | 'signup'
+  ) => Promise<{ emailVerificationRequired: boolean; message?: string }>
   signOutAccount: () => Promise<void>
+  requestPasswordResetAccount: (email: string) => Promise<string>
+  resendVerificationEmailAccount: (email: string) => Promise<string>
   refreshAccountQuota: () => Promise<void>
   verifyMsStoreReceipt: (
     storeIdKey: string,
@@ -1104,20 +1115,37 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setHasPipelineError(false)
     setPipelineErrorMessage(null)
 
-    // Pre-flight Zero-Trust Session & Gateway verification (catches expired tokens or offline Gateway instantly)
+    // Pre-flight Zero-Trust Session & Gateway verification (catches unverified emails, expired tokens or offline Gateway)
     if (authSession) {
-      if (authSession.expiresAtMs <= Date.now()) {
-        await clearEncryptedSession()
-        setAuthSession(null)
-        setAccountQuota(null)
-        sttManagerRef.current?.setAccessToken(null)
-        translationManagerRef.current?.setAccessToken(null)
-        setPipelineErrorMessage('Your session expired. Please sign in again to continue.')
+      if (authSession.user.emailVerified === false) {
+        setPipelineErrorMessage(
+          'Please verify your email address before activating your 1-hour free tier.'
+        )
         setIsAccountModalOpen(true)
         return
       }
+
+      let activeSession = authSession
+      if (activeSession.expiresAtMs <= Date.now() + 60_000) {
+        const refreshed = await refreshSessionToken(activeSession)
+        if (refreshed) {
+          activeSession = refreshed
+          setAuthSession(refreshed)
+          sttManagerRef.current?.setAccessToken(refreshed.accessToken, { silentRefresh: true })
+          translationManagerRef.current?.setAccessToken(refreshed.accessToken)
+        } else if (activeSession.expiresAtMs <= Date.now()) {
+          await clearEncryptedSession()
+          setAuthSession(null)
+          setAccountQuota(null)
+          sttManagerRef.current?.setAccessToken(null)
+          translationManagerRef.current?.setAccessToken(null)
+          setPipelineErrorMessage('Your session expired. Please sign in again to continue.')
+          setIsAccountModalOpen(true)
+          return
+        }
+      }
       try {
-        const snapshot = await fetchAuthoritativeQuota(authSession.accessToken)
+        const snapshot = await fetchAuthoritativeQuota(activeSession.accessToken)
         setAccountQuota(snapshot.quota)
         setAvailablePlans(snapshot.plans)
         if (snapshot.quota.remainingSeconds <= 0) {
@@ -1546,23 +1574,58 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [])
 
+  // Automatic Silent JWT Refresh loop preventing mid-session disconnects during 2-hour+ live calls
+  useEffect(() => {
+    if (!authSession) return
+    let cancelled = false
+    const delayMs = computeSilentRefreshDelayMs(authSession.expiresAtMs)
+
+    const timer = setTimeout(() => {
+      void (async () => {
+        const refreshed = await refreshSessionToken(authSession)
+        if (cancelled || !refreshed) return
+        setAuthSession(refreshed)
+        sttManagerRef.current?.setAccessToken(refreshed.accessToken, { silentRefresh: true })
+        translationManagerRef.current?.setAccessToken(refreshed.accessToken)
+      })()
+    }, delayMs)
+
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [authSession])
+
   const signInAccount = useCallback(
-    async (email: string, password: string, mode: 'signin' | 'signup') => {
+    async (
+      email: string,
+      password: string,
+      mode: 'signin' | 'signup'
+    ): Promise<{ emailVerificationRequired: boolean; message?: string }> => {
       const result = await signInWithEmailPassword(email, password, mode)
+      if (result.emailVerificationRequired) {
+        return {
+          emailVerificationRequired: true,
+          message: result.message
+        }
+      }
       setAuthSession(result.session)
       setAccountQuota(result.quota)
       setAvailablePlans(result.plans)
       sttManagerRef.current?.setAccessToken(result.session.accessToken)
       translationManagerRef.current?.setAccessToken(result.session.accessToken)
-      setSttProvider('deepgram-nova-2')
-      setTranslationProvider('gemini-2.0-flash')
+      setSttProvider('soniox-unified')
+      setTranslationProvider('soniox-unified')
       setPipelineErrorMessage(null)
+      return { emailVerificationRequired: false }
     },
     []
   )
 
   const signOutAccount = useCallback(async () => {
+    const tokenToRevoke = authSession?.accessToken ?? null
     stopAudioEngine()
+    await revokeServerSession(tokenToRevoke)
     await clearEncryptedSession()
     setAuthSession(null)
     setAccountQuota(null)
@@ -1570,7 +1633,15 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     translationManagerRef.current?.setAccessToken(null)
     setSttProvider('simulated-stt')
     setTranslationProvider('simulated-gemini')
-  }, [stopAudioEngine])
+  }, [authSession, stopAudioEngine])
+
+  const requestPasswordResetAccount = useCallback(async (email: string): Promise<string> => {
+    return requestPasswordReset(email)
+  }, [])
+
+  const resendVerificationEmailAccount = useCallback(async (email: string): Promise<string> => {
+    return resendVerificationEmail(email)
+  }, [])
 
   const refreshAccountQuota = useCallback(async () => {
     if (!authSession?.accessToken) return
@@ -1853,6 +1924,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         resetShortcutBindings,
         signInAccount,
         signOutAccount,
+        requestPasswordResetAccount,
+        resendVerificationEmailAccount,
         refreshAccountQuota,
         verifyMsStoreReceipt
       }}

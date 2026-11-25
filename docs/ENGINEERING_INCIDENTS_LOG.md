@@ -558,3 +558,30 @@ Guarantee complete coherent paragraph coalescing across rapid same-language spee
 
 ### 4. Result
 Zero paragraph fragmentation on rapid `"sí, sí, sí"`, zero duplicate/triplicated commits on video pause, 100% consistent per-language color palettes on both Original and Translation panes in every direction, and 100% pass rate across `typecheck`, `build`, and all automated verification suites.
+
+---
+
+## INCIDENT 022: PRODUCTION SECURITY HARDENING — ANTI-ABUSE VERIFIED EMAIL GATE, SILENT JWT ROTATION, STRICT ORIGIN & SECRET GATE (CARD-17)
+
+* **Date:** 2026-11-24
+* **Component:** `server/src/security/securityLogger.ts`, `server/src/security/authVerifier.ts`, `server/src/index.ts`, `gatewayAuthService.ts`, `GatewaySttClient.ts`, `StreamingSttManager.ts`, `SessionContext.tsx`, `AccountPlanModal.tsx`, `scripts/security_release_gate.ts`
+* **Severity:** High (Pre-launch SaaS abuse prevention, session continuity on 2-hour calls, CSWSH/origin defense, and secret leakage prevention)
+
+### 1. Situation
+Prior to multi-tenant public release, four security hardening gaps remained on CARD-17:
+1. Accounts with unverified email addresses or disposable domains were not explicitly blocked from activating free-tier live streaming, and `AccountPlanModal` lacked password recovery and verification-resend flows.
+2. `StreamingSttManager.setAccessToken()` previously disconnected and reconnected active sockets on every token change, risking mid-call audio drops when refreshing JWTs during 2-hour calls, and Sign Out cleared only local Keychain storage without server-side JWT revocation.
+3. Production WebSocket `/v1/stt` upgrades lacked strict `ALLOWED_ORIGINS` CSWSH rejection, TLS/HSTS headers, and structured zero-PII security event logging.
+4. No standalone automated pre-release security gate script audited git index/staged files alongside compiled `out/` bundles.
+
+### 2. Task
+Execute all four CARD-17 Technical Scope items and verify 100% pass across an expanded penetration test suite, pre-release secret gate, `typecheck`, `build`, and all 12 automated suites.
+
+### 3. Action
+* **Verified Email & Disposable Domain Gate:** Added `emailVerified` extraction (`email_confirmed_at` / `confirmed_at`) in `AuthVerifier`, `403 EMAIL_NOT_VERIFIED` enforcement on `POST /v1/translate` and `WS /v1/stt`, disposable email blocking in `securityLogger.ts`, and verified-email/resend + `"Forgot password?"` flows in `AccountPlanModal.tsx` and `gatewayAuthService.ts`.
+* **Silent JWT Refresh & Server-Side Revocation:** Added `POST /v1/auth/refresh` and `POST /v1/auth/signout` (with SHA-256 token revocation denylist + upstream Supabase logout), `computeSilentRefreshDelayMs()` (5-minute lead time), `GatewaySttClient.updateAccessTokenSilently()` + `StreamingSttManager.setAccessToken(..., { silentRefresh: true })`, and an automatic silent refresh timer in `SessionContext.tsx`.
+* **Production Origin, TLS/HSTS & Zero-PII Telemetry:** Created `server/src/security/securityLogger.ts` (`SecurityEventLogger`, `scrubPii`, `hashActorIdentifier`, `isOriginAllowed`), enforced `ALLOWED_ORIGINS` (`403`) on HTTP and WebSocket `/v1/stt`, enforced TLS proxy downgrade rejection (`426 TLS_REQUIRED`), and added `Strict-Transport-Security`, `Permissions-Policy`, and `Cross-Origin-Resource-Policy` headers.
+* **Pre-Release Automated Security Gate:** Authored `scripts/security_release_gate.ts` (`pnpm run security:gate`) scanning git tracked/staged files and compiled `out/` bundles, and expanded `scripts/test_zero_trust_security.ts` to 9/9 comprehensive penetration tests.
+
+### 4. Result
+`pnpm run typecheck`, `pnpm run build`, `pnpm run security:gate`, `scripts/test_zero_trust_security.ts` (9/9 PASS), and all 12 automated suites passed at 100% with zero secrets in git index or `out/`, zero PII in security logs, zero emojis, and zero explicit `any` types.

@@ -1,8 +1,10 @@
 /**
- * DUALAI ZERO-TRUST CLOUD GATEWAY - Cryptographic Auth Verifier
+ * DUALAI ZERO-TRUST CLOUD GATEWAY - Cryptographic Auth Verifier (CARD-17 Hardened)
  * Authenticates every HTTP and WebSocket request using Bearer JWTs.
- * - Production: Authoritative verification against Supabase Auth (/auth/v1/user) with short TTL cache.
- * - Non-Production Local Dev: Constant-time HMAC-SHA256 signed JWT (strictly blocked when NODE_ENV=production).
+ * - Production: Authoritative verification against Supabase Auth (/auth/v1/user) with
+ *   email_confirmed_at check and short TTL cache.
+ * - Non-Production Local Dev: Constant-time HMAC-SHA256 signed JWT (strictly blocked in production).
+ * - Server-Side Revocation: Revoked token digests are denied immediately across HTTP & WebSocket.
  */
 
 import crypto from 'node:crypto'
@@ -11,7 +13,9 @@ import { GatewayConfig } from '../config.js'
 export interface AuthenticatedUser {
   userId: string
   email: string
+  emailVerified: boolean
   authMode: 'supabase' | 'local_dev'
+  expiresAtMs?: number
 }
 
 interface CachedAuthEntry {
@@ -22,6 +26,7 @@ interface CachedAuthEntry {
 interface DevJwtPayload {
   sub: string
   email: string
+  email_verified?: boolean
   iat: number
   exp: number
   iss: string
@@ -45,7 +50,9 @@ function base64UrlDecode(input: string): string {
 export class AuthVerifier {
   private config: GatewayConfig
   private cache: Map<string, CachedAuthEntry> = new Map()
+  private revokedTokens: Map<string, number> = new Map()
   private readonly cacheTtlMs = 45_000
+  private readonly defaultRevocationTtlMs = 12 * 60 * 60 * 1000
 
   constructor(config: GatewayConfig) {
     this.config = config
@@ -60,10 +67,69 @@ export class AuthVerifier {
     return match ? match[1] : null
   }
 
+  private hashToken(token: string): string {
+    return crypto.createHash('sha256').update(token).digest('hex')
+  }
+
+  private pruneRevokedTokens(): void {
+    const now = Date.now()
+    for (const [digest, expMs] of this.revokedTokens.entries()) {
+      if (expMs <= now) {
+        this.revokedTokens.delete(digest)
+      }
+    }
+  }
+
+  /**
+   * Immediately revokes a Bearer JWT server-side, clearing auth cache and denying any replay.
+   * When Supabase Auth is configured, also invokes upstream /auth/v1/logout.
+   */
+  public async revokeSessionToken(token: string | null, expiresAtMs?: number): Promise<void> {
+    if (!token) return
+    this.pruneRevokedTokens()
+    const digest = this.hashToken(token)
+    this.cache.delete(digest)
+    const retainUntil = Math.max(
+      Date.now() + 60_000,
+      expiresAtMs ?? Date.now() + this.defaultRevocationTtlMs
+    )
+    this.revokedTokens.set(digest, retainUntil)
+
+    if (this.config.supabaseUrl && this.config.supabaseServiceRoleKey) {
+      try {
+        const url = `${this.config.supabaseUrl.replace(/\/$/, '')}/auth/v1/logout`
+        await fetch(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            apikey: this.config.supabaseServiceRoleKey
+          }
+        })
+      } catch {
+        // Local denylist already blocks replay immediately even if upstream logout is unreachable
+      }
+    }
+  }
+
+  public isTokenRevoked(token: string): boolean {
+    const digest = this.hashToken(token)
+    const exp = this.revokedTokens.get(digest)
+    if (!exp) return false
+    if (exp <= Date.now()) {
+      this.revokedTokens.delete(digest)
+      return false
+    }
+    return true
+  }
+
   /**
    * Mints a signed local development JWT. Strictly forbidden when NODE_ENV=production.
    */
-  public mintDevSessionToken(email: string, explicitUserId?: string): {
+  public mintDevSessionToken(
+    email: string,
+    explicitUserId?: string,
+    options?: { emailVerified?: boolean; ttlSeconds?: number }
+  ): {
     accessToken: string
     user: AuthenticatedUser
     expiresAtMs: number
@@ -77,18 +143,22 @@ export class AuthVerifier {
       throw new Error('Valid email address required.')
     }
 
+    const emailVerified = options?.emailVerified ?? true
+    const ttlSeconds = Math.max(60, Math.min(60 * 60 * 24, options?.ttlSeconds ?? 60 * 60 * 12))
+
     const deterministicHash = crypto.createHash('sha256').update(cleanEmail).digest('hex')
     const userId =
       explicitUserId ||
       `${deterministicHash.slice(0, 8)}-${deterministicHash.slice(8, 12)}-4${deterministicHash.slice(13, 16)}-a${deterministicHash.slice(17, 20)}-${deterministicHash.slice(20, 32)}`
 
     const nowSec = Math.floor(Date.now() / 1000)
-    const expSec = nowSec + 60 * 60 * 12 // 12 hours
+    const expSec = nowSec + ttlSeconds
     const headerPart = base64UrlEncode(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))
     const payloadPart = base64UrlEncode(
       JSON.stringify({
         sub: userId,
         email: cleanEmail,
+        email_verified: emailVerified,
         iat: nowSec,
         exp: expSec,
         iss: 'dualai-local-dev'
@@ -102,7 +172,13 @@ export class AuthVerifier {
 
     return {
       accessToken: `${signingInput}.${signature}`,
-      user: { userId, email: cleanEmail, authMode: 'local_dev' },
+      user: {
+        userId,
+        email: cleanEmail,
+        emailVerified,
+        authMode: 'local_dev',
+        expiresAtMs: expSec * 1000
+      },
       expiresAtMs: expSec * 1000
     }
   }
@@ -110,7 +186,14 @@ export class AuthVerifier {
   public async verifyToken(token: string | null): Promise<AuthenticatedUser | null> {
     if (!token) return null
 
-    const tokenDigest = crypto.createHash('sha256').update(token).digest('hex')
+    const tokenDigest = this.hashToken(token)
+
+    // Always check server-side revocation denylist BEFORE returning cached auth entries
+    const revokedUntil = this.revokedTokens.get(tokenDigest)
+    if (revokedUntil && revokedUntil > Date.now()) {
+      return null
+    }
+
     const cached = this.cache.get(tokenDigest)
     if (cached && cached.expiresAtMs > Date.now()) {
       return cached.user
@@ -160,12 +243,20 @@ export class AuthVerifier {
       })
 
       if (!response.ok) return null
-      const data = (await response.json()) as { id?: string; email?: string }
+      const data = (await response.json()) as {
+        id?: string
+        email?: string
+        email_confirmed_at?: string | null
+        confirmed_at?: string | null
+      }
       if (!data.id || !data.email) return null
+
+      const emailVerified = Boolean(data.email_confirmed_at || data.confirmed_at)
 
       return {
         userId: data.id,
         email: data.email,
+        emailVerified,
         authMode: 'supabase'
       }
     } catch {
@@ -208,7 +299,9 @@ export class AuthVerifier {
       return {
         userId: payload.sub,
         email: payload.email,
-        authMode: 'local_dev'
+        emailVerified: payload.email_verified !== false,
+        authMode: 'local_dev',
+        expiresAtMs: payload.exp * 1000
       }
     } catch {
       return null
