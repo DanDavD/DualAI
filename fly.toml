@@ -1,6 +1,6 @@
 # DualAI Zero-Trust Cloud Gateway - Fly.io Production Deployment Manifest (CARD-18)
 app = "dualai-cloud-gateway"
-primary_region = "mia"
+primary_region = "dfw"
 
 kill_signal = "SIGTERM"
 kill_timeout = "15s"
@@ -16,9 +16,9 @@ kill_timeout = "15s"
 [http_service]
   internal_port = 8787
   force_https = true
-  auto_stop_machines = "off"
+  auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 1
+  min_machines_running = 0
 
   [http_service.concurrency]
     type = "connections"

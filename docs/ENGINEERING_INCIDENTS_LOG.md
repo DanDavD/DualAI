@@ -607,3 +607,30 @@ Complete all four CARD-18 deliverables: author production deployment manifests a
 
 ### 4. Result
 `pnpm run typecheck`, `pnpm run build`, `pnpm run build:gateway`, `pnpm run security:gate`, `pnpm run verify:rls`, `scripts/test_card18_deployment_checkout.ts` (4/4 PASS), and all 13 automated project suites passed at 100% with zero errors, zero secrets, zero emojis, and zero explicit `any` types.
+
+---
+
+## INCIDENT 024: FLY.IO CLOUD GATEWAY PRODUCTION DEPLOYMENT & CONTAINER RUNTIME DEPENDENCY (CARD-18/PROD)
+
+* **Date:** 2026-11-25
+* **Component:** `fly.toml`, `server/Dockerfile`
+* **Severity:** Medium (Production Cloud Gateway Deployment & Runtime Dependency Alignment)
+
+### 1. Situation
+During live production rollout of the DualAI Zero-Trust Gateway to Fly.io, two deployment obstacles surfaced:
+1. Fly.io rejected machine provisioning in the Miami (`mia`) region due to platform-level deprecation for new resources.
+2. The initial container image failed on startup with `ERR_MODULE_NOT_FOUND: Cannot find package '@google/genai' imported from /app/server/dist/proxy/geminiStreamProxy.js` because the multi-stage Dockerfile only installed `ws` in the minimal runtime layer.
+
+### 2. Task
+Migrate deployment manifest to an active low-latency region (`dfw` - Dallas, Texas), bundle `@google/genai` into the production runtime container stage, enforce scale-to-zero when idle, stage production credentials, and empirically verify the live health probe.
+
+### 3. Action
+* **Region & Scale-to-Zero Configuration:** Updated `fly.toml` to `primary_region = "dfw"`, configured `auto_stop_machines = "stop"`, and `min_machines_running = 0` to preserve the $0/month idle cost profile under Fly.io's billing waiver.
+* **Dockerfile Runtime Hardening:** Updated `server/Dockerfile` builder and runtime stages to install both `ws` and `@google/genai` without pulling development tools or breaking non-root execution (`dualai:dualai`).
+* **Secrets & Rolling Deploy:** Staged production environment secrets (`SONIOX_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `NODE_ENV=production`) and deployed a single app machine (`815139f97415e8`) via `fly deploy --ha=false`.
+
+### 4. Result
+* Production health endpoint `https://dualai-cloud-gateway.fly.dev/v1/health` returning `HTTP/2 200` with status `ok`, mode `production`, active engine `soniox-unified`, and full security headers (`x-content-type-options`, `strict-transport-security`, CSP).
+* `npm run typecheck` passing cleanly with 0 errors across node, web, and server targets.
+* `npm run security:gate` passing with 0 secrets detected.
+

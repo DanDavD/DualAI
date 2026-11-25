@@ -14,7 +14,8 @@ RUN npm install --no-audit --no-fund --ignore-scripts \
     typescript \
     ws \
     @types/node \
-    @types/ws
+    @types/ws \
+    @google/genai
 
 COPY server/tsconfig.json ./server/tsconfig.json
 COPY server/src ./server/src
@@ -35,9 +36,9 @@ ENV PORT=8787
 
 RUN addgroup -S dualai && adduser -S dualai -G dualai
 
-# Install strictly runtime dependency (ws)
+# Install strictly runtime dependencies (ws, @google/genai)
 RUN npm init -y >/dev/null 2>&1 && \
-    npm install --omit=dev --no-audit --no-fund ws && \
+    npm install --omit=dev --no-audit --no-fund ws @google/genai && \
     chown -R dualai:dualai /app
 
 COPY --from=builder --chown=dualai:dualai /app/server/dist ./server/dist
