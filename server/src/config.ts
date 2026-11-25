@@ -73,7 +73,8 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
   const host =
     process.env.GATEWAY_HOST?.trim() || (nodeEnv === 'production' ? '0.0.0.0' : '127.0.0.1')
   const allowedOrigins = (
-    process.env.ALLOWED_ORIGINS || 'http://localhost:5173,app://dualai,file://'
+    process.env.ALLOWED_ORIGINS ||
+    'http://localhost:5173,app://dualai,file://,https://dualai.universalaisync.com'
   )
     .split(',')
     .map((s) => s.trim())
