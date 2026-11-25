@@ -18,10 +18,10 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            build_cmd: pnpm run build:mac
+            build_cmd: pnpm run build && npx electron-builder --mac --publish never
             artifact_glob: dist/DualAI-*.dmg
           - os: windows-latest
-            build_cmd: pnpm run build:win
+            build_cmd: pnpm run build && npx electron-builder --win --publish never
             artifact_glob: dist/DualAI-*-setup.exe
 
     steps:
