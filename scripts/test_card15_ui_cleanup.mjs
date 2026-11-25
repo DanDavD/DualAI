@@ -68,19 +68,18 @@ assert.ok(
 console.log('  Boxless flowing rows + plain-English source guide + email/phone highlights: VERIFIED')
 console.log('PASS: Criterion 3 satisfied.\n')
 
-// TEST 4: Native-Language Top-of-Pane Headers, Zero Per-Message Titles & Live/Accurate Draft-to-Final Engine
-console.log('[TEST 4] Verifying native pane headers, zero per-message titles, 2s paragraph commit & AbortError fix...')
+// TEST 4: Clean Original/Translation Pane Headers, Zero Per-Message Titles & Live/Accurate Draft-to-Final Engine
+console.log('[TEST 4] Verifying Original/Translation pane headers, zero per-message titles, 2s paragraph commit & AbortError fix...')
 assert.ok(!utteranceSource.includes('{fromCode}'), 'Per-message EN -> ES title removed from UtteranceCard.tsx')
 assert.ok(!translationSource.includes('{fromCode}'), 'Per-message EN -> ES title removed from TranslationCard.tsx')
 assert.ok(
-  workspaceSource.includes('{sourceDisplayName}') &&
-    workspaceSource.includes('{targetDisplayName}') &&
-    workspaceSource.includes('found.nativeName'),
-  'DualPaneWorkspace displays native-language top-of-pane headers (e.g. English | Español, Español | Deutsch)'
+  workspaceSource.includes('Original') &&
+    workspaceSource.includes('Translation'),
+  'DualPaneWorkspace displays clean Original | Translation top-of-pane headers'
 )
 assert.ok(
-  translationSource.includes('font-light text-zinc-400/85') &&
-    translationSource.includes('font-normal text-zinc-100'),
+  translationSource.includes('font-light') &&
+    translationSource.includes('font-normal'),
   'TranslationCard renders softer draft font while streaming/live and crisp final font on commit'
 )
 assert.ok(

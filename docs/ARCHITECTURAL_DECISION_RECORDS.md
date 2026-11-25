@@ -436,3 +436,24 @@ We migrate the primary Zero-Trust Cloud Gateway engine to **Soniox Unified Real-
 ### Consequences
 * **Positive:** Sub-200ms single-hop live translation, accurate 3+ speaker mixed-language detection on a single audio channel, ~70% lower AI COGS, and zero client-side provider secrets.
 * **Negative:** Requires setting `SONIOX_API_KEY` in `server/.env` on the Cloud Gateway; Deepgram + Gemini remains cleanly isolated as a fallback only if `SONIOX_API_KEY` is unset.
+
+---
+
+## ADR-018: LIVE TYPOGRAPHY PERSONALIZATION, MULTI-VIEW WORKSPACE LAYOUTS & HUD SYNCHRONIZATION (CARD-16)
+
+### Status
+Accepted
+
+### Context
+Interpreters work across vastly different visual environments (full-screen dual monitors, narrow half-screen sidebars beside Zoom/Teams, bright clinical rooms, or extended 4-hour sessions requiring larger or high-legibility typography). Hardcoding a single font size, line height, and 50/50 split layout limits readability and forces interpreters to choose between workspace comfort and Teleprompter HUD consistency.
+
+### Decision
+We implement a **zero-latency client-side Typography & Layout Personalization Engine (`typographyPreferences.ts`)** backed by persisted `localStorage` preferences (`dualai_workspace_display_settings`) and synchronized live into the Floating Teleprompter HUD:
+1. **Zero-Latency Inline Typography & Independent Per-Language Color Invariance (`UtteranceCard.tsx`, `TranslationCard.tsx`, `DualPaneWorkspace.tsx`):** Supports 4 curated font families (`Inter`, `Geist Mono`, `System Sans`, `High-Legibility`), continuous `13px–28px` font scaling, 3 line-spacing presets (`Compact`, `Standard`, `Relaxed`), and user-editable fluorescent per-language colors (`languageAColor` / `languageBColor`) via preset swatches and native color pickers. `resolveTurnPaneColors()` resolves Original (left) and Translation (right) colors independently from each pane's own normalized base ISO language so each language strictly maintains its assigned palette whether it appears as source speech or translation, regardless of speaker count.
+2. **Separated Layout & Text Menus + Staggered Linear Cascade (`WorkspaceLayoutPopover.tsx`, `TextPersonalizationPopover.tsx`, `SubHeader.tsx`, `DualPaneWorkspace.tsx`):** Decouples Workspace Layout switching (`Dual-Pane 50/50`, `Translation Focus`, `Compact Stacked`) from Typography & Colors, strips technical toggle clutter and the diagnostic SubHeader VU bar, removes redundant custom window buttons in favor of native macOS/Windows controls, renders non-selectable (`select-none`) 60fps rows, labels workspace panes cleanly as `Original` (left) and `Translation` (right), and cascades each translation one step below its original for effortless top-to-bottom linear reading.
+3. **Whole-Word BPE Merging, 2s Same-Language Paragraph Coalescing & Strict Language Locking (`sonioxStreamAssembler.ts`, `sonioxWsProxy.ts`):** Merges Soniox BPE sub-word tokens into whole words prior to emission, enables `language_hints_strict: true`, coalesces rapid same-language `<end>` bursts and speaker-ID jitter across a 2,000ms settle window (splitting immediately only on genuine finalized language switches or `<fin>`), and enforces authoritative-only anti-duplication commits.
+4. **Automatic Teleprompter HUD Synchronization (`SessionContext.tsx`, `TeleprompterHud.tsx`):** Font family, scaled font size (`+6px` stage boost clamped to `14px–48px`), and line spacing synchronize automatically over Electron IPC (`sendHudConfig`) while preserving independent HUD opacity, line limit, click-through lock, and screen bounds.
+
+### Consequences
+* **Positive:** Adapts instantly to every monitor size and interpreter visual preference with zero layout flicker, zero server overhead, and unified main-window + floating HUD ergonomics.
+* **Negative:** None; defaults strictly maintain the minimal matte Zinc/Slate DAW aesthetic until customized by the user.

@@ -92,7 +92,7 @@ export class GatewaySttClient {
         operatingMode: this.config.operatingMode || 'conversation',
         domainId: (this.config.domainId as DomainId) || 'general',
         confidenceThreshold: this.config.confidenceThreshold,
-        pauseFallbackMs: 2000
+        sameLanguageSettleMs: 2000
       },
       {
         onUnifiedDraft: (snap) => this.callbacks.onUnifiedDraft?.(snap),
@@ -208,11 +208,23 @@ export class GatewaySttClient {
   public signalSpeechEnd(): void {
     this.speechStartTimestamp = 0
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      // Only send legacy Deepgram Finalize when running on legacy fallback;
-      // Soniox performs superior semantic endpoint detection natively
+      // Only send legacy Deepgram Finalize from local VAD;
+      // Soniox uses semantic endpointing + explicit pause finalization (finalizeTurn)
       if (this.activeProvider === 'deepgram-nova-2') {
         this.socket.send(JSON.stringify({ type: 'Finalize' }))
       }
+    }
+  }
+
+  /**
+   * Explicitly tells Soniox to finalize all pending words once audio goes silent
+   * for >2s (e.g. when a video is paused), preventing stale provisional tails from repeating.
+   */
+  public finalizeTurn(): void {
+    this.speechStartTimestamp = 0
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      const msgType = this.activeProvider === 'deepgram-nova-2' ? 'Finalize' : 'finalize'
+      this.socket.send(JSON.stringify({ type: msgType }))
     }
   }
 

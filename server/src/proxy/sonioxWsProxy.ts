@@ -89,6 +89,7 @@ export function buildSonioxConfigMessage(params: SonioxInitPayloadParams): Recor
     sample_rate: params.sampleRate,
     num_channels: 1,
     language_hints: languageHints,
+    language_hints_strict: true,
     enable_speaker_diarization: true,
     enable_language_identification: true,
     enable_endpoint_detection: true,

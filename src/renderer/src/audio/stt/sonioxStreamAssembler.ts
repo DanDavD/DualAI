@@ -1,13 +1,19 @@
 /**
- * DUALAI - Soniox Unified Real-Time Token Stream Assembler
- * Processes single-pipeline Soniox tokens containing:
- *  - Original speech tokens (`translation_status: 'original' | 'none'`)
- *  - Simultaneous translation tokens (`translation_status: 'translation'`)
- *  - Real-time multi-speaker diarization (`speaker: "1" | "2" | "3" ...`)
- *  - Automatic two-way language detection (`language`, `source_language`)
- *  - Semantic endpoint markers (`<end>`, `<fin>`)
- * Separates 3+ speakers cleanly with instant commit on speaker/language switch
- * and reconciles trailing translation tokens that arrive milliseconds after `<end>`.
+ * DUALAI - Soniox Unified Real-Time Paragraph & Anti-Duplication Stream Assembler
+ * Processes single-pipeline Soniox tokens containing original speech, simultaneous
+ * translation, language identification, and endpoint markers (<end>, <fin>).
+ *
+ * CORE PRODUCTION INVARIANTS:
+ * 1. NEVER splits turns on speaker-ID jitter within the SAME language (rapid "sí, sí, sí"
+ *    or 3 speakers of the same language coalesce cleanly into ONE coherent paragraph).
+ * 2. Coalesces rapid same-language <end> bursts across a 2,000ms silence settle window
+ *    so full paragraphs accumulate completely before committing.
+ * 3. Splits immediately (0ms wait) ONLY on a genuine finalized LANGUAGE switch (e.g., es <-> en)
+ *    or when <fin> signals confirmed audio silence.
+ * 4. NEVER commits unfinalized (is_final: false) tokens and suppresses boundary duplicate
+ *    re-emissions—guaranteeing zero repeated or triplicated paragraphs.
+ * 5. Constrains detected languages strictly to the active source/target pair using base
+ *    2-letter ISO normalization (e.g., "es-MX" -> "es", "en-US" -> "en").
  */
 
 import { ChannelId } from '../../../../types/audio'
@@ -39,7 +45,7 @@ export interface SonioxAssemblerConfig {
   operatingMode: 'translate' | 'conversation'
   domainId: DomainId
   confidenceThreshold: number
-  pauseFallbackMs?: number
+  sameLanguageSettleMs?: number
 }
 
 export interface SonioxAssemblerCallbacks {
@@ -55,6 +61,8 @@ interface InternalTurnState {
   targetLanguage: string
   startedAtMs: number
   committedAtMs: number | null
+  awaitingClauseSpaceOrig: boolean
+  awaitingClauseSpaceTrans: boolean
   finalOriginalText: string
   interimOriginalText: string
   finalOriginalTokens: TranscriptToken[]
@@ -64,8 +72,14 @@ interface InternalTurnState {
   confidenceCount: number
 }
 
-const SPECIAL_END_TOKENS = new Set(['<end>', '<fin>'])
-const RECENT_COMMIT_WINDOW_MS = 5000
+const DEFAULT_SAME_LANGUAGE_SETTLE_MS = 2000
+const RECENT_COMMIT_WINDOW_MS = 6000
+
+export function normalizeBaseLang(lang?: string): string | undefined {
+  if (!lang) return undefined
+  const base = lang.trim().toLowerCase().split(/[-_]/)[0]
+  return base ? base.slice(0, 5) : undefined
+}
 
 function cleanJoinedText(raw: string): string {
   return raw
@@ -80,9 +94,40 @@ function normalizeSpeaker(speaker?: string | number): string | undefined {
   return String(speaker).trim()
 }
 
-function normalizeLang(lang?: string): string | undefined {
-  if (!lang) return undefined
-  return lang.trim().toLowerCase().slice(0, 5)
+/**
+ * Appends finalized text cleanly while preventing boundary spacing glitches after <end>
+ * and suppressing exact repeated clause re-emissions (>= 12 chars).
+ */
+function appendFinalSegmentSafely(
+  existing: string,
+  incoming: string,
+  insertSpaceIfBoundary: boolean
+): string {
+  if (!incoming) return existing
+  if (!existing) return incoming
+
+  const cleanIncoming = incoming.trim()
+  const cleanExisting = existing.trim()
+
+  // Suppress exact duplicate clause re-emission if Soniox replays an already-finalized phrase
+  if (cleanIncoming.length >= 12) {
+    const normExisting = cleanExisting.toLowerCase()
+    const normIncoming = cleanIncoming.toLowerCase()
+    if (normExisting.endsWith(normIncoming)) {
+      return existing
+    }
+  }
+
+  if (
+    insertSpaceIfBoundary &&
+    !/\s$/.test(existing) &&
+    !/^\s/.test(incoming) &&
+    !/^[,.;:!?]/.test(incoming)
+  ) {
+    return `${existing} ${incoming}`
+  }
+
+  return `${existing}${incoming}`
 }
 
 export class SonioxStreamAssembler {
@@ -90,19 +135,26 @@ export class SonioxStreamAssembler {
   private callbacks: SonioxAssemblerCallbacks
   private activeTurn: InternalTurnState | null = null
   private recentCommitted: InternalTurnState[] = []
-  private pauseTimer: ReturnType<typeof setTimeout> | null = null
+  private settleTimer: ReturnType<typeof setTimeout> | null = null
   private turnSeq: number = 0
 
   constructor(config: SonioxAssemblerConfig, callbacks: SonioxAssemblerCallbacks) {
     this.config = {
       ...config,
-      pauseFallbackMs: config.pauseFallbackMs ?? 2000
+      sourceLang: normalizeBaseLang(config.sourceLang) || 'en',
+      targetLang: normalizeBaseLang(config.targetLang) || 'es',
+      sameLanguageSettleMs: config.sameLanguageSettleMs ?? DEFAULT_SAME_LANGUAGE_SETTLE_MS
     }
     this.callbacks = callbacks
   }
 
   public updateConfig(partial: Partial<SonioxAssemblerConfig>): void {
-    this.config = { ...this.config, ...partial }
+    this.config = {
+      ...this.config,
+      ...partial,
+      sourceLang: normalizeBaseLang(partial.sourceLang ?? this.config.sourceLang) || 'en',
+      targetLang: normalizeBaseLang(partial.targetLang ?? this.config.targetLang) || 'es'
+    }
   }
 
   public ingestTokens(rawTokens: SonioxRawToken[]): void {
@@ -110,47 +162,66 @@ export class SonioxStreamAssembler {
 
     this.pruneRecentCommitted()
 
-    // Non-final tokens in each Soniox frame replace previous provisional tails
     let frameInterimOriginal = ''
     let frameInterimTranslation = ''
     let sawOriginalActivity = false
     let sawTranslationActivity = false
-    let hitEndpoint = false
+    let sawSoftEnd = false
+    let sawHardFinalize = false
 
     const updatedCommittedTurns = new Set<InternalTurnState>()
 
     for (const raw of rawTokens) {
       if (!raw || typeof raw.text !== 'string' || raw.text.length === 0) continue
 
-      if (SPECIAL_END_TOKENS.has(raw.text)) {
-        hitEndpoint = true
+      if (raw.text === '<end>') {
+        sawSoftEnd = true
+        if (this.activeTurn) {
+          this.activeTurn.awaitingClauseSpaceOrig = true
+          this.activeTurn.awaitingClauseSpaceTrans = true
+        }
+        continue
+      }
+
+      if (raw.text === '<fin>') {
+        sawHardFinalize = true
         continue
       }
 
       const isFinal = Boolean(raw.is_final)
       const isTranslation = raw.translation_status === 'translation'
       const tokenSpeaker = normalizeSpeaker(raw.speaker)
-      const tokenLang = normalizeLang(raw.language)
-      const tokenSourceLang = normalizeLang(raw.source_language)
+      const tokenLang = this.constrainToActiveLanguagePair(raw.language)
+      const tokenSourceLang = this.constrainToActiveLanguagePair(raw.source_language)
 
       if (isTranslation) {
         sawTranslationActivity = true
-        const targetTurn = this.resolveTranslationTargetTurn(tokenSpeaker, tokenSourceLang)
+        const targetTurn = this.resolveTranslationTargetTurn(tokenSourceLang)
 
         if (targetTurn) {
           if (targetTurn === this.activeTurn) {
             if (isFinal) {
-              targetTurn.finalTranslatedText += raw.text
+              targetTurn.finalTranslatedText = appendFinalSegmentSafely(
+                targetTurn.finalTranslatedText,
+                raw.text,
+                targetTurn.awaitingClauseSpaceTrans
+              )
+              targetTurn.awaitingClauseSpaceTrans = false
               targetTurn.interimTranslatedText = ''
             } else {
               frameInterimTranslation += raw.text
             }
           } else {
-            // Patch recently committed turn whose trailing translation arrived right after <end> or speaker switch
+            // Reconcile trailing finalized translation tokens onto recently committed turn
             if (isFinal) {
-              targetTurn.finalTranslatedText += raw.text
+              targetTurn.finalTranslatedText = appendFinalSegmentSafely(
+                targetTurn.finalTranslatedText,
+                raw.text,
+                targetTurn.awaitingClauseSpaceTrans
+              )
+              targetTurn.awaitingClauseSpaceTrans = false
               targetTurn.interimTranslatedText = ''
-            } else {
+            } else if (!cleanJoinedText(targetTurn.finalTranslatedText)) {
               targetTurn.interimTranslatedText = raw.text
             }
             updatedCommittedTurns.add(targetTurn)
@@ -162,59 +233,89 @@ export class SonioxStreamAssembler {
       // Original spoken token
       sawOriginalActivity = true
       const effectiveSpeaker = tokenSpeaker || this.activeTurn?.speakerId || '1'
-      const effectiveLang = tokenLang || this.activeTurn?.sourceLanguage || this.config.sourceLang
+      const effectiveLang =
+        tokenLang || this.activeTurn?.sourceLanguage || this.config.sourceLang
 
-      // Check for speaker change or language change -> instant turn split (0ms wait!)
-      if (this.activeTurn && this.shouldSplitTurn(this.activeTurn, tokenSpeaker, tokenLang)) {
-        // Flush any interim accumulated so far before splitting
-        if (frameInterimOriginal) {
-          this.activeTurn.interimOriginalText = frameInterimOriginal
-          frameInterimOriginal = ''
-        }
-        if (frameInterimTranslation) {
-          this.activeTurn.interimTranslatedText = frameInterimTranslation
-          frameInterimTranslation = ''
-        }
+      // Split ONLY on a genuine finalized LANGUAGE switch (NEVER on speaker jitter within the same language!)
+      if (
+        isFinal &&
+        this.activeTurn &&
+        this.isGenuineLanguageSwitch(this.activeTurn, tokenLang, raw.text)
+      ) {
         this.commitActiveTurn()
       }
 
       if (!this.activeTurn) {
         this.activeTurn = this.createTurn(effectiveSpeaker, effectiveLang)
       } else {
-        if (tokenSpeaker) this.activeTurn.speakerId = tokenSpeaker
-        if (tokenLang) {
+        if (isFinal && tokenSpeaker) {
+          this.activeTurn.speakerId = tokenSpeaker
+        }
+        // Before any finalized text is locked in, immediately adopt the detected language
+        // (even on provisional words) so live draft colors match the spoken language on frame 1.
+        if (tokenLang && !cleanJoinedText(this.activeTurn.finalOriginalText)) {
           this.activeTurn.sourceLanguage = tokenLang
           this.activeTurn.targetLanguage = this.resolveTargetLanguage(tokenLang)
         }
       }
 
       if (isFinal) {
-        this.activeTurn.finalOriginalText += raw.text
+        // New finalized speech cancels any pending 2s settle timer so the paragraph keeps coalescing smoothly
+        this.clearSettleTimer()
+
+        this.activeTurn.finalOriginalText = appendFinalSegmentSafely(
+          this.activeTurn.finalOriginalText,
+          raw.text,
+          this.activeTurn.awaitingClauseSpaceOrig
+        )
+        const insertedBoundarySpace = this.activeTurn.awaitingClauseSpaceOrig
+        this.activeTurn.awaitingClauseSpaceOrig = false
         this.activeTurn.interimOriginalText = ''
+
         const conf = typeof raw.confidence === 'number' ? raw.confidence : 0.94
         const roundedConf = Math.round(conf * 100) / 100
         this.activeTurn.confidenceSum += roundedConf
         this.activeTurn.confidenceCount += 1
 
-        const trimmedWord = raw.text.trim()
-        if (trimmedWord) {
-          this.activeTurn.finalOriginalTokens.push({
-            id: `${this.activeTurn.id}-tok-${this.activeTurn.finalOriginalTokens.length}`,
-            text: trimmedWord,
-            confidence: roundedConf,
-            isLowConfidence: roundedConf < this.config.confidenceThreshold,
-            startTimeMs: raw.start_ms ?? 0,
-            endTimeMs: raw.end_ms ?? 0,
-            isPunctuated: true,
-            speakerId: this.activeTurn.speakerId
-          })
+        // Merge Soniox BPE sub-word tokens cleanly into whole words
+        const startsNewWord =
+          insertedBoundarySpace ||
+          /^\s/.test(raw.text) ||
+          this.activeTurn.finalOriginalTokens.length === 0
+        const piece = raw.text.trim()
+        if (piece) {
+          if (startsNewWord) {
+            this.activeTurn.finalOriginalTokens.push({
+              id: `${this.activeTurn.id}-tok-${this.activeTurn.finalOriginalTokens.length}`,
+              text: piece,
+              confidence: roundedConf,
+              isLowConfidence: roundedConf < this.config.confidenceThreshold,
+              startTimeMs: raw.start_ms ?? 0,
+              endTimeMs: raw.end_ms ?? 0,
+              isPunctuated: true,
+              speakerId: this.activeTurn.speakerId
+            })
+          } else {
+            const prev =
+              this.activeTurn.finalOriginalTokens[this.activeTurn.finalOriginalTokens.length - 1]
+            prev.text += piece
+            prev.confidence = Math.min(prev.confidence, roundedConf)
+            prev.isLowConfidence = prev.confidence < this.config.confidenceThreshold
+            if (raw.end_ms) {
+              prev.endTimeMs = raw.end_ms
+            }
+          }
         }
       } else {
+        // New provisional speech also extends any active 2s settle countdown
+        if (raw.text.trim().length > 0) {
+          this.clearSettleTimer()
+        }
         frameInterimOriginal += raw.text
       }
     }
 
-    // Emit updates for any recently committed turns that received trailing translation tokens
+    // Emit reconciled updates for recently committed turns that received trailing finalized translations
     for (const committedTurn of updatedCommittedTurns) {
       const snap = this.buildSnapshot(committedTurn, true)
       if (snap) {
@@ -223,19 +324,27 @@ export class SonioxStreamAssembler {
     }
 
     if (this.activeTurn) {
-      if (sawOriginalActivity || hitEndpoint) {
-        this.activeTurn.interimOriginalText = hitEndpoint ? '' : frameInterimOriginal
+      if (sawOriginalActivity || sawSoftEnd || sawHardFinalize) {
+        this.activeTurn.interimOriginalText =
+          sawSoftEnd || sawHardFinalize ? '' : frameInterimOriginal
       }
-      if (sawTranslationActivity || hitEndpoint) {
-        this.activeTurn.interimTranslatedText = hitEndpoint ? '' : frameInterimTranslation
+      if (sawTranslationActivity || sawSoftEnd || sawHardFinalize) {
+        this.activeTurn.interimTranslatedText =
+          sawSoftEnd || sawHardFinalize ? '' : frameInterimTranslation
       }
 
-      if (hitEndpoint) {
+      // Hard finalize (<fin> after confirmed 2.2s audio pause) commits immediately!
+      if (sawHardFinalize) {
         this.commitActiveTurn()
         return
       }
 
-      this.resetPauseFallbackTimer()
+      // Soft endpoint (<end>): keep accumulating in the same paragraph for 2,000ms of silence
+      // so rapid "sí, sí, sí" or brief pauses never splinter into 4 separate rows!
+      if (sawSoftEnd && cleanJoinedText(this.activeTurn.finalOriginalText).length > 0) {
+        this.scheduleSameLanguageSettleCommit()
+      }
+
       const draftSnap = this.buildSnapshot(this.activeTurn, false)
       if (draftSnap) {
         this.callbacks.onUnifiedDraft(draftSnap)
@@ -248,61 +357,74 @@ export class SonioxStreamAssembler {
   }
 
   public reset(): void {
-    this.clearPauseTimer()
+    this.clearSettleTimer()
     this.activeTurn = null
     this.recentCommitted = []
   }
 
-  private shouldSplitTurn(
-    current: InternalTurnState,
-    nextSpeaker?: string,
-    nextLang?: string
-  ): boolean {
-    const hasExistingContent =
-      cleanJoinedText(current.finalOriginalText + current.interimOriginalText).length > 0
-    if (!hasExistingContent) return false
+  /**
+   * Maps any raw language tag (e.g. "es-MX", "en-US") strictly into the active language pair.
+   * Ignores noisy 3rd-language detections on short interjections or accents.
+   */
+  private constrainToActiveLanguagePair(rawLang?: string): string | undefined {
+    const base = normalizeBaseLang(rawLang)
+    if (!base) return undefined
 
-    if (nextSpeaker && current.speakerId && nextSpeaker !== current.speakerId) {
-      return true
+    if (this.config.operatingMode === 'translate') {
+      return this.config.sourceLang
     }
 
-    if (
-      this.config.operatingMode === 'conversation' &&
-      nextLang &&
-      current.sourceLanguage &&
-      nextLang !== current.sourceLanguage &&
-      cleanJoinedText(current.finalOriginalText).length > 0
-    ) {
-      return true
+    if (base === this.config.sourceLang || base === this.config.targetLang) {
+      return base
     }
-
-    return false
+    return undefined
   }
 
-  private resolveTranslationTargetTurn(
-    tokenSpeaker?: string,
-    tokenSourceLang?: string
-  ): InternalTurnState | null {
-    // 1. Prefer an exact speaker+language match in activeTurn
-    if (this.activeTurn) {
-      const speakerMatches = !tokenSpeaker || this.activeTurn.speakerId === tokenSpeaker
-      const langMatches = !tokenSourceLang || this.activeTurn.sourceLanguage === tokenSourceLang
-      if (speakerMatches && langMatches) {
-        return this.activeTurn
-      }
-    }
+  /**
+   * Only triggers an immediate mid-stream turn split when a genuine finalized word
+   * switches from Language A to Language B (e.g., Spanish -> English in Conversation mode).
+   * Punctuation-only tokens or same-language speaker changes NEVER split the paragraph.
+   */
+  private isGenuineLanguageSwitch(
+    current: InternalTurnState,
+    nextLang: string | undefined,
+    rawText: string
+  ): boolean {
+    if (this.config.operatingMode !== 'conversation') return false
+    if (!nextLang || !current.sourceLanguage || nextLang === current.sourceLanguage) return false
+    if (cleanJoinedText(current.finalOriginalText).length === 0) return false
+    // Ignore punctuation-only tokens that may carry an ambiguous language tag
+    if (!/[A-Za-zÀ-ÖØ-öø-ÿ\p{L}\p{N}]/u.test(rawText)) return false
+    return true
+  }
 
-    // 2. Check recently committed turns (most recent first) for trailing translation tokens
+  private resolveTranslationTargetTurn(tokenSourceLang?: string): InternalTurnState | null {
+    // 1. Prioritize a recently committed turn whose translation is still empty and matches sourceLang
     for (let i = this.recentCommitted.length - 1; i >= 0; i--) {
       const candidate = this.recentCommitted[i]
-      const speakerMatches = !tokenSpeaker || candidate.speakerId === tokenSpeaker
       const langMatches = !tokenSourceLang || candidate.sourceLanguage === tokenSourceLang
-      if (speakerMatches && langMatches) {
+      if (langMatches && cleanJoinedText(candidate.finalTranslatedText).length === 0) {
         return candidate
       }
     }
 
-    // 3. Fallback to activeTurn or latest committed turn
+    // 2. Match activeTurn by sourceLanguage (most common steady-state path)
+    if (this.activeTurn) {
+      const langMatches = !tokenSourceLang || this.activeTurn.sourceLanguage === tokenSourceLang
+      if (langMatches) {
+        return this.activeTurn
+      }
+    }
+
+    // 3. Match most recent committed turn by sourceLanguage (trailing tokens right after language switch)
+    for (let i = this.recentCommitted.length - 1; i >= 0; i--) {
+      const candidate = this.recentCommitted[i]
+      const langMatches = !tokenSourceLang || candidate.sourceLanguage === tokenSourceLang
+      if (langMatches) {
+        return candidate
+      }
+    }
+
     if (this.activeTurn) return this.activeTurn
     if (this.recentCommitted.length > 0) {
       return this.recentCommitted[this.recentCommitted.length - 1]
@@ -329,6 +451,8 @@ export class SonioxStreamAssembler {
       targetLanguage: this.resolveTargetLanguage(sourceLanguage),
       startedAtMs: Date.now(),
       committedAtMs: null,
+      awaitingClauseSpaceOrig: false,
+      awaitingClauseSpaceTrans: false,
       finalOriginalText: '',
       interimOriginalText: '',
       finalOriginalTokens: [],
@@ -339,21 +463,48 @@ export class SonioxStreamAssembler {
     }
   }
 
+  private scheduleSameLanguageSettleCommit(): void {
+    this.clearSettleTimer()
+    const delayMs = Math.max(250, this.config.sameLanguageSettleMs ?? DEFAULT_SAME_LANGUAGE_SETTLE_MS)
+    this.settleTimer = setTimeout(() => {
+      this.settleTimer = null
+      this.commitActiveTurn()
+    }, delayMs)
+  }
+
+  private clearSettleTimer(): void {
+    if (this.settleTimer) {
+      clearTimeout(this.settleTimer)
+      this.settleTimer = null
+    }
+  }
+
   private commitActiveTurn(): void {
-    this.clearPauseTimer()
+    this.clearSettleTimer()
     if (!this.activeTurn) return
 
     const turn = this.activeTurn
     this.activeTurn = null
-    turn.committedAtMs = Date.now()
 
-    // Merge any unfinalized tail cleanly into final text on forced commit
-    if (turn.interimOriginalText) {
-      turn.finalOriginalText += turn.interimOriginalText
-      turn.interimOriginalText = ''
+    // NEVER promote unfinalized provisional text into a committed paragraph
+    turn.interimOriginalText = ''
+
+    const finalOrig = cleanJoinedText(turn.finalOriginalText)
+    if (!finalOrig) {
+      return
     }
-    if (turn.interimTranslatedText) {
-      turn.finalTranslatedText += turn.interimTranslatedText
+
+    // Suppress back-to-back exact duplicate committed paragraph within 6s window
+    const lastCommitted = this.recentCommitted[this.recentCommitted.length - 1]
+    if (
+      lastCommitted &&
+      cleanJoinedText(lastCommitted.finalOriginalText).toLowerCase() === finalOrig.toLowerCase()
+    ) {
+      return
+    }
+
+    turn.committedAtMs = Date.now()
+    if (cleanJoinedText(turn.finalTranslatedText).length > 0) {
       turn.interimTranslatedText = ''
     }
 
@@ -369,7 +520,9 @@ export class SonioxStreamAssembler {
   }
 
   private buildSnapshot(turn: InternalTurnState, isFinal: boolean): UnifiedTurnSnapshot | null {
-    const sourceText = cleanJoinedText(turn.finalOriginalText + turn.interimOriginalText)
+    const sourceText = isFinal
+      ? cleanJoinedText(turn.finalOriginalText)
+      : cleanJoinedText(turn.finalOriginalText + turn.interimOriginalText)
     if (!sourceText) return null
 
     const translatedText = cleanJoinedText(turn.finalTranslatedText + turn.interimTranslatedText)
@@ -427,21 +580,6 @@ export class SonioxStreamAssembler {
     }
 
     return { utterance, translation }
-  }
-
-  private resetPauseFallbackTimer(): void {
-    this.clearPauseTimer()
-    const delayMs = this.config.pauseFallbackMs ?? 2000
-    this.pauseTimer = setTimeout(() => {
-      this.commitActiveTurn()
-    }, delayMs)
-  }
-
-  private clearPauseTimer(): void {
-    if (this.pauseTimer) {
-      clearTimeout(this.pauseTimer)
-      this.pauseTimer = null
-    }
   }
 
   private pruneRecentCommitted(): void {

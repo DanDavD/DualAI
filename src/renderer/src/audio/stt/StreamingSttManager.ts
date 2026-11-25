@@ -231,6 +231,13 @@ export class StreamingSttManager {
     }
   }
 
+  public finalizeChannelPause(channelId: ChannelId): void {
+    const client = channelId === 'channel_a' ? this.clientA : this.clientB
+    if (client instanceof GatewaySttClient) {
+      client.finalizeTurn()
+    }
+  }
+
   public triggerTestUtterance(channelId: ChannelId, phrase?: string): void {
     const client = channelId === 'channel_a' ? this.clientA : this.clientB
     if (client instanceof SimulatedStreamingClient) {

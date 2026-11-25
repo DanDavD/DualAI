@@ -2,7 +2,8 @@ import React from 'react'
 import { ArrowRightLeft, Zap } from 'lucide-react'
 import { useSession } from '../../context/SessionContext'
 import { LanguageSelector } from './LanguageSelector'
-import { HardwareVuMeter } from './HardwareVuMeter'
+import { WorkspaceLayoutPopover } from './WorkspaceLayoutPopover'
+import { TextPersonalizationPopover } from './TextPersonalizationPopover'
 
 export const SubHeader: React.FC = () => {
   const {
@@ -12,26 +13,12 @@ export const SubHeader: React.FC = () => {
     setTargetLang,
     swapLanguages,
     latencyMode,
-    setLatencyMode,
-    isAudioActive,
-    audioRoute,
-    levelMetricA,
-    levelMetricB
+    setLatencyMode
   } = useSession()
-
-  const activePeakDb =
-    audioRoute === 'mic'
-      ? levelMetricA?.peakDb
-      : audioRoute === 'system' || audioRoute === 'app'
-        ? levelMetricB?.peakDb
-        : Math.max(levelMetricA?.peakDb ?? -60, levelMetricB?.peakDb ?? -60)
-
-  const activeChannelLabel =
-    audioRoute === 'mic' ? 'MIC' : audioRoute === 'bilateral' ? 'DUAL' : 'SYS'
 
   return (
     <div className="flex h-10 w-full shrink-0 items-center justify-between border-b border-surface-border bg-surface-base px-4 select-none">
-      {/* Left Cluster: Clean Language Pair Controls + Active Hardware VU Meter */}
+      {/* Left Cluster: Clean Language Pair Controls */}
       <div className="flex items-center space-x-2.5">
         <LanguageSelector
           label="Source Language"
@@ -54,20 +41,13 @@ export const SubHeader: React.FC = () => {
           selectedCode={targetLang}
           onSelectLanguage={setTargetLang}
         />
-
-        {isAudioActive && (
-          <div className="hidden lg:flex items-center pl-1">
-            <HardwareVuMeter
-              channelLabel={activeChannelLabel}
-              isActive={isAudioActive}
-              peakDb={activePeakDb}
-            />
-          </div>
-        )}
       </div>
 
-      {/* Right Cluster: Compact Live / Accurate Mode Toggle */}
-      <div className="flex items-center space-x-3">
+      {/* Right Cluster: Separate Layout Menu, Text & Colors Menu, and Live / Accurate Toggle */}
+      <div className="flex items-center space-x-2">
+        <WorkspaceLayoutPopover />
+        <TextPersonalizationPopover />
+
         <div
           role="radiogroup"
           aria-label="Audio Latency Precision Mode"

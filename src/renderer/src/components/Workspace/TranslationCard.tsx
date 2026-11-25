@@ -1,16 +1,22 @@
 /**
- * DUALAI - Target Translation Row Component (Right Pane)
- * Renders clean, boxless flowing paragraphs ("what to say") with zero per-message titles.
- * - Live in-progress drafts (`isDraft` / `isStreaming`) render in a softer, lighter font weight
- *   so the reader visually knows the utterance is still evolving.
- * - Once the 2-second end-of-speech pause signal commits the paragraph, the translation locks
- *   smoothly into full-contrast final typography with hover-revealed inline actions.
+ * DUALAI - Target Translation Row Component (Right Pane / Translation)
+ * Renders clean, boxless flowing paragraphs ("what to say") colored strictly by
+ * SPOKEN LANGUAGE so all speakers of the same language share identical typography.
+ * Live drafts render in softer weight/opacity and snap cleanly into final text on commit.
  */
 
 import React, { useState } from 'react'
 import { Copy, Check, BookmarkPlus, AlertTriangle, X } from 'lucide-react'
 import { TranslationResult } from '../../../../types/translation'
+import {
+  DEFAULT_WORKSPACE_DISPLAY_SETTINGS,
+  WorkspaceDisplaySettings
+} from '../../../../types/settings'
 import { highlightCriticalEntities } from '../../utils/entityHighlighter'
+import {
+  resolveFontFamilyCss,
+  resolveLineSpacingMetrics
+} from '../../utils/typographyPreferences'
 
 interface TranslationCardProps {
   translation?: TranslationResult
@@ -19,19 +25,21 @@ interface TranslationCardProps {
   isDraft?: boolean
   isWaitingForPause?: boolean
   isFlagged?: boolean
-  isOppositeDirection?: boolean
+  textColor?: string
+  displaySettings?: WorkspaceDisplaySettings
   onToggleFlag: (utteranceId: string) => void
   onAddToGlossary: (sourceTerm: string, targetTerm: string) => void
 }
 
-export const TranslationCard: React.FC<TranslationCardProps> = ({
+export const TranslationCard: React.FC<TranslationCardProps> = React.memo(({
   translation,
   utteranceId,
   isStreaming = false,
   isDraft = false,
   isWaitingForPause = false,
   isFlagged = false,
-  isOppositeDirection = false,
+  textColor,
+  displaySettings = DEFAULT_WORKSPACE_DISPLAY_SETTINGS,
   onToggleFlag,
   onAddToGlossary
 }) => {
@@ -61,23 +69,13 @@ export const TranslationCard: React.FC<TranslationCardProps> = ({
   }
 
   const isInProgressVisual = isDraft || isStreaming
-  const speakerToneClass = (() => {
-    const spk = translation?.speakerId
-    if (spk === '3') {
-      return isInProgressVisual ? 'font-light text-sky-300/65' : 'font-normal text-sky-300'
-    }
-    if (spk && spk !== '1' && spk !== '2') {
-      return isInProgressVisual ? 'font-light text-emerald-300/65' : 'font-normal text-emerald-300'
-    }
-    if (spk === '2' || isOppositeDirection) {
-      return isInProgressVisual ? 'font-light text-amber-300/65' : 'font-normal text-amber-300'
-    }
-    return isInProgressVisual ? 'font-light text-zinc-400/85' : 'font-normal text-zinc-100'
-  })()
+  const fontMetrics = resolveFontFamilyCss(displaySettings.fontFamily)
+  const lineMetrics = resolveLineSpacingMetrics(displaySettings.lineSpacing)
+  const resolvedColor = textColor || displaySettings.languageAColor
 
   return (
-    <div className="group relative text-sm font-sans">
-      {/* Quiet Hover-Only Action Rail (Zero Per-Message Language Title Bar) */}
+    <div className="group relative text-sm select-none">
+      {/* Quiet Hover-Only Action Rail (Zero Layout Shift) */}
       {!isDraft && !isWaitingForPause && (
         <div
           className={`absolute -top-0.5 right-0 z-10 flex items-center space-x-1 rounded bg-surface-base/95 pl-2 font-mono transition-opacity ${
@@ -133,18 +131,26 @@ export const TranslationCard: React.FC<TranslationCardProps> = ({
         </div>
       )}
 
-      {/* Flowing Target Translation: Softer Draft Font -> Crisp Final Typography on 2s Commit */}
+      {/* Flowing Target Translation: Non-Selectable, GPU-Smooth Opacity Transition */}
       <div
-        className={`text-[15px] leading-relaxed select-text min-h-[22px] transition-colors duration-300 ${speakerToneClass}`}
+        style={{
+          fontFamily: fontMetrics.fontFamily,
+          letterSpacing: fontMetrics.letterSpacing,
+          fontSize: `${displaySettings.fontSizePx}px`,
+          lineHeight: lineMetrics.lineHeight,
+          color: resolvedColor,
+          opacity: isInProgressVisual ? 0.62 : 1
+        }}
+        className={`select-none min-h-[22px] transition-opacity duration-150 ${
+          isInProgressVisual ? 'font-light' : 'font-normal'
+        }`}
       >
         {translation?.translatedText ? (
           highlightCriticalEntities(translation.translatedText)
         ) : isWaitingForPause ? (
           <span className="font-light text-text-muted text-xs italic">Listening...</span>
-        ) : isStreaming || isDraft ? (
-          <span className="font-light text-text-muted text-xs">Translating...</span>
         ) : (
-          <span className="font-light text-text-muted text-xs italic">Translating...</span>
+          <span className="font-light text-text-muted text-xs">Translating...</span>
         )}
         {isStreaming && translation?.translatedText && (
           <span className="inline-block w-1.5 h-3.5 bg-accent-emerald/70 ml-1 animate-pulse align-middle" />
@@ -191,4 +197,6 @@ export const TranslationCard: React.FC<TranslationCardProps> = ({
       )}
     </div>
   )
-}
+})
+
+TranslationCard.displayName = 'TranslationCard'

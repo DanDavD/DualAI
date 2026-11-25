@@ -21,6 +21,8 @@ import { TranslationResult } from '../../../types/translation'
 import {
   HudSettings,
   DEFAULT_HUD_SETTINGS,
+  WorkspaceDisplaySettings,
+  DEFAULT_WORKSPACE_DISPLAY_SETTINGS,
   GlossaryEntry,
   ShortcutBinding,
   DEFAULT_SHORTCUT_BINDINGS,
@@ -54,6 +56,11 @@ import {
   PipelineStateSnapshot
 } from '../state/sessionStateMachine'
 import { glossaryEntriesToMap } from '../utils/glossaryParser'
+import {
+  STORAGE_KEY_WORKSPACE_DISPLAY,
+  mergeWorkspaceTypographyIntoHud,
+  sanitizeWorkspaceDisplaySettings
+} from '../utils/typographyPreferences'
 import {
   clearEncryptedSession,
   fetchAuthoritativeQuota,
@@ -149,6 +156,9 @@ export interface SessionState {
   isHudOpen: boolean
   hudSettings: HudSettings
 
+  // CARD-16: Workspace Typography & View Personalization State
+  workspaceDisplaySettings: WorkspaceDisplaySettings
+
   // Custom Glossary & Global Shortcuts State (Day 11)
   customGlossaryEntries: GlossaryEntry[]
   shortcutBindings: ShortcutBinding[]
@@ -206,6 +216,10 @@ export interface SessionState {
   closeHud: () => Promise<void>
   toggleHud: () => Promise<void>
   updateHudSettings: (partial: Partial<HudSettings>) => void
+
+  // CARD-16: Workspace Display & Typography Actions
+  updateWorkspaceDisplaySettings: (partial: Partial<WorkspaceDisplaySettings>) => void
+  resetWorkspaceDisplaySettings: () => void
 
   // Glossary & Shortcuts Actions (Day 11)
   addGlossaryEntry: (source: string, target: string, notes?: string) => void
@@ -324,6 +338,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     loadJsonStorage<HudSettings>(STORAGE_KEY_HUD, DEFAULT_HUD_SETTINGS)
   )
 
+  // CARD-16: Workspace Typography & View Personalization State (Persisted in localStorage)
+  const [workspaceDisplaySettings, setWorkspaceDisplaySettings] =
+    useState<WorkspaceDisplaySettings>(() =>
+      sanitizeWorkspaceDisplaySettings(
+        loadJsonStorage<Partial<WorkspaceDisplaySettings>>(
+          STORAGE_KEY_WORKSPACE_DISPLAY,
+          DEFAULT_WORKSPACE_DISPLAY_SETTINGS
+        )
+      )
+    )
+
   // Day 11: Custom Glossary & Global Shortcuts State
   const [customGlossaryEntries, setCustomGlossaryEntries] = useState<GlossaryEntry[]>(() =>
     loadJsonStorage<GlossaryEntry[]>(STORAGE_KEY_GLOSSARY, [])
@@ -358,6 +383,10 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const lastActiveAudioMsRef = useRef<Record<ChannelId, number>>({
     channel_a: 0,
     channel_b: 0
+  })
+  const channelPauseFinalizedRef = useRef<Record<ChannelId, boolean>>({
+    channel_a: true,
+    channel_b: true
   })
   const draftDebounceTimersRef = useRef<Partial<Record<ChannelId, ReturnType<typeof setTimeout>>>>(
     {}
@@ -993,14 +1022,22 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const now = Date.now()
           if (maxAbs >= 45) {
             lastActiveAudioMsRef.current[channelId] = now
+            channelPauseFinalizedRef.current[channelId] = false
           }
-          // 2.2s hangover guarantees Soniox/Deepgram receives full trailing silence to flush final words
-          if (now - lastActiveAudioMsRef.current[channelId] <= 2200) {
+          const silenceElapsedMs = now - lastActiveAudioMsRef.current[channelId]
+          // 2.2s hangover guarantees Soniox receives full trailing silence, then emits ONE clean finalize
+          if (silenceElapsedMs <= 2200) {
             const actualRate = engineRef.current?.getActualSampleRate() || TARGET_STREAM_SAMPLE_RATE
             const streamPcm = downsampleInt16Pcm(pcmData, actualRate, TARGET_STREAM_SAMPLE_RATE)
             if (streamPcm.length > 0) {
               sttManagerRef.current.sendAudio(channelId, streamPcm)
             }
+          } else if (
+            lastActiveAudioMsRef.current[channelId] > 0 &&
+            !channelPauseFinalizedRef.current[channelId]
+          ) {
+            channelPauseFinalizedRef.current[channelId] = true
+            sttManagerRef.current.finalizeChannelPause(channelId)
           }
         }
       },
@@ -1365,6 +1402,34 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return next
     })
   }, [])
+
+  // CARD-16: Zero-Latency Workspace Typography & View Personalization with HUD Synchronization
+  const updateWorkspaceDisplaySettings = useCallback(
+    (partial: Partial<WorkspaceDisplaySettings>) => {
+      setWorkspaceDisplaySettings((prev) => {
+        const next = sanitizeWorkspaceDisplaySettings({ ...prev, ...partial })
+        try {
+          localStorage.setItem(STORAGE_KEY_WORKSPACE_DISPLAY, JSON.stringify(next))
+        } catch {
+          // Ignore storage quota errors
+        }
+
+        if (next.syncTypographyToHud) {
+          setHudSettings((prevHud) => {
+            const syncedHud = mergeWorkspaceTypographyIntoHud(prevHud, next)
+            window.electronAPI?.sendHudConfig?.(syncedHud)
+            return syncedHud
+          })
+        }
+        return next
+      })
+    },
+    []
+  )
+
+  const resetWorkspaceDisplaySettings = useCallback(() => {
+    updateWorkspaceDisplaySettings(DEFAULT_WORKSPACE_DISPLAY_SETTINGS)
+  }, [updateWorkspaceDisplaySettings])
 
   // Day 11: Custom Glossary Actions
   const addGlossaryEntry = useCallback((source: string, target: string, notes?: string) => {
@@ -1733,6 +1798,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         translationProvider,
         isHudOpen,
         hudSettings,
+        workspaceDisplaySettings,
         customGlossaryEntries,
         shortcutBindings,
         authSession,
@@ -1777,6 +1843,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         closeHud,
         toggleHud,
         updateHudSettings,
+        updateWorkspaceDisplaySettings,
+        resetWorkspaceDisplaySettings,
         addGlossaryEntry,
         importGlossaryEntries,
         removeGlossaryEntry,
