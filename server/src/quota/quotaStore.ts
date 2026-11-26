@@ -44,6 +44,12 @@ export interface CreditPurchaseResult {
   totalAllocatedSeconds: number
 }
 
+export interface RevokeAdjustmentResult {
+  revoked: boolean
+  remainingSeconds: number
+  totalAllocatedSeconds: number
+}
+
 export const PLAN_CATALOG: Record<PlanId, PlanCatalogItem> = {
   free_tier: {
     id: 'free_tier',
@@ -132,6 +138,19 @@ export interface QuotaStore {
     planId: PlanId
     seconds: number
   }): Promise<CreditPurchaseResult>
+  revokeAdjustment(params: {
+    provider: 'microsoft_store' | 'paypal' | 'paddle'
+    adjustmentId: string
+    userId: string
+    planId: PlanId
+    seconds: number
+    eventKind: 'refund_clawback' | 'chargeback_clawback'
+  }): Promise<RevokeAdjustmentResult>
+  syncSubscriptionMetadata(params: {
+    userId: string
+    planId?: PlanId
+    subscriptionStatus: UserQuotaRecord['subscriptionStatus']
+  }): Promise<void>
   setTestQuotaSeconds?(userId: string, remainingSeconds: number): void
 }
 
@@ -223,6 +242,63 @@ export class InMemoryQuotaStore implements QuotaStore {
       remainingSeconds: updated.remainingSeconds,
       totalAllocatedSeconds: updated.totalAllocatedSeconds
     }
+  }
+
+  public async revokeAdjustment(params: {
+    provider: 'microsoft_store' | 'paypal' | 'paddle'
+    adjustmentId: string
+    userId: string
+    planId: PlanId
+    seconds: number
+    eventKind: 'refund_clawback' | 'chargeback_clawback'
+  }): Promise<RevokeAdjustmentResult> {
+    const txKey = `${params.provider}:adj:${params.adjustmentId}`
+    const current = await this.getOrCreateUserQuota(params.userId)
+
+    if (this.processedTxKeys.has(txKey)) {
+      return {
+        revoked: false,
+        remainingSeconds: current.remainingSeconds,
+        totalAllocatedSeconds: current.totalAllocatedSeconds
+      }
+    }
+
+    this.processedTxKeys.add(txKey)
+    const nextRemaining = Math.max(0, current.remainingSeconds - params.seconds)
+    const nextAllocated = Math.max(0, current.totalAllocatedSeconds - params.seconds)
+    const updated: UserQuotaRecord = {
+      ...current,
+      remainingSeconds: nextRemaining,
+      totalAllocatedSeconds: nextAllocated,
+      subscriptionStatus:
+        params.eventKind === 'chargeback_clawback'
+          ? 'canceled'
+          : nextRemaining <= 0
+            ? 'exhausted'
+            : current.subscriptionStatus
+    }
+    this.quotas.set(params.userId, updated)
+
+    return {
+      revoked: true,
+      remainingSeconds: updated.remainingSeconds,
+      totalAllocatedSeconds: updated.totalAllocatedSeconds
+    }
+  }
+
+  public async syncSubscriptionMetadata(params: {
+    userId: string
+    planId?: PlanId
+    subscriptionStatus: UserQuotaRecord['subscriptionStatus']
+  }): Promise<void> {
+    const current = await this.getOrCreateUserQuota(params.userId)
+    const plan = params.planId ? PLAN_CATALOG[params.planId] : undefined
+    this.quotas.set(params.userId, {
+      ...current,
+      planId: plan ? plan.id : current.planId,
+      subscriptionStatus: params.subscriptionStatus,
+      maxConcurrentSessions: plan ? plan.maxConcurrentSessions : current.maxConcurrentSessions
+    })
   }
 
   public setTestQuotaSeconds(userId: string, remainingSeconds: number): void {
@@ -418,6 +494,129 @@ export class SupabaseQuotaStore implements QuotaStore {
       credited: Boolean(row?.credited),
       remainingSeconds: row?.remaining_seconds ?? 0,
       totalAllocatedSeconds: row?.total_allocated_seconds ?? 0
+    }
+  }
+
+  public async revokeAdjustment(params: {
+    provider: 'microsoft_store' | 'paypal' | 'paddle'
+    adjustmentId: string
+    userId: string
+    planId: PlanId
+    seconds: number
+    eventKind: 'refund_clawback' | 'chargeback_clawback'
+  }): Promise<RevokeAdjustmentResult> {
+    // 1. Prefer atomic PostgreSQL RPC from migration 003
+    const rpcRes = await fetch(`${this.baseUrl}/rest/v1/rpc/revoke_billing_adjustment`, {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({
+        p_provider: params.provider,
+        p_adjustment_id: params.adjustmentId,
+        p_user_id: params.userId,
+        p_plan_id: params.planId,
+        p_seconds: Math.max(1, Math.floor(params.seconds)),
+        p_event_kind: params.eventKind
+      })
+    })
+
+    if (rpcRes.ok) {
+      const data = (await rpcRes.json()) as Array<{
+        revoked: boolean
+        remaining_seconds: number
+        total_allocated_seconds: number
+      }>
+      const row = data[0]
+      return {
+        revoked: Boolean(row?.revoked),
+        remainingSeconds: row?.remaining_seconds ?? 0,
+        totalAllocatedSeconds: row?.total_allocated_seconds ?? 0
+      }
+    }
+
+    // 2. Resilient idempotent fallback if migration 003 RPC is not yet installed in DB
+    const txKey = `adj:${params.adjustmentId}`
+    const insertEv = await fetch(`${this.baseUrl}/rest/v1/billing_events`, {
+      method: 'POST',
+      headers: { ...this.headers(), Prefer: 'return=minimal' },
+      body: JSON.stringify({
+        provider: params.provider,
+        external_transaction_id: txKey,
+        user_id: params.userId,
+        plan_id: params.planId,
+        seconds_credited: Math.max(1, Math.floor(params.seconds))
+      })
+    })
+
+    if (insertEv.status === 409) {
+      const current = await this.getOrCreateUserQuota(params.userId)
+      return {
+        revoked: false,
+        remainingSeconds: current.remainingSeconds,
+        totalAllocatedSeconds: current.totalAllocatedSeconds
+      }
+    }
+
+    if (!insertEv.ok) {
+      throw new Error(`Supabase adjustment idempotency insert failed (${insertEv.status})`)
+    }
+
+    const current = await this.getOrCreateUserQuota(params.userId)
+    const nextRemaining = Math.max(0, current.remainingSeconds - params.seconds)
+    const nextAllocated = Math.max(0, current.totalAllocatedSeconds - params.seconds)
+    const nextStatus =
+      params.eventKind === 'chargeback_clawback'
+        ? 'canceled'
+        : nextRemaining <= 0
+          ? 'exhausted'
+          : current.subscriptionStatus
+
+    const patchRes = await fetch(
+      `${this.baseUrl}/rest/v1/user_quotas?user_id=eq.${encodeURIComponent(params.userId)}`,
+      {
+        method: 'PATCH',
+        headers: this.headers(),
+        body: JSON.stringify({
+          remaining_seconds: nextRemaining,
+          total_allocated_seconds: nextAllocated,
+          subscription_status: nextStatus,
+          updated_at: new Date().toISOString()
+        })
+      }
+    )
+
+    if (!patchRes.ok) {
+      throw new Error(`Supabase quota clawback patch failed (${patchRes.status})`)
+    }
+
+    return {
+      revoked: true,
+      remainingSeconds: nextRemaining,
+      totalAllocatedSeconds: nextAllocated
+    }
+  }
+
+  public async syncSubscriptionMetadata(params: {
+    userId: string
+    planId?: PlanId
+    subscriptionStatus: UserQuotaRecord['subscriptionStatus']
+  }): Promise<void> {
+    const patch: Record<string, unknown> = {
+      subscription_status: params.subscriptionStatus,
+      updated_at: new Date().toISOString()
+    }
+    if (params.planId) {
+      patch.plan_id = params.planId
+    }
+    const res = await fetch(
+      `${this.baseUrl}/rest/v1/user_quotas?user_id=eq.${encodeURIComponent(params.userId)}`,
+      {
+        method: 'PATCH',
+        headers: this.headers(),
+        body: JSON.stringify(patch)
+      }
+    )
+    if (!res.ok) {
+      console.warn(`[QuotaStore] syncSubscriptionMetadata returned ${res.status}`)
     }
   }
 }

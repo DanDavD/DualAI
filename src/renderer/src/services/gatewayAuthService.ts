@@ -9,6 +9,7 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import {
   AccountQuota,
+  AccountSubscriptionSummary,
   AuthenticatedSession,
   BillingPlan,
   CheckoutProvider,
@@ -38,14 +39,26 @@ export const SILENT_REFRESH_LEAD_MS = 5 * 60 * 1000 // Refresh 5 minutes before 
 const MIN_REFRESH_DELAY_MS = 10_000
 
 let supabaseClient: SupabaseClient | null = null
+const memoryAuthStorage = new Map<string, string>()
 
 function getSupabaseClient(): SupabaseClient | null {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null
   if (!supabaseClient) {
     supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: {
+        flowType: 'pkce',
         persistSession: false, // We persist encrypted via Electron safeStorage instead of localStorage
-        autoRefreshToken: false // Managed deterministically by DualAI silent refresh loop + Keychain sync
+        autoRefreshToken: false, // Managed deterministically by DualAI silent refresh loop + Keychain sync
+        detectSessionInUrl: false,
+        storage: {
+          getItem: (key: string) => memoryAuthStorage.get(key) ?? null,
+          setItem: (key: string, value: string) => {
+            memoryAuthStorage.set(key, value)
+          },
+          removeItem: (key: string) => {
+            memoryAuthStorage.delete(key)
+          }
+        }
       }
     })
   }
@@ -130,6 +143,7 @@ export type SignInResult =
       emailVerificationRequired: false
       session: AuthenticatedSession
       quota: AccountQuota
+      subscription: AccountSubscriptionSummary | null
       plans: BillingPlan[]
     }
 
@@ -194,6 +208,7 @@ export async function signInWithEmailPassword(
       emailVerificationRequired: false,
       session,
       quota: snapshot.quota,
+      subscription: snapshot.subscription,
       plans: snapshot.plans
     }
   }
@@ -234,7 +249,134 @@ export async function signInWithEmailPassword(
     emailVerificationRequired: false,
     session,
     quota: data.quota,
+    subscription: null,
     plans: DEFAULT_SAAS_PLANS
+  }
+}
+
+export type OAuthProvider = 'google' | 'apple'
+
+let activeOAuthSessionId: string | null = null
+
+export async function cancelActiveOAuthSignIn(): Promise<void> {
+  if (activeOAuthSessionId && typeof window !== 'undefined' && window.electronAPI?.cancelOAuthCallback) {
+    const id = activeOAuthSessionId
+    activeOAuthSessionId = null
+    await window.electronAPI.cancelOAuthCallback(id).catch(() => undefined)
+  }
+}
+
+/**
+ * Initiates native desktop OAuth (Google or Apple) via Supabase PKCE + RFC 8252 loopback.
+ * Opens the system browser (required by Google & Apple security policies), captures the callback
+ * on 127.0.0.1, exchanges the authorization code, and stores the JWT in OS Keychain.
+ */
+export async function signInWithOAuthProvider(provider: OAuthProvider): Promise<SignInResult> {
+  const sb = getSupabaseClient()
+  if (!sb) {
+    throw new Error(
+      `${provider === 'apple' ? 'Apple' : 'Google'} sign-in requires Supabase Auth configuration.`
+    )
+  }
+
+  if (
+    typeof window === 'undefined' ||
+    !window.electronAPI?.prepareOAuthCallback ||
+    !window.electronAPI?.launchOAuthAndWait
+  ) {
+    throw new Error('Desktop OAuth bridge is unavailable in this environment.')
+  }
+
+  const prepared = await window.electronAPI.prepareOAuthCallback()
+  activeOAuthSessionId = prepared.sessionId
+
+  try {
+    const { data, error } = await sb.auth.signInWithOAuth({
+      provider,
+      options: {
+        redirectTo: prepared.redirectUrl,
+        skipBrowserRedirect: true
+      }
+    })
+
+    if (error || !data?.url) {
+      await window.electronAPI.cancelOAuthCallback(prepared.sessionId).catch(() => undefined)
+      throw new Error(
+        error?.message ||
+          `Unable to start ${provider === 'apple' ? 'Apple' : 'Google'} sign-in right now.`
+      )
+    }
+
+    const callback = await window.electronAPI.launchOAuthAndWait(prepared.sessionId, data.url)
+
+    if (!callback.ok) {
+      throw new Error(
+        callback.error || `${provider === 'apple' ? 'Apple' : 'Google'} sign-in was not completed.`
+      )
+    }
+
+    let sbSession: {
+      access_token: string
+      refresh_token?: string
+      expires_at?: number
+    } | null = null
+    let sbUser: {
+      id: string
+      email?: string
+      email_confirmed_at?: string | null
+      confirmed_at?: string | null
+    } | null = null
+
+    if (callback.code) {
+      const exchanged = await sb.auth.exchangeCodeForSession(callback.code)
+      if (exchanged.error || !exchanged.data.session || !exchanged.data.user) {
+        throw new Error(
+          exchanged.error?.message || 'Unable to complete sign-in with authentication provider.'
+        )
+      }
+      sbSession = exchanged.data.session
+      sbUser = exchanged.data.user
+    } else if (callback.accessToken) {
+      const setRes = await sb.auth.setSession({
+        access_token: callback.accessToken,
+        refresh_token: callback.refreshToken || ''
+      })
+      if (setRes.error || !setRes.data.session || !setRes.data.user) {
+        throw new Error(
+          setRes.error?.message || 'Unable to validate session from authentication provider.'
+        )
+      }
+      sbSession = setRes.data.session
+      sbUser = setRes.data.user
+    } else {
+      throw new Error('Authentication provider did not return valid credentials.')
+    }
+
+    const session: AuthenticatedSession = {
+      accessToken: sbSession.access_token,
+      refreshToken: sbSession.refresh_token,
+      expiresAtMs: (sbSession.expires_at ?? Math.floor(Date.now() / 1000) + 3600) * 1000,
+      user: {
+        userId: sbUser.id,
+        email: sbUser.email || '',
+        emailVerified: true,
+        authMode: 'supabase'
+      }
+    }
+
+    await saveEncryptedSession(session)
+    const snapshot = await fetchAuthoritativeQuota(session.accessToken)
+    return {
+      emailVerificationRequired: false,
+      session,
+      quota: snapshot.quota,
+      subscription: snapshot.subscription,
+      plans: snapshot.plans
+    }
+  } finally {
+    if (activeOAuthSessionId === prepared.sessionId) {
+      activeOAuthSessionId = null
+    }
   }
 }
 
@@ -374,7 +516,11 @@ export async function revokeServerSession(accessToken: string | null): Promise<v
 
 export async function fetchAuthoritativeQuota(
   accessToken: string
-): Promise<{ quota: AccountQuota; plans: BillingPlan[] }> {
+): Promise<{
+  quota: AccountQuota
+  subscription: AccountSubscriptionSummary | null
+  plans: BillingPlan[]
+}> {
   const response = await fetch(`${GATEWAY_BASE_URL}/v1/account/quota`, {
     method: 'GET',
     headers: {
@@ -388,13 +534,69 @@ export async function fetchAuthoritativeQuota(
 
   const data = (await response.json()) as {
     quota: AccountQuota
+    subscription?: AccountSubscriptionSummary | null
     plans?: BillingPlan[]
   }
 
   return {
     quota: data.quota,
+    subscription: data.subscription ?? null,
     plans: data.plans && data.plans.length > 0 ? data.plans : DEFAULT_SAAS_PLANS
   }
+}
+
+export async function cancelUserSubscription(
+  accessToken: string
+): Promise<{ ok: boolean; subscription?: AccountSubscriptionSummary; error?: string }> {
+  const response = await fetch(`${GATEWAY_BASE_URL}/v1/billing/subscription/cancel`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`
+    }
+  })
+
+  const data = (await response.json().catch(() => ({}))) as {
+    ok?: boolean
+    subscription?: AccountSubscriptionSummary
+    error?: string
+  }
+
+  if (!response.ok || !data.ok) {
+    return {
+      ok: false,
+      error: data.error || `Unable to cancel subscription (${response.status}).`
+    }
+  }
+
+  return { ok: true, subscription: data.subscription }
+}
+
+export async function undoCancelUserSubscription(
+  accessToken: string
+): Promise<{ ok: boolean; subscription?: AccountSubscriptionSummary; error?: string }> {
+  const response = await fetch(`${GATEWAY_BASE_URL}/v1/billing/subscription/undo-cancel`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`
+    }
+  })
+
+  const data = (await response.json().catch(() => ({}))) as {
+    ok?: boolean
+    subscription?: AccountSubscriptionSummary
+    error?: string
+  }
+
+  if (!response.ok || !data.ok) {
+    return {
+      ok: false,
+      error: data.error || `Unable to keep subscription (${response.status}).`
+    }
+  }
+
+  return { ok: true, subscription: data.subscription }
 }
 
 export async function createBillingCheckoutSession(params: {

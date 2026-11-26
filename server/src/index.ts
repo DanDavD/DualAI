@@ -528,7 +528,13 @@ export async function createGatewayServer(
     // GET /v1/account/quota
     if (req.method === 'GET' && pathname === '/v1/account/quota') {
       try {
-        const quota = await quotaStore.getOrCreateUserQuota(user.userId)
+        const [quota, subscription] = await Promise.all([
+          quotaStore.getOrCreateUserQuota(user.userId),
+          paddleFulfillment.getActiveSubscriptionForUser({
+            userId: user.userId,
+            email: user.email
+          })
+        ])
         sendJson(res, 200, {
           user: {
             userId: user.userId,
@@ -536,6 +542,7 @@ export async function createGatewayServer(
             emailVerified: user.emailVerified
           },
           quota,
+          subscription,
           plans: Object.values(PLAN_CATALOG)
         })
       } catch {
@@ -612,6 +619,11 @@ export async function createGatewayServer(
             })
             return
           }
+          // Return explicit Paddle rejection (e.g. duplicate active subscription) instead of falling through
+          if (paddleTx.error) {
+            sendJson(res, 400, { ok: false, error: paddleTx.error })
+            return
+          }
         }
 
         const sessionRes = billingVerifier.createCheckoutSession({
@@ -649,6 +661,40 @@ export async function createGatewayServer(
         sendJson(res, 400, {
           code: 'INVALID_REQUEST',
           message: 'Invalid Microsoft Store receipt body.'
+        })
+      }
+      return
+    }
+
+    // Subscription Cancellation: POST /v1/billing/subscription/cancel & /undo-cancel
+    // Zero-trust server-resolved ownership: never trusts client-supplied subscriptionId.
+    if (req.method === 'POST' && pathname === '/v1/billing/subscription/cancel') {
+      try {
+        const result = await paddleFulfillment.cancelSubscriptionForUser({
+          userId: user.userId,
+          email: user.email
+        })
+        sendJson(res, result.ok ? 200 : 400, result)
+      } catch (err) {
+        sendJson(res, 500, {
+          ok: false,
+          error: err instanceof Error ? err.message : 'Unable to cancel subscription right now.'
+        })
+      }
+      return
+    }
+
+    if (req.method === 'POST' && pathname === '/v1/billing/subscription/undo-cancel') {
+      try {
+        const result = await paddleFulfillment.undoCancelSubscriptionForUser({
+          userId: user.userId,
+          email: user.email
+        })
+        sendJson(res, result.ok ? 200 : 400, result)
+      } catch (err) {
+        sendJson(res, 500, {
+          ok: false,
+          error: err instanceof Error ? err.message : 'Unable to keep subscription right now.'
         })
       }
       return

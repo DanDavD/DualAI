@@ -41,7 +41,16 @@ export const IPC_CHANNELS = {
   // Zero-Trust OS Keychain Session Vault (Electron safeStorage)
   AUTH_STORE_SESSION: 'dualai:auth-store-session',
   AUTH_LOAD_SESSION: 'dualai:auth-load-session',
-  AUTH_CLEAR_SESSION: 'dualai:auth-clear-session'
+  AUTH_CLEAR_SESSION: 'dualai:auth-clear-session',
+
+  // Native Desktop OAuth (Google / Apple via RFC 8252 Loopback)
+  AUTH_OAUTH_PREPARE: 'dualai:auth-oauth-prepare',
+  AUTH_OAUTH_LAUNCH_AND_WAIT: 'dualai:auth-oauth-launch-and-wait',
+  AUTH_OAUTH_CANCEL: 'dualai:auth-oauth-cancel',
+
+  // In-app Paddle checkout window
+  CHECKOUT_OPEN: 'dualai:checkout-open',
+  CHECKOUT_CLOSED: 'dualai:checkout-closed'
 } as const
 
 export type IpcChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS]
@@ -82,6 +91,19 @@ export interface ShortcutRegistrationReport {
   failed: string[]
 }
 
+export interface OAuthPreparedSession {
+  sessionId: string
+  redirectUrl: string
+}
+
+export interface OAuthCallbackResult {
+  ok: boolean
+  code?: string
+  accessToken?: string
+  refreshToken?: string
+  error?: string
+}
+
 /**
  * Contract exposed to Renderer via ContextBridge
  */
@@ -112,6 +134,15 @@ export interface ElectronBridgeApi {
   storeEncryptedSession: (serializedSession: string) => Promise<boolean>
   loadEncryptedSession: () => Promise<string | null>
   clearEncryptedSession: () => Promise<boolean>
+
+  // Native Desktop OAuth (Google / Apple via RFC 8252 Loopback)
+  prepareOAuthCallback: () => Promise<OAuthPreparedSession>
+  launchOAuthAndWait: (sessionId: string, authUrl: string) => Promise<OAuthCallbackResult>
+  cancelOAuthCallback: (sessionId: string) => Promise<void>
+
+  // In-app Paddle checkout (modal window, never leaves the app)
+  openCheckoutWindow: (url: string) => Promise<boolean>
+  onCheckoutClosed: (callback: (completed: boolean) => void) => () => void
 
   // Event Listeners (Main -> Renderer)
   onShortcutMute: (callback: () => void) => () => void
