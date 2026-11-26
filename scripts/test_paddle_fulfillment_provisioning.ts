@@ -126,9 +126,9 @@ async function runPaddleFulfillmentSuite(): Promise<void> {
     console.log('  Signature Verification & customer.created Mirroring: VERIFIED\n')
 
     // --------------------------------------------------------------------------
-    // TEST 3: subscription.created with Pro Plan (40 Hours / 144,000s)
+    // TEST 3: subscription.created + transaction.completed MUST credit ONCE (Zero Double-Credit!)
     // --------------------------------------------------------------------------
-    console.log('[TEST 3] Testing subscription.created & automatic quota crediting...')
+    console.log('[TEST 3] Testing subscription.created + transaction.completed (single atomic credit)...')
     const subCreatedPayload = JSON.stringify({
       event_id: 'evt_sub_001',
       event_type: 'subscription.created',
@@ -168,34 +168,74 @@ async function runPaddleFulfillmentSuite(): Promise<void> {
     assert.equal(subRes.status, 200)
     const subBody = (await subRes.json()) as { received: boolean; credited: boolean; planId: string }
     assert.equal(subBody.received, true)
-    assert.equal(subBody.credited, true)
+    assert.equal(subBody.credited, false, 'subscription.created must sync state ONLY and NOT credit hours')
     assert.equal(subBody.planId, 'pro_40h')
 
-    // Check quotaStore state
+    // Now transaction.completed fires for the exact same checkout — MUST credit 40h ONCE
+    const initialTxPayload = JSON.stringify({
+      event_id: 'evt_tx_initial_001',
+      event_type: 'transaction.completed',
+      occurred_at: new Date().toISOString(),
+      data: {
+        id: 'txn_test_initial_pro_40h_001',
+        customer_id: 'ctm_test_dualai_001',
+        subscription_id: 'sub_test_pro_40h_001',
+        custom_data: { userId: 'usr_patel_uuid_001' },
+        items: [
+          {
+            price: {
+              id: 'pri_01m8aw2f6rzakqqenynbztq74f',
+              product_id: 'pro_01m8avhb2vpt2qhxh6mfchxv7x'
+            },
+            quantity: 1
+          }
+        ]
+      }
+    })
+    const ts2b = Math.floor(Date.now() / 1000)
+    const h1_2b = crypto
+      .createHmac('sha256', webhookSecret)
+      .update(`${ts2b}:${initialTxPayload}`)
+      .digest('hex')
+
+    const initialTxRes = await fetch(`${gw.baseUrl}/v1/billing/webhook`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'paddle-signature': `ts=${ts2b};h1=${h1_2b}`
+      },
+      body: initialTxPayload
+    })
+    assert.equal(initialTxRes.status, 200)
+    const initialTxBody = (await initialTxRes.json()) as { credited: boolean; planId: string }
+    assert.equal(initialTxBody.credited, true, 'transaction.completed must credit hours')
+    assert.equal(initialTxBody.planId, 'pro_40h')
+
+    // Check quotaStore state — MUST be exactly 1h free + 40h (NEVER 1h + 80h!)
     const userQuota = await quotaStore.getOrCreateUserQuota('usr_patel_uuid_001')
     assert.equal(userQuota.planId, 'pro_40h')
-    assert.equal(userQuota.remainingSeconds, 3600 + 144000) // Initial free hour + 40h
+    assert.equal(userQuota.remainingSeconds, 3600 + 144000)
     assert.equal(userQuota.subscriptionStatus, 'active')
 
     // --------------------------------------------------------------------------
-    // TEST 4: Idempotent Replay Guard
+    // TEST 4: Idempotent Replay Guard (Replaying transaction.completed must NOT double-credit)
     // --------------------------------------------------------------------------
     console.log('[TEST 4] Testing Idempotent Replay Guard (must not double-credit)...')
     const replayRes = await fetch(`${gw.baseUrl}/v1/billing/webhook`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'paddle-signature': `ts=${ts2};h1=${h1_2}`
+        'paddle-signature': `ts=${ts2b};h1=${h1_2b}`
       },
-      body: subCreatedPayload
+      body: initialTxPayload
     })
     assert.equal(replayRes.status, 200)
     const replayBody = (await replayRes.json()) as { credited: boolean }
-    assert.equal(replayBody.credited, false, 'Replaying subscription must NOT double-credit')
+    assert.equal(replayBody.credited, false, 'Replaying transaction.completed must NOT double-credit')
 
     const quotaAfterReplay = await quotaStore.getOrCreateUserQuota('usr_patel_uuid_001')
     assert.equal(quotaAfterReplay.remainingSeconds, 3600 + 144000)
-    console.log('  Idempotent Replay Guard: VERIFIED\n')
+    console.log('  Single Atomic Credit & Idempotent Replay Guard: VERIFIED\n')
 
     // --------------------------------------------------------------------------
     // TEST 5: subscription.updated with scheduled_change (must NOT revoke access)
@@ -415,6 +455,138 @@ async function runPaddleFulfillmentSuite(): Promise<void> {
     })
     assert.equal(txRes.status, 200)
     console.log('  customer.updated & transaction.completed: VERIFIED\n')
+
+    // --------------------------------------------------------------------------
+    // TEST 9: In-App Subscription Cancel, Undo Cancel, Ownership & Refund Clawback
+    // --------------------------------------------------------------------------
+    console.log('[TEST 9] Testing Cancel Subscription, Undo Cancel, Auth Security & Refund Clawback...')
+    // Unauthenticated cancel must be rejected with 401
+    const unauthCancel = await fetch(`${gw.baseUrl}/v1/billing/subscription/cancel`, {
+      method: 'POST'
+    })
+    assert.equal(unauthCancel.status, 401, 'Unauthenticated cancel must return 401')
+
+    // Create active subscription mirror for signed-in session user
+    await gw.paddleFulfillment.upsertSubscriptionMirror({
+      subscriptionId: 'sub_live_cancel_test_001',
+      customerId: 'ctm_test_dualai_001',
+      userId: session.user.userId,
+      status: 'active',
+      priceId: 'pri_01m8aw2f6rzakqqenynbztq74f',
+      productId: 'pro_01m8avhb2vpt2qhxh6mfchxv7x',
+      scheduledChangeAction: null,
+      scheduledChangeAt: null,
+      lastEventAt: new Date().toISOString()
+    })
+
+    if (fulfillmentClient) {
+      const nextPeriodEnd = new Date(Date.now() + 30 * 86400 * 1000).toISOString()
+      fulfillmentClient.subscriptions.cancel = async (subId, opts) => {
+        assert.equal(subId, 'sub_live_cancel_test_001')
+        assert.equal(opts?.effectiveFrom, 'next_billing_period', 'Must default to next_billing_period')
+        return {
+          id: subId,
+          status: 'active',
+          items: [{ price: { id: 'pri_01m8aw2f6rzakqqenynbztq74f', productId: 'pro_01m8avhb2vpt2qhxh6mfchxv7x' } }],
+          scheduledChange: { action: 'cancel', effectiveAt: nextPeriodEnd },
+          nextBilledAt: null
+        } as any
+      }
+      fulfillmentClient.subscriptions.update = async (subId, body) => {
+        assert.equal(subId, 'sub_live_cancel_test_001')
+        assert.equal(body.scheduledChange, null)
+        return {
+          id: subId,
+          status: 'active',
+          items: [{ price: { id: 'pri_01m8aw2f6rzakqqenynbztq74f', productId: 'pro_01m8avhb2vpt2qhxh6mfchxv7x' } }],
+          scheduledChange: null,
+          nextBilledAt: nextPeriodEnd
+        } as any
+      }
+
+      // Duplicate checkout on the exact same active plan must be blocked (400)
+      const dupCheckout = await fetch(`${gw.baseUrl}/v1/billing/checkout-session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.accessToken}` },
+        body: JSON.stringify({ planId: 'pro_40h', provider: 'paddle' })
+      })
+      assert.equal(dupCheckout.status, 400, 'Duplicate active subscription checkout must be rejected')
+
+      // Cancel subscription via authenticated endpoint
+      const cancelSubRes = await fetch(`${gw.baseUrl}/v1/billing/subscription/cancel`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${session.accessToken}` }
+      })
+      assert.equal(cancelSubRes.status, 200)
+      const cancelSubData = (await cancelSubRes.json()) as {
+        ok: boolean
+        subscription: { status: string; scheduledChangeAction: string | null }
+      }
+      assert.equal(cancelSubData.ok, true)
+      assert.equal(cancelSubData.subscription.status, 'active')
+      assert.equal(cancelSubData.subscription.scheduledChangeAction, 'cancel')
+
+      // GET /v1/account/quota must reflect scheduled cancellation in subscription DTO
+      const quotaWithSub = await fetch(`${gw.baseUrl}/v1/account/quota`, {
+        headers: { Authorization: `Bearer ${session.accessToken}` }
+      })
+      assert.equal(quotaWithSub.status, 200)
+      const quotaWithSubData = (await quotaWithSub.json()) as {
+        subscription: { scheduledChangeAction: string | null }
+      }
+      assert.equal(quotaWithSubData.subscription.scheduledChangeAction, 'cancel')
+
+      // Undo cancellation
+      const undoRes = await fetch(`${gw.baseUrl}/v1/billing/subscription/undo-cancel`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${session.accessToken}` }
+      })
+      assert.equal(undoRes.status, 200)
+      const undoData = (await undoRes.json()) as {
+        ok: boolean
+        subscription: { scheduledChangeAction: string | null }
+      }
+      assert.equal(undoData.ok, true)
+      assert.equal(undoData.subscription.scheduledChangeAction, null)
+    }
+
+    // Approved refund adjustment must claw back hours atomically and idempotently
+    const beforeRefund = await quotaStore.getOrCreateUserQuota(session.user.userId)
+    const refundPayload = JSON.stringify({
+      event_id: 'evt_adj_refund_001',
+      event_type: 'adjustment.updated',
+      occurred_at: new Date().toISOString(),
+      data: {
+        id: 'adj_test_refund_001',
+        action: 'refund',
+        status: 'approved',
+        customer_id: 'ctm_test_dualai_001',
+        transaction_id: 'txn_test_001'
+      }
+    })
+    const ts7 = Math.floor(Date.now() / 1000)
+    const h1_7 = crypto.createHmac('sha256', webhookSecret).update(`${ts7}:${refundPayload}`).digest('hex')
+    const refundRes = await fetch(`${gw.baseUrl}/v1/billing/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'paddle-signature': `ts=${ts7};h1=${h1_7}` },
+      body: refundPayload
+    })
+    assert.equal(refundRes.status, 200)
+    const refundBody = (await refundRes.json()) as { revoked: boolean }
+    assert.equal(refundBody.revoked, true)
+    const afterRefund = await quotaStore.getOrCreateUserQuota(session.user.userId)
+    assert.equal(afterRefund.remainingSeconds, Math.max(0, beforeRefund.remainingSeconds - 144000))
+
+    // Replay same refund adjustment must NOT claw back twice
+    const refundReplay = await fetch(`${gw.baseUrl}/v1/billing/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'paddle-signature': `ts=${ts7};h1=${h1_7}` },
+      body: refundPayload
+    })
+    assert.equal(refundReplay.status, 200)
+    const refundReplayBody = (await refundReplay.json()) as { revoked: boolean }
+    assert.equal(refundReplayBody.revoked, false, 'Replaying adjustment must NOT deduct hours twice')
+    console.log('  Cancel, Undo Cancel, Duplicate Checkout Guard & Atomic Refund Clawback: VERIFIED\n')
 
     console.log('PASS: ALL PADDLE FULFILLMENT & PROVISIONING TESTS COMPLETED SUCCESSFULLY.')
     console.log('==================================================================\n')

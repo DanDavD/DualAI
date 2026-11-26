@@ -19,6 +19,7 @@ function getInitials(email?: string): string {
  */
 export const QuotaGauge: React.FC = () => {
   const {
+    accountQuota,
     quotaRemainingHours,
     quotaTotalHours,
     isGatewayAuthenticated,
@@ -27,19 +28,24 @@ export const QuotaGauge: React.FC = () => {
     openAccountModal
   } = useSession()
 
+  const isHydratingQuota = isGatewayAuthenticated && !accountQuota
   const safeTotal = Math.max(0.01, quotaTotalHours)
-  const percentage = Math.min(100, Math.max(0, Math.round((quotaRemainingHours / safeTotal) * 100)))
+  const percentage = isHydratingQuota
+    ? 0
+    : Math.min(100, Math.max(0, Math.round((quotaRemainingHours / safeTotal) * 100)))
   const totalMinutes = Math.max(0, Math.round(quotaRemainingHours * 60))
   const wholeHours = Math.floor(totalMinutes / 60)
   const remainingMinutes = totalMinutes % 60
 
   const labelText = !isGatewayAuthenticated
     ? 'Sign In'
-    : isQuotaExhausted
-      ? '0m'
-      : wholeHours > 0
-        ? `${wholeHours}h ${remainingMinutes}m`
-        : `${remainingMinutes}m`
+    : isHydratingQuota
+      ? '--'
+      : isQuotaExhausted
+        ? '0m'
+        : wholeHours > 0
+          ? `${wholeHours}h ${remainingMinutes}m`
+          : `${remainingMinutes}m`
 
   const initials = getInitials(authSession?.user?.email)
   const radius = 11

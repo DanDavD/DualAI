@@ -10,12 +10,16 @@ import {
   safeStorage
 } from 'electron'
 import fs from 'node:fs'
+import http from 'node:http'
+import crypto from 'node:crypto'
 import { join } from 'path'
 import {
   IPC_CHANNELS,
   ScreenSourceInfo,
   TranscriptPayload,
-  ShortcutRegistrationReport
+  ShortcutRegistrationReport,
+  OAuthPreparedSession,
+  OAuthCallbackResult
 } from '../types/ipc'
 import {
   HudBounds,
@@ -416,6 +420,76 @@ function registerIpcHandlers(): void {
     }
   })
 
+  // In-app Paddle checkout: modal child window hosting the Paddle overlay on the approved domain.
+  // Uses an isolated session so the app-wide CSP (frame-ancestors 'none') does not apply to it.
+  const CHECKOUT_ALLOWED_HOSTS = new Set(['dualai.universalaisync.com'])
+  let checkoutWindow: BrowserWindow | null = null
+
+  ipcMain.handle(IPC_CHANNELS.CHECKOUT_OPEN, async (_event, rawUrl: string): Promise<boolean> => {
+    try {
+      const parsed = new URL(String(rawUrl))
+      if (
+        parsed.protocol !== 'https:' ||
+        !CHECKOUT_ALLOWED_HOSTS.has(parsed.hostname) ||
+        !parsed.pathname.startsWith('/checkout')
+      ) {
+        return false
+      }
+      if (checkoutWindow && !checkoutWindow.isDestroyed()) {
+        checkoutWindow.close()
+      }
+      let completed = false
+      const win = new BrowserWindow({
+        width: 520,
+        height: 780,
+        parent: mainWindow ?? undefined,
+        modal: Boolean(mainWindow),
+        show: false,
+        title: 'DualAI Checkout',
+        backgroundColor: '#0b0d12',
+        autoHideMenuBar: true,
+        minimizable: false,
+        maximizable: false,
+        webPreferences: {
+          partition: 'persist:dualai-checkout',
+          sandbox: true,
+          contextIsolation: true,
+          nodeIntegration: false,
+          webSecurity: true
+        }
+      })
+      checkoutWindow = win
+      win.setMenuBarVisibility(false)
+      win.once('ready-to-show', () => win.show())
+      win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+      const onNav = (_e: unknown, navUrl: string): void => {
+        try {
+          const u = new URL(navUrl)
+          if (u.hostname !== 'dualai.universalaisync.com') return
+          if (u.pathname.startsWith('/checkout/success')) {
+            completed = true
+            setTimeout(() => !win.isDestroyed() && win.close(), 1800)
+          } else if (u.pathname.startsWith('/checkout/closed')) {
+            if (!win.isDestroyed()) win.close()
+          }
+        } catch {
+          // ignore malformed URL
+        }
+      }
+      win.webContents.on('did-navigate', onNav)
+      win.on('closed', () => {
+        checkoutWindow = null
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send(IPC_CHANNELS.CHECKOUT_CLOSED, completed)
+        }
+      })
+      await win.loadURL(parsed.toString())
+      return true
+    } catch {
+      return false
+    }
+  })
+
   ipcMain.handle(IPC_CHANNELS.AUTH_CLEAR_SESSION, async (): Promise<boolean> => {
     try {
       const vaultPath = getSessionVaultPath()
@@ -426,6 +500,283 @@ function registerIpcHandlers(): void {
     } catch {
       return false
     }
+  })
+
+  // Native Desktop OAuth (Google / Apple via RFC 8252 Local Loopback HTTP Server)
+  interface PendingOAuthFlow {
+    server: http.Server
+    redirectUrl: string
+    resolveCallback?: (result: OAuthCallbackResult) => void
+    timeout?: NodeJS.Timeout
+    settled: boolean
+  }
+
+  const pendingOAuthFlows = new Map<string, PendingOAuthFlow>()
+
+  const renderOAuthHtml = (title: string, detail: string, isError = false): string => `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>DualAI - ${title}</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #111114;
+      color: rgba(255, 255, 255, 0.94);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .card {
+      max-width: 380px;
+      padding: 28px 32px;
+      border-radius: 22px;
+      background: rgba(26, 26, 31, 0.92);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 24px 64px rgba(0, 0, 0, 0.65);
+      text-align: center;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      margin: 0 auto 14px;
+      background: ${isError ? '#ff453a' : '#30d158'};
+    }
+    h1 { margin: 0 0 8px; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+    p { margin: 0; font-size: 13px; line-height: 1.5; color: rgba(255, 255, 255, 0.62); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="dot"></div>
+    <h1>${title}</h1>
+    <p>${detail}</p>
+  </div>
+</body>
+</html>`
+
+  const renderOAuthHashRelayHtml = (): string => `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>DualAI - Completing Sign In</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #111114;
+      color: rgba(255, 255, 255, 0.94);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    }
+    .card {
+      max-width: 380px;
+      padding: 28px 32px;
+      border-radius: 22px;
+      background: rgba(26, 26, 31, 0.92);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      text-align: center;
+    }
+    h1 { margin: 0 0 8px; font-size: 17px; font-weight: 600; }
+    p { margin: 0; font-size: 13px; color: rgba(255, 255, 255, 0.62); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1 id="t">Completing sign in...</h1>
+    <p id="d">Returning you to DualAI.</p>
+  </div>
+  <script>
+    (function () {
+      var hash = window.location.hash ? window.location.hash.slice(1) : '';
+      fetch('/auth/callback/hash', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: hash
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          document.getElementById('t').textContent = res.ok ? 'Signed in to DualAI' : 'Sign in failed';
+          document.getElementById('d').textContent = res.ok
+            ? 'You can close this tab and return to DualAI.'
+            : (res.error || 'Please try signing in again from DualAI.');
+        })
+        .catch(function () {
+          document.getElementById('t').textContent = 'Sign in failed';
+          document.getElementById('d').textContent = 'Could not reach DualAI. Please try again.';
+        });
+    })();
+  </script>
+</body>
+</html>`
+
+  const finishOAuthFlow = (sessionId: string, result: OAuthCallbackResult): void => {
+    const flow = pendingOAuthFlows.get(sessionId)
+    if (!flow || flow.settled) return
+    flow.settled = true
+    if (flow.timeout) clearTimeout(flow.timeout)
+    pendingOAuthFlows.delete(sessionId)
+    try {
+      flow.server.close()
+    } catch {
+      // Ignore close errors
+    }
+    if (result.ok && mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    }
+    flow.resolveCallback?.(result)
+  }
+
+  ipcMain.handle(IPC_CHANNELS.AUTH_OAUTH_PREPARE, async (): Promise<OAuthPreparedSession> => {
+    // Cancel any stale pending OAuth sessions before opening a fresh loopback listener
+    for (const staleId of Array.from(pendingOAuthFlows.keys())) {
+      finishOAuthFlow(staleId, { ok: false, error: 'Sign-in was superseded by a new attempt.' })
+    }
+
+    const sessionId = crypto.randomUUID()
+
+    return new Promise<OAuthPreparedSession>((resolve, reject) => {
+      const server = http.createServer((req, res) => {
+        const reqUrl = new URL(req.url || '/', 'http://127.0.0.1')
+
+        if (req.method === 'GET' && reqUrl.pathname === '/auth/callback') {
+          const code = reqUrl.searchParams.get('code')
+          const errorParam =
+            reqUrl.searchParams.get('error_description') || reqUrl.searchParams.get('error')
+
+          if (errorParam) {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+            res.end(renderOAuthHtml('Sign in canceled', errorParam, true))
+            finishOAuthFlow(sessionId, { ok: false, error: errorParam })
+            return
+          }
+
+          if (code) {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+            res.end(
+              renderOAuthHtml(
+                'Signed in to DualAI',
+                'Authentication complete. You can close this tab and return to DualAI.'
+              )
+            )
+            finishOAuthFlow(sessionId, { ok: true, code })
+            return
+          }
+
+          // Fallback for implicit hash-fragment callbacks (#access_token=...)
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+          res.end(renderOAuthHashRelayHtml())
+          return
+        }
+
+        if (req.method === 'POST' && reqUrl.pathname === '/auth/callback/hash') {
+          let body = ''
+          req.on('data', (chunk) => {
+            body += String(chunk)
+            if (body.length > 16384) req.destroy()
+          })
+          req.on('end', () => {
+            const params = new URLSearchParams(body)
+            const accessToken = params.get('access_token') || undefined
+            const refreshToken = params.get('refresh_token') || undefined
+            const errorParam =
+              params.get('error_description') || params.get('error') || undefined
+
+            if (errorParam) {
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ ok: false, error: errorParam }))
+              finishOAuthFlow(sessionId, { ok: false, error: errorParam })
+              return
+            }
+
+            if (accessToken) {
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ ok: true }))
+              finishOAuthFlow(sessionId, { ok: true, accessToken, refreshToken })
+              return
+            }
+
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'Missing authentication credentials.' }))
+            finishOAuthFlow(sessionId, {
+              ok: false,
+              error: 'No authentication token was returned by the provider.'
+            })
+          })
+          return
+        }
+
+        res.writeHead(404)
+        res.end('Not Found')
+      })
+
+      server.on('error', (err) => {
+        reject(err)
+      })
+
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address()
+        if (!address || typeof address === 'string') {
+          server.close()
+          reject(new Error('Failed to bind local OAuth callback port.'))
+          return
+        }
+        const redirectUrl = `http://127.0.0.1:${address.port}/auth/callback`
+        pendingOAuthFlows.set(sessionId, {
+          server,
+          redirectUrl,
+          settled: false
+        })
+        resolve({ sessionId, redirectUrl })
+      })
+    })
+  })
+
+  ipcMain.handle(
+    IPC_CHANNELS.AUTH_OAUTH_LAUNCH_AND_WAIT,
+    async (_event, sessionId: string, rawAuthUrl: string): Promise<OAuthCallbackResult> => {
+      const flow = pendingOAuthFlows.get(sessionId)
+      if (!flow) {
+        return { ok: false, error: 'OAuth session expired. Please try again.' }
+      }
+
+      try {
+        const parsed = new URL(String(rawAuthUrl))
+        if (parsed.protocol !== 'https:') {
+          finishOAuthFlow(sessionId, { ok: false, error: 'Invalid OAuth URL protocol.' })
+          return { ok: false, error: 'Invalid OAuth URL protocol.' }
+        }
+
+        const waitPromise = new Promise<OAuthCallbackResult>((resolve) => {
+          flow.resolveCallback = resolve
+          flow.timeout = setTimeout(() => {
+            finishOAuthFlow(sessionId, {
+              ok: false,
+              error: 'Sign-in timed out. Please try again.'
+            })
+          }, 180_000)
+        })
+
+        await shell.openExternal(parsed.toString())
+        return await waitPromise
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Unable to launch browser for sign-in.'
+        finishOAuthFlow(sessionId, { ok: false, error: msg })
+        return { ok: false, error: msg }
+      }
+    }
+  )
+
+  ipcMain.handle(IPC_CHANNELS.AUTH_OAUTH_CANCEL, async (_event, sessionId: string): Promise<void> => {
+    finishOAuthFlow(sessionId, { ok: false, error: 'Sign-in canceled.' })
   })
 }
 

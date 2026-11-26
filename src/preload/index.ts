@@ -5,7 +5,9 @@ import {
   ScreenSourceInfo,
   CaptureBounds,
   TranscriptPayload,
-  ShortcutRegistrationReport
+  ShortcutRegistrationReport,
+  OAuthPreparedSession,
+  OAuthCallbackResult
 } from '../types/ipc'
 import { AudioLevelMetric } from '../types/audio'
 import { HudBounds, HudSettings, ShortcutBinding } from '../types/settings'
@@ -72,6 +74,32 @@ const electronBridgeApi: ElectronBridgeApi = {
   },
   clearEncryptedSession: async (): Promise<boolean> => {
     return ipcRenderer.invoke(IPC_CHANNELS.AUTH_CLEAR_SESSION)
+  },
+
+  // Native Desktop OAuth (Google / Apple via RFC 8252 Loopback)
+  prepareOAuthCallback: async (): Promise<OAuthPreparedSession> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AUTH_OAUTH_PREPARE)
+  },
+  launchOAuthAndWait: async (
+    sessionId: string,
+    authUrl: string
+  ): Promise<OAuthCallbackResult> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AUTH_OAUTH_LAUNCH_AND_WAIT, sessionId, authUrl)
+  },
+  cancelOAuthCallback: async (sessionId: string): Promise<void> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AUTH_OAUTH_CANCEL, sessionId)
+  },
+
+  // In-app Paddle checkout window
+  openCheckoutWindow: async (url: string): Promise<boolean> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.CHECKOUT_OPEN, url)
+  },
+  onCheckoutClosed: (callback: (completed: boolean) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, completed: boolean): void => callback(completed)
+    ipcRenderer.on(IPC_CHANNELS.CHECKOUT_CLOSED, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.CHECKOUT_CLOSED, handler)
+    }
   },
 
   // Event Listeners (Main -> Renderer)

@@ -46,6 +46,15 @@ export interface AccountQuota {
   maxConcurrentSessions: number
 }
 
+export interface AccountSubscriptionSummary {
+  subscriptionId: string
+  planId: PlanId
+  status: 'active' | 'trialing' | 'past_due' | 'paused' | 'canceled'
+  scheduledChangeAction: 'cancel' | 'pause' | 'resume' | null
+  scheduledChangeAt: string | null
+  nextBilledAt: string | null
+}
+
 export interface AuthenticatedSession {
   accessToken: string
   refreshToken?: string

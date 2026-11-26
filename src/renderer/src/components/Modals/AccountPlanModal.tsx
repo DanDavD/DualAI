@@ -16,13 +16,42 @@ import {
   ExternalLink,
   ArrowRight,
   Sparkles,
-  User,
-  CreditCard
+  CreditCard,
+  Mail,
+  Lock,
+  Eye,
+  EyeOff
 } from 'lucide-react'
 import { CheckoutProvider, CheckoutSessionResult, PlanId } from '../../../../types/account'
 import { useSession } from '../../context/SessionContext'
-import { isSupabaseAuthEnabled, requestCustomerPortalSession } from '../../services/gatewayAuthService'
+import {
+  cancelActiveOAuthSignIn,
+  isSupabaseAuthEnabled,
+  OAuthProvider,
+  requestCustomerPortalSession
+} from '../../services/gatewayAuthService'
 import { GlassSegmentedControl } from '../UI/GlassSegmentedControl'
+
+const GoogleGlyph: React.FC<{ className?: string }> = ({ className = 'h-4 w-4' }) => (
+  <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
+    <path
+      fill="#4285F4"
+      d="M23.745 12.27c0-.79-.07-1.54-.19-2.27h-11.3v4.51h6.47c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.56-5.17 3.56-8.82z"
+    />
+    <path
+      fill="#34A853"
+      d="M12.255 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-3c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96h-3.98v3.09C3.515 21.3 7.565 24 12.255 24z"
+    />
+    <path
+      fill="#FBBC05"
+      d="M5.525 14.29c-.25-.72-.38-1.49-.38-2.29s.14-1.57.38-2.29V6.62h-3.98a11.86 11.86 0 0 0 0 10.76l3.98-3.09z"
+    />
+    <path
+      fill="#EA4335"
+      d="M12.255 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C18.205 1.19 15.495 0 12.255 0c-4.69 0-8.74 2.7-10.71 6.62l3.98 3.09c.95-2.85 3.6-4.96 6.73-4.96z"
+    />
+  </svg>
+)
 
 type AccountAuthView = 'signin' | 'signup' | 'reset'
 type ModalSection = 'account' | 'plans'
@@ -41,13 +70,17 @@ export const AccountPlanModal: React.FC = () => {
     closeAccountModal,
     authSession,
     accountQuota,
+    accountSubscription,
     availablePlans,
     isQuotaExhausted,
     signInAccount,
+    signInWithOAuthAccount,
     signOutAccount,
     requestPasswordResetAccount,
     resendVerificationEmailAccount,
     refreshAccountQuota,
+    cancelSubscriptionAccount,
+    undoCancelSubscriptionAccount,
     startPlanCheckout,
     verifyMsStoreReceipt
   } = useSession()
@@ -56,7 +89,9 @@ export const AccountPlanModal: React.FC = () => {
   const [authMode, setAuthMode] = useState<AccountAuthView>('signin')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [oauthLoading, setOauthLoading] = useState<OAuthProvider | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [statusNotice, setStatusNotice] = useState<string | null>(null)
   const [pendingVerificationEmail, setPendingVerificationEmail] = useState<string | null>(null)
@@ -68,6 +103,8 @@ export const AccountPlanModal: React.FC = () => {
   const [msStoreIdKey, setMsStoreIdKey] = useState('')
   const [isVerifyingStoreReceipt, setIsVerifyingStoreReceipt] = useState(false)
   const [isOpeningPortal, setIsOpeningPortal] = useState(false)
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false)
+  const [isUpdatingSubscription, setIsUpdatingSubscription] = useState(false)
   const [paddleInstance, setPaddleInstance] = useState<Paddle | null>(null)
 
   useEffect(() => {
@@ -93,15 +130,30 @@ export const AccountPlanModal: React.FC = () => {
       })
   }, [refreshAccountQuota])
 
+  useEffect(() => {
+    if (!window.electronAPI?.onCheckoutClosed) return
+    return window.electronAPI.onCheckoutClosed((completed) => {
+      void refreshAccountQuota()
+      setCheckoutNotice(
+        completed
+          ? 'Payment completed. Your hours are being activated.'
+          : 'Payment window closed.'
+      )
+    })
+  }, [refreshAccountQuota])
+
   if (!isAccountModalOpen) return null
 
   const supabaseEnabled = isSupabaseAuthEnabled()
-  const remainingSec = accountQuota?.remainingSeconds ?? 3600
-  const allocatedSec = Math.max(1, accountQuota?.totalAllocatedSeconds ?? 3600)
+  const isHydratingQuota = Boolean(authSession && !accountQuota)
+  const remainingSec = accountQuota?.remainingSeconds ?? 0
+  const allocatedSec = Math.max(1, accountQuota?.totalAllocatedSeconds ?? 1)
   const remainingMinutes = Math.floor(remainingSec / 60)
   const remainingHours = Math.floor(remainingMinutes / 60)
   const modMinutes = remainingMinutes % 60
-  const remainingPct = Math.min(100, Math.max(0, Math.round((remainingSec / allocatedSec) * 100)))
+  const remainingPct = isHydratingQuota
+    ? 0
+    : Math.min(100, Math.max(0, Math.round((remainingSec / allocatedSec) * 100)))
   const isUnverifiedSession = Boolean(authSession && authSession.user.emailVerified === false)
   const initials = getInitials(authSession?.user?.email)
 
@@ -109,6 +161,33 @@ export const AccountPlanModal: React.FC = () => {
     setAuthMode(nextMode)
     setErrorMessage(null)
     setStatusNotice(null)
+  }
+
+  const handleCloseModal = () => {
+    if (oauthLoading) {
+      void cancelActiveOAuthSignIn()
+      setOauthLoading(null)
+    }
+    closeAccountModal()
+  }
+
+  const handleOAuthSignIn = async (provider: OAuthProvider) => {
+    setErrorMessage(null)
+    setStatusNotice(null)
+    setOauthLoading(provider)
+    try {
+      const outcome = await signInWithOAuthAccount(provider)
+      if (outcome.emailVerificationRequired && outcome.message) {
+        setStatusNotice(outcome.message)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to complete sign-in.'
+      if (!/canceled|superseded/i.test(msg)) {
+        setErrorMessage(msg)
+      }
+    } finally {
+      setOauthLoading(null)
+    }
   }
 
   const handleSubmitAuth = async (e: React.FormEvent) => {
@@ -186,9 +265,14 @@ export const AccountPlanModal: React.FC = () => {
         }
         setCheckoutNotice(`Complete your purchase for ${planName} in Microsoft Store, then verify below.`)
       } else if (result.checkoutUrl) {
-        // Open the Paddle official hosted checkout in external browser (avoids iframe domain block in Electron)
-        window.open(result.checkoutUrl, '_blank')
-        setCheckoutNotice(`Payment window opened in your browser for ${planName}. Click Refresh once finished.`)
+        // Open Paddle checkout in an in-app modal window (never leaves the app)
+        const opened = window.electronAPI?.openCheckoutWindow
+          ? await window.electronAPI.openCheckoutWindow(result.checkoutUrl)
+          : false
+        if (!opened) {
+          window.open(result.checkoutUrl, '_blank')
+        }
+        setCheckoutNotice(`Secure payment window opened for ${planName}.`)
       } else if (checkoutProvider === 'paddle' && paddleInstance && result.paddlePriceId) {
         paddleInstance.Checkout.open({
           settings: {
@@ -268,6 +352,59 @@ export const AccountPlanModal: React.FC = () => {
     }
   }
 
+  const handleConfirmCancelSubscription = async () => {
+    setErrorMessage(null)
+    setStatusNotice(null)
+    setIsUpdatingSubscription(true)
+    try {
+      const res = await cancelSubscriptionAccount()
+      if (res.ok) {
+        setShowCancelConfirm(false)
+        setStatusNotice(
+          'Subscription scheduled to cancel at the end of your billing period. You keep access and remaining hours until then.'
+        )
+      } else {
+        setErrorMessage(res.error || 'Could not cancel subscription right now.')
+      }
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Could not cancel subscription.')
+    } finally {
+      setIsUpdatingSubscription(false)
+    }
+  }
+
+  const handleUndoCancelSubscription = async () => {
+    setErrorMessage(null)
+    setStatusNotice(null)
+    setIsUpdatingSubscription(true)
+    try {
+      const res = await undoCancelSubscriptionAccount()
+      if (res.ok) {
+        setStatusNotice('Cancellation undone. Your subscription will continue as normal.')
+      } else {
+        setErrorMessage(res.error || 'Could not keep subscription right now.')
+      }
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Could not keep subscription.')
+    } finally {
+      setIsUpdatingSubscription(false)
+    }
+  }
+
+  const formatShortDate = (iso?: string | null): string => {
+    if (!iso) return 'end of period'
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return 'end of period'
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+  }
+
+  const hasActiveSubscription = Boolean(
+    accountSubscription && accountSubscription.status !== 'canceled'
+  )
+  const isScheduledToCancel = Boolean(
+    hasActiveSubscription && accountSubscription?.scheduledChangeAction === 'cancel'
+  )
+
   const isPlansView = section === 'plans'
 
   return (
@@ -301,7 +438,7 @@ export const AccountPlanModal: React.FC = () => {
 
           <button
             type="button"
-            onClick={closeAccountModal}
+            onClick={handleCloseModal}
             aria-label="Close Account Modal"
             className="glass-control-hover flex h-7 w-7 items-center justify-center rounded-full bg-white/[0.07] text-white/60 hover:text-white"
           >
@@ -355,15 +492,12 @@ export const AccountPlanModal: React.FC = () => {
            * ================================================================ */}
           {!isPlansView ? (
             !authSession ? (
-              <div className="space-y-6 py-1">
-                {/* Centered Welcome Title */}
-                <div className="text-center space-y-1.5">
-                  <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.08] border border-white/[0.12] shadow-[inset_0_1px_0_rgba(255,255,255,0.2)]">
-                    <User className="h-5 w-5 text-white" strokeWidth={1.75} />
-                  </div>
-                  <h2 className="pt-1 text-lg font-semibold tracking-tight text-white">
+              <div className="space-y-5 py-1">
+                {/* Clean Editorial Heading (Zero Logo Clutter) */}
+                <div className="text-center space-y-1">
+                  <h2 className="text-[20px] font-semibold tracking-tight text-white">
                     {authMode === 'signup'
-                      ? 'Create your DualAI account'
+                      ? 'Create your account'
                       : authMode === 'reset'
                         ? 'Reset your password'
                         : 'Sign in to DualAI'}
@@ -377,54 +511,128 @@ export const AccountPlanModal: React.FC = () => {
                   </p>
                 </div>
 
-                {/* Auth Mode Switcher */}
+                {/* Top Liquid Glass Sign In / Sign Up Switcher */}
                 {authMode !== 'reset' && (
-                  <div className="flex justify-center">
-                    <GlassSegmentedControl<'signin' | 'signup'>
-                      ariaLabel="Sign in or create account"
-                      value={authMode}
-                      onChange={switchAuthView}
-                      size="md"
-                      fullWidth
-                      options={[
-                        { id: 'signin', label: 'Sign In' },
-                        { id: 'signup', label: 'Create Account (1h Free)' }
-                      ]}
-                    />
+                  <GlassSegmentedControl<'signin' | 'signup'>
+                    ariaLabel="Sign in or sign up"
+                    value={authMode}
+                    onChange={switchAuthView}
+                    size="md"
+                    fullWidth
+                    options={[
+                      { id: 'signin', label: 'Sign In' },
+                      { id: 'signup', label: 'Sign Up' }
+                    ]}
+                  />
+                )}
+
+                {/* Native Google OAuth Provider */}
+                {authMode !== 'reset' && (
+                  <div className="space-y-2.5">
+                    <button
+                      type="button"
+                      disabled={isSubmitting || Boolean(oauthLoading)}
+                      onClick={() => void handleOAuthSignIn('google')}
+                      className="glass-control-hover flex h-11 w-full items-center justify-center space-x-2.5 rounded-full border border-white/[0.12] bg-white/[0.06] text-[13px] font-medium tracking-tight text-white/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)] hover:border-white/[0.18] hover:bg-white/[0.1] disabled:opacity-55"
+                    >
+                      <GoogleGlyph className="h-4 w-4 shrink-0" />
+                      <span>
+                        {oauthLoading === 'google'
+                          ? 'Continue in browser...'
+                          : authMode === 'signup'
+                            ? 'Sign up with Google'
+                            : 'Sign in with Google'}
+                      </span>
+                    </button>
+
+                    {oauthLoading && (
+                      <div className="flex items-center justify-center pt-0.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void cancelActiveOAuthSignIn()
+                            setOauthLoading(null)
+                          }}
+                          className="text-[11px] font-medium text-white/45 hover:text-white transition"
+                        >
+                          Cancel browser sign-in
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Hairline Separator */}
+                    <div className="flex items-center gap-3 pt-1.5">
+                      <div className="h-px flex-1 bg-white/[0.08]" />
+                      <span className="text-[11px] font-medium text-white/40">or</span>
+                      <div className="h-px flex-1 bg-white/[0.08]" />
+                    </div>
                   </div>
                 )}
 
-                <form onSubmit={(e) => void handleSubmitAuth(e)} className="space-y-4">
-                  <div className="space-y-3">
-                    <label className="block space-y-1.5">
-                      <span className="text-[11px] font-medium text-white/65 pl-1">Email</span>
+                {/* Email & Password Form */}
+                <form onSubmit={(e) => void handleSubmitAuth(e)} className="space-y-3">
+                  <div className="space-y-2.5">
+                    <div className="relative">
+                      <Mail
+                        className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-white/40"
+                        strokeWidth={1.75}
+                      />
                       <input
                         type="email"
                         required
+                        autoComplete="email"
+                        aria-label="Email"
                         value={email}
                         onChange={(e) => setEmail(e.target.value)}
-                        placeholder="you@example.com"
-                        className="h-10 w-full rounded-2xl border border-white/[0.1] bg-white/[0.06] px-3.5 text-sm text-white placeholder:text-white/30 outline-none focus:border-accent-steel/80 focus:bg-white/[0.09] transition"
+                        placeholder="Email"
+                        className="h-11 w-full rounded-2xl border border-white/[0.1] bg-white/[0.055] pl-10 pr-3.5 text-sm text-white placeholder:text-white/35 outline-none focus:border-accent-steel/80 focus:bg-white/[0.09] transition"
                       />
-                    </label>
+                    </div>
 
                     {authMode !== 'reset' && (
-                      <label className="block space-y-1.5">
-                        <span className="text-[11px] font-medium text-white/65 pl-1">
-                          Password
-                        </span>
+                      <div className="relative">
+                        <Lock
+                          className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-white/40"
+                          strokeWidth={1.75}
+                        />
                         <input
-                          type="password"
+                          type={showPassword ? 'text' : 'password'}
                           required={supabaseEnabled}
+                          autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'}
+                          aria-label="Password"
                           minLength={supabaseEnabled ? 8 : undefined}
                           value={password}
                           onChange={(e) => setPassword(e.target.value)}
-                          placeholder="Minimum 8 characters"
-                          className="h-10 w-full rounded-2xl border border-white/[0.1] bg-white/[0.06] px-3.5 text-sm text-white placeholder:text-white/30 outline-none focus:border-accent-steel/80 focus:bg-white/[0.09] transition"
+                          placeholder={authMode === 'signup' ? 'Password (min. 8 characters)' : 'Password'}
+                          className="h-11 w-full rounded-2xl border border-white/[0.1] bg-white/[0.055] pl-10 pr-10 text-sm text-white placeholder:text-white/35 outline-none focus:border-accent-steel/80 focus:bg-white/[0.09] transition"
                         />
-                      </label>
+                        <button
+                          type="button"
+                          onClick={() => setShowPassword((prev) => !prev)}
+                          aria-label={showPassword ? 'Hide password' : 'Show password'}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-full text-white/40 hover:bg-white/[0.08] hover:text-white/80 transition"
+                        >
+                          {showPassword ? (
+                            <EyeOff className="h-4 w-4" strokeWidth={1.75} />
+                          ) : (
+                            <Eye className="h-4 w-4" strokeWidth={1.75} />
+                          )}
+                        </button>
+                      </div>
                     )}
                   </div>
+
+                  {authMode === 'signin' && (
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => switchAuthView('reset')}
+                        className="text-[11px] font-medium text-white/50 hover:text-white transition"
+                      >
+                        Forgot password?
+                      </button>
+                    </div>
+                  )}
 
                   {statusNotice && (
                     <div
@@ -456,8 +664,8 @@ export const AccountPlanModal: React.FC = () => {
 
                   <button
                     type="submit"
-                    disabled={isSubmitting}
-                    className="glass-cta-start h-10 w-full rounded-full text-sm font-semibold disabled:opacity-50"
+                    disabled={isSubmitting || Boolean(oauthLoading)}
+                    className="glass-cta-start h-11 w-full rounded-full text-sm font-semibold disabled:opacity-45"
                   >
                     {isSubmitting
                       ? 'Please wait...'
@@ -469,17 +677,9 @@ export const AccountPlanModal: React.FC = () => {
                   </button>
                 </form>
 
-                {/* Subtle Bottom Links */}
-                <div className="flex items-center justify-between border-t border-white/[0.07] pt-4 text-xs">
-                  {authMode === 'signin' ? (
-                    <button
-                      type="button"
-                      onClick={() => switchAuthView('reset')}
-                      className="text-white/50 hover:text-white transition"
-                    >
-                      Forgot password?
-                    </button>
-                  ) : (
+                {/* Subtle Bottom Navigation */}
+                <div className="flex items-center justify-between border-t border-white/[0.07] pt-3.5 text-xs">
+                  {authMode === 'reset' ? (
                     <button
                       type="button"
                       onClick={() => switchAuthView('signin')}
@@ -487,6 +687,10 @@ export const AccountPlanModal: React.FC = () => {
                     >
                       Back to Sign In
                     </button>
+                  ) : (
+                    <span className="text-[11px] text-white/40">
+                      {authMode === 'signup' ? '1-hour free trial included' : 'Zero-data retention'}
+                    </span>
                   )}
 
                   <button
@@ -508,22 +712,70 @@ export const AccountPlanModal: React.FC = () => {
                   </div>
                   <div>
                     <p className="text-sm font-semibold text-white">{authSession.user.email}</p>
-                    <p className="mt-0.5 text-xs text-white/50">
-                      Current plan:{' '}
-                      <span className="font-medium text-white/85">
-                        {availablePlans.find((p) => p.id === accountQuota?.planId)?.name ||
-                          'Free Trial (1 Hour)'}
+                    <div className="mt-1 flex items-center justify-center gap-2 text-xs text-white/50">
+                      <span>
+                        Plan:{' '}
+                        <span className="font-medium text-white/85">
+                          {isHydratingQuota
+                            ? 'Syncing...'
+                            : availablePlans.find((p) => p.id === accountQuota?.planId)?.name ||
+                              'Free Trial (1 Hour)'}
+                        </span>
                       </span>
-                    </p>
+                      {hasActiveSubscription && (
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                            isScheduledToCancel
+                              ? 'bg-accent-amber/18 text-accent-amber border border-accent-amber/35'
+                              : accountSubscription?.status === 'past_due'
+                                ? 'bg-accent-crimson/18 text-accent-crimson border border-accent-crimson/35'
+                                : 'bg-accent-emerald/18 text-accent-emerald border border-accent-emerald/35'
+                          }`}
+                        >
+                          {isScheduledToCancel
+                            ? `Cancels ${formatShortDate(accountSubscription?.scheduledChangeAt)}`
+                            : accountSubscription?.status === 'past_due'
+                              ? 'Past Due'
+                              : 'Active'}
+                        </span>
+                      )}
+                      {accountSubscription?.status === 'canceled' && (
+                        <span className="rounded-full bg-white/[0.08] px-2 py-0.5 text-[10px] font-medium text-white/55">
+                          Canceled
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
+
+                {/* Scheduled Cancellation Banner with One-Click Undo */}
+                {isScheduledToCancel && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-accent-amber/35 bg-accent-amber/10 px-3.5 py-2.5 text-xs text-accent-amber">
+                    <span>
+                      Ends on {formatShortDate(accountSubscription?.scheduledChangeAt)}. Your hours
+                      remain available until then.
+                    </span>
+                    <button
+                      type="button"
+                      disabled={isUpdatingSubscription}
+                      onClick={() => void handleUndoCancelSubscription()}
+                      className="glass-control-hover shrink-0 rounded-full border border-accent-amber/45 bg-white/[0.1] px-3 py-1 text-[11px] font-semibold text-white disabled:opacity-50"
+                    >
+                      {isUpdatingSubscription ? 'Saving...' : 'Keep Subscription'}
+                    </button>
+                  </div>
+                )}
 
                 {/* Clean Remaining Time Card */}
                 <div className="glass-grouped-card rounded-2xl p-4 space-y-2.5">
                   <div className="flex items-baseline justify-between">
                     <span className="text-xs text-white/55">Time remaining</span>
                     <span className="text-base font-semibold tabular-nums text-white">
-                      {remainingHours > 0 ? `${remainingHours}h ${modMinutes}m` : `${modMinutes}m`}
+                      {isHydratingQuota
+                        ? '--'
+                        : remainingHours > 0
+                          ? `${remainingHours}h ${modMinutes}m`
+                          : `${modMinutes}m`}
                     </span>
                   </div>
                   <div className="h-2 w-full overflow-hidden rounded-full bg-white/[0.1]">
@@ -547,6 +799,15 @@ export const AccountPlanModal: React.FC = () => {
                   </div>
                 </div>
 
+                {statusNotice && (
+                  <p
+                    role="status"
+                    className="rounded-2xl border border-accent-emerald/40 bg-accent-emerald/12 px-3.5 py-2.5 text-xs text-accent-emerald"
+                  >
+                    {statusNotice}
+                  </p>
+                )}
+
                 {errorMessage && (
                   <p
                     role="alert"
@@ -554,6 +815,37 @@ export const AccountPlanModal: React.FC = () => {
                   >
                     {errorMessage}
                   </p>
+                )}
+
+                {/* Inline Liquid Glass Cancel Confirmation Card */}
+                {showCancelConfirm && hasActiveSubscription && !isScheduledToCancel && (
+                  <div className="glass-grouped-card animate-glass-pop rounded-2xl border border-accent-crimson/35 p-3.5 space-y-3 text-xs">
+                    <div className="space-y-1">
+                      <p className="font-semibold text-white">Cancel subscription?</p>
+                      <p className="text-[11px] leading-relaxed text-white/60">
+                        Your plan stays active until the end of your current billing period and you
+                        keep all remaining hours. You will not be billed again.
+                      </p>
+                    </div>
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        disabled={isUpdatingSubscription}
+                        onClick={() => setShowCancelConfirm(false)}
+                        className="glass-control-hover rounded-full border border-white/[0.1] bg-white/[0.06] px-3.5 py-1.5 text-[11px] font-medium text-white/80 hover:text-white"
+                      >
+                        Keep Plan
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isUpdatingSubscription}
+                        onClick={() => void handleConfirmCancelSubscription()}
+                        className="glass-cta-stop rounded-full px-3.5 py-1.5 text-[11px] font-semibold disabled:opacity-50"
+                      >
+                        {isUpdatingSubscription ? 'Canceling...' : 'Confirm Cancellation'}
+                      </button>
+                    </div>
+                  </div>
                 )}
 
                 <div className="space-y-2.5">
@@ -575,6 +867,20 @@ export const AccountPlanModal: React.FC = () => {
                     <CreditCard className="h-3.5 w-3.5" />
                     <span>{isOpeningPortal ? 'Opening Portal...' : 'Manage Billing & Invoices'}</span>
                   </button>
+
+                  {hasActiveSubscription && !isScheduledToCancel && !showCancelConfirm && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setErrorMessage(null)
+                        setStatusNotice(null)
+                        setShowCancelConfirm(true)
+                      }}
+                      className="glass-control-hover flex h-9 w-full items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.03] text-xs font-medium text-white/55 hover:border-accent-crimson/35 hover:text-accent-crimson"
+                    >
+                      Cancel Subscription
+                    </button>
+                  )}
 
                   <button
                     type="button"
@@ -701,6 +1007,12 @@ export const AccountPlanModal: React.FC = () => {
                           <div className="flex h-9 w-full items-center justify-center rounded-full border border-white/[0.09] bg-white/[0.04] text-[11px] font-medium text-white/50">
                             {isCurrent ? 'Active Plan' : 'Included Free'}
                           </div>
+                        ) : hasActiveSubscription &&
+                          !isScheduledToCancel &&
+                          accountSubscription?.planId === plan.id ? (
+                          <div className="flex h-9 w-full items-center justify-center rounded-full border border-accent-emerald/35 bg-accent-emerald/12 text-[11px] font-semibold text-accent-emerald">
+                            Current Plan
+                          </div>
                         ) : (
                           <button
                             type="button"
@@ -712,7 +1024,7 @@ export const AccountPlanModal: React.FC = () => {
                                 : 'glass-control-hover border border-white/[0.14] bg-white/[0.1] text-white hover:bg-white/[0.18]'
                             }`}
                           >
-                            <span>{isCurrent ? 'Add Hours' : `Choose ${cleanName}`}</span>
+                            <span>{`Choose ${cleanName}`}</span>
                             {checkoutProvider !== 'microsoft_store' && (
                               <ExternalLink className="h-3 w-3 opacity-70" />
                             )}

@@ -30,6 +30,7 @@ import {
 } from '../../../types/settings'
 import {
   AccountQuota,
+  AccountSubscriptionSummary,
   AuthenticatedSession,
   BillingPlan,
   CheckoutProvider,
@@ -65,6 +66,7 @@ import {
   sanitizeWorkspaceDisplaySettings
 } from '../utils/typographyPreferences'
 import {
+  cancelUserSubscription,
   clearEncryptedSession,
   computeSilentRefreshDelayMs,
   createBillingCheckoutSession,
@@ -76,6 +78,9 @@ import {
   resendVerificationEmail,
   revokeServerSession,
   signInWithEmailPassword,
+  signInWithOAuthProvider,
+  OAuthProvider,
+  undoCancelUserSubscription,
   verifyMicrosoftStorePurchase
 } from '../services/gatewayAuthService'
 
@@ -83,6 +88,64 @@ const STORAGE_KEY_HUD = 'dualai_hud_settings'
 const STORAGE_KEY_GLOSSARY = 'dualai_custom_glossary'
 const STORAGE_KEY_SHORTCUTS = 'dualai_shortcut_bindings'
 const STORAGE_KEY_LOOPBACK_DEVICE = 'dualai_loopback_device_id'
+const STORAGE_KEY_ACCOUNT_CACHE = 'dualai_account_display_cache'
+
+interface AccountDisplayCache {
+  userId: string
+  quota: AccountQuota
+  subscription: AccountSubscriptionSummary | null
+  cachedAtMs: number
+}
+
+function readAccountDisplayCache(userId: string): AccountDisplayCache | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_ACCOUNT_CACHE)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<AccountDisplayCache>
+    if (
+      parsed.userId !== userId ||
+      !parsed.quota ||
+      typeof parsed.quota.remainingSeconds !== 'number' ||
+      typeof parsed.quota.totalAllocatedSeconds !== 'number'
+    ) {
+      return null
+    }
+    return {
+      userId: parsed.userId,
+      quota: parsed.quota,
+      subscription: parsed.subscription ?? null,
+      cachedAtMs: typeof parsed.cachedAtMs === 'number' ? parsed.cachedAtMs : Date.now()
+    }
+  } catch {
+    return null
+  }
+}
+
+function writeAccountDisplayCache(
+  userId: string,
+  quota: AccountQuota,
+  subscription: AccountSubscriptionSummary | null
+): void {
+  try {
+    const payload: AccountDisplayCache = {
+      userId,
+      quota,
+      subscription,
+      cachedAtMs: Date.now()
+    }
+    localStorage.setItem(STORAGE_KEY_ACCOUNT_CACHE, JSON.stringify(payload))
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function clearAccountDisplayCache(): void {
+  try {
+    localStorage.removeItem(STORAGE_KEY_ACCOUNT_CACHE)
+  } catch {
+    // Ignore storage errors
+  }
+}
 
 function loadJsonStorage<T>(key: string, fallback: T): T {
   try {
@@ -176,6 +239,7 @@ export interface SessionState {
   // Zero-Trust SaaS Authentication, Quota & Billing State
   authSession: AuthenticatedSession | null
   accountQuota: AccountQuota | null
+  accountSubscription: AccountSubscriptionSummary | null
   availablePlans: BillingPlan[]
   isAccountModalOpen: boolean
   isGatewayAuthenticated: boolean
@@ -245,10 +309,15 @@ export interface SessionState {
     password: string,
     mode: 'signin' | 'signup'
   ) => Promise<{ emailVerificationRequired: boolean; message?: string }>
+  signInWithOAuthAccount: (
+    provider: OAuthProvider
+  ) => Promise<{ emailVerificationRequired: boolean; message?: string }>
   signOutAccount: () => Promise<void>
   requestPasswordResetAccount: (email: string) => Promise<string>
   resendVerificationEmailAccount: (email: string) => Promise<string>
   refreshAccountQuota: () => Promise<void>
+  cancelSubscriptionAccount: () => Promise<{ ok: boolean; error?: string }>
+  undoCancelSubscriptionAccount: () => Promise<{ ok: boolean; error?: string }>
   startPlanCheckout: (
     planId: PlanId,
     provider: CheckoutProvider
@@ -281,6 +350,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   // Zero-Trust SaaS Account & Authoritative Quota State
   const [authSession, setAuthSession] = useState<AuthenticatedSession | null>(null)
   const [accountQuota, setAccountQuota] = useState<AccountQuota | null>(null)
+  const [accountSubscription, setAccountSubscription] =
+    useState<AccountSubscriptionSummary | null>(null)
   const [availablePlans, setAvailablePlans] = useState<BillingPlan[]>(DEFAULT_SAAS_PLANS)
 
   const quotaTotalHours = accountQuota ? accountQuota.totalAllocatedSeconds / 3600 : 1.0
@@ -1569,16 +1640,24 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     void (async () => {
       const saved = await loadEncryptedSession()
       if (!active || !saved) return
+      // Hydrate last-known non-sensitive display quota immediately in the same render batch (zero 1h flash)
+      const cached = readAccountDisplayCache(saved.user.userId)
       setAuthSession(saved)
+      if (cached) {
+        setAccountQuota(cached.quota)
+        setAccountSubscription(cached.subscription)
+      }
       sttManagerRef.current?.setAccessToken(saved.accessToken)
       translationManagerRef.current?.setAccessToken(saved.accessToken)
-      setSttProvider('deepgram-nova-2')
-      setTranslationProvider('gemini-2.0-flash')
+      setSttProvider('soniox-unified')
+      setTranslationProvider('soniox-unified')
       try {
         const snapshot = await fetchAuthoritativeQuota(saved.accessToken)
         if (!active) return
         setAccountQuota(snapshot.quota)
+        setAccountSubscription(snapshot.subscription)
         setAvailablePlans(snapshot.plans)
+        writeAccountDisplayCache(saved.user.userId, snapshot.quota, snapshot.subscription)
       } catch {
         // Gateway may be offline during local cold start; keep cached encrypted session
       }
@@ -1587,6 +1666,13 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       active = false
     }
   }, [])
+
+  // Keep display-only quota/subscription cache synced (including live session metering)
+  useEffect(() => {
+    if (authSession?.user?.userId && accountQuota) {
+      writeAccountDisplayCache(authSession.user.userId, accountQuota, accountSubscription)
+    }
+  }, [authSession?.user?.userId, accountQuota, accountSubscription])
 
   // Automatic Silent JWT Refresh loop preventing mid-session disconnects during 2-hour+ live calls
   useEffect(() => {
@@ -1625,7 +1711,35 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
       setAuthSession(result.session)
       setAccountQuota(result.quota)
+      setAccountSubscription(result.subscription)
       setAvailablePlans(result.plans)
+      writeAccountDisplayCache(result.session.user.userId, result.quota, result.subscription)
+      sttManagerRef.current?.setAccessToken(result.session.accessToken)
+      translationManagerRef.current?.setAccessToken(result.session.accessToken)
+      setSttProvider('soniox-unified')
+      setTranslationProvider('soniox-unified')
+      setPipelineErrorMessage(null)
+      return { emailVerificationRequired: false }
+    },
+    []
+  )
+
+  const signInWithOAuthAccount = useCallback(
+    async (
+      provider: OAuthProvider
+    ): Promise<{ emailVerificationRequired: boolean; message?: string }> => {
+      const result = await signInWithOAuthProvider(provider)
+      if (result.emailVerificationRequired) {
+        return {
+          emailVerificationRequired: true,
+          message: result.message
+        }
+      }
+      setAuthSession(result.session)
+      setAccountQuota(result.quota)
+      setAccountSubscription(result.subscription)
+      setAvailablePlans(result.plans)
+      writeAccountDisplayCache(result.session.user.userId, result.quota, result.subscription)
       sttManagerRef.current?.setAccessToken(result.session.accessToken)
       translationManagerRef.current?.setAccessToken(result.session.accessToken)
       setSttProvider('soniox-unified')
@@ -1641,8 +1755,10 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     stopAudioEngine()
     await revokeServerSession(tokenToRevoke)
     await clearEncryptedSession()
+    clearAccountDisplayCache()
     setAuthSession(null)
     setAccountQuota(null)
+    setAccountSubscription(null)
     sttManagerRef.current?.setAccessToken(null)
     translationManagerRef.current?.setAccessToken(null)
     setSttProvider('simulated-stt')
@@ -1661,8 +1777,46 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (!authSession?.accessToken) return
     const snapshot = await fetchAuthoritativeQuota(authSession.accessToken)
     setAccountQuota(snapshot.quota)
+    setAccountSubscription(snapshot.subscription)
     setAvailablePlans(snapshot.plans)
+    writeAccountDisplayCache(authSession.user.userId, snapshot.quota, snapshot.subscription)
   }, [authSession])
+
+  const cancelSubscriptionAccount = useCallback(async (): Promise<{
+    ok: boolean
+    error?: string
+  }> => {
+    if (!authSession?.accessToken) {
+      return { ok: false, error: 'Sign in first before managing your subscription.' }
+    }
+    const res = await cancelUserSubscription(authSession.accessToken)
+    if (res.ok) {
+      if (res.subscription) {
+        setAccountSubscription(res.subscription)
+      }
+      await refreshAccountQuota().catch(() => undefined)
+      return { ok: true }
+    }
+    return { ok: false, error: res.error || 'Could not cancel subscription.' }
+  }, [authSession, refreshAccountQuota])
+
+  const undoCancelSubscriptionAccount = useCallback(async (): Promise<{
+    ok: boolean
+    error?: string
+  }> => {
+    if (!authSession?.accessToken) {
+      return { ok: false, error: 'Sign in first before managing your subscription.' }
+    }
+    const res = await undoCancelUserSubscription(authSession.accessToken)
+    if (res.ok) {
+      if (res.subscription) {
+        setAccountSubscription(res.subscription)
+      }
+      await refreshAccountQuota().catch(() => undefined)
+      return { ok: true }
+    }
+    return { ok: false, error: res.error || 'Could not keep subscription.' }
+  }, [authSession, refreshAccountQuota])
 
   const startPlanCheckout = useCallback(
     async (planId: PlanId, provider: CheckoutProvider): Promise<CheckoutSessionResult> => {
@@ -1921,6 +2075,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         shortcutBindings,
         authSession,
         accountQuota,
+        accountSubscription,
         availablePlans,
         isAccountModalOpen,
         isGatewayAuthenticated,
@@ -1970,10 +2125,13 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         updateShortcutBinding,
         resetShortcutBindings,
         signInAccount,
+        signInWithOAuthAccount,
         signOutAccount,
         requestPasswordResetAccount,
         resendVerificationEmailAccount,
         refreshAccountQuota,
+        cancelSubscriptionAccount,
+        undoCancelSubscriptionAccount,
         startPlanCheckout,
         verifyMsStoreReceipt
       }}
