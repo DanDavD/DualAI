@@ -17,6 +17,7 @@ export type SecurityEventName =
   | 'http_origin_rejected'
   | 'tls_downgrade_rejected'
   | 'webhook_signature_failed'
+  | 'webhook_ip_rejected'
   | 'rate_limit_triggered'
 
 export interface StructuredSecurityEvent {

@@ -25,6 +25,8 @@ export interface GatewayConfig {
   billingWebhookSecret: string | null
   paypalCheckoutBaseUrl: string
   paddleCheckoutBaseUrl: string
+  paddleApiKey: string | null
+  paddleEnvironment: 'sandbox' | 'production'
   devLocalAuthSecret: string
   quotaMeterIntervalMs: number
 }
@@ -95,11 +97,22 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
     msStoreTenantId: process.env.MS_STORE_TENANT_ID?.trim() || null,
     msStoreClientId: process.env.MS_STORE_CLIENT_ID?.trim() || null,
     msStoreClientSecret: normalizeSecret(process.env.MS_STORE_CLIENT_SECRET),
-    billingWebhookSecret: normalizeSecret(process.env.BILLING_WEBHOOK_SECRET),
+    billingWebhookSecret: normalizeSecret(
+      process.env.PADDLE_NOTIFICATION_WEBHOOK_SECRET ||
+      process.env.BILLING_WEBHOOK_SECRET ||
+      process.env.PADDLE_WEBHOOK_SECRET
+    ),
     paypalCheckoutBaseUrl:
       process.env.PAYPAL_CHECKOUT_BASE_URL?.trim() || 'https://checkout.dualai.app/paypal',
     paddleCheckoutBaseUrl:
-      process.env.PADDLE_CHECKOUT_BASE_URL?.trim() || 'https://checkout.dualai.app/paddle',
+      process.env.PADDLE_CHECKOUT_BASE_URL?.trim() || 'https://dualai.universalaisync.com/checkout',
+    paddleApiKey: normalizeSecret(process.env.PADDLE_API_KEY),
+    paddleEnvironment:
+      process.env.PADDLE_ENV?.trim() === 'sandbox' ||
+      process.env.NEXT_PUBLIC_PADDLE_ENV?.trim() === 'sandbox' ||
+      process.env.PADDLE_ENVIRONMENT?.trim() === 'sandbox'
+        ? 'sandbox'
+        : 'production',
     devLocalAuthSecret:
       process.env.DEV_LOCAL_AUTH_SECRET?.trim() || 'dualai_local_dev_hmac_secret_ephemeral',
     quotaMeterIntervalMs: Number(process.env.QUOTA_METER_INTERVAL_MS || 5000),

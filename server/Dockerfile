@@ -15,7 +15,8 @@ RUN npm install --no-audit --no-fund --ignore-scripts \
     ws \
     @types/node \
     @types/ws \
-    @google/genai
+    @google/genai \
+    @paddle/paddle-node-sdk
 
 COPY server/tsconfig.json ./server/tsconfig.json
 COPY server/src ./server/src
@@ -36,9 +37,9 @@ ENV PORT=8787
 
 RUN addgroup -S dualai && adduser -S dualai -G dualai
 
-# Install strictly runtime dependencies (ws, @google/genai)
+# Install strictly runtime dependencies (ws, @google/genai, @paddle/paddle-node-sdk)
 RUN npm init -y >/dev/null 2>&1 && \
-    npm install --omit=dev --no-audit --no-fund ws @google/genai && \
+    npm install --omit=dev --no-audit --no-fund ws @google/genai @paddle/paddle-node-sdk && \
     chown -R dualai:dualai /app
 
 COPY --from=builder --chown=dualai:dualai /app/server/dist ./server/dist

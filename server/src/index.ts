@@ -21,8 +21,21 @@ import {
   isDisposableEmailDomain,
   isOriginAllowed
 } from './security/securityLogger.js'
-import { PLAN_CATALOG, QuotaStore, createQuotaStore } from './quota/quotaStore.js'
-import { BillingVerifier, CheckoutProvider } from './billing/billingVerifier.js'
+import {
+  PLAN_CATALOG,
+  PlanId,
+  QuotaStore,
+  createQuotaStore,
+  findPlanByPaddlePriceId,
+  findPlanByPaddleProductId
+} from './quota/quotaStore.js'
+import {
+  BillingVerifier,
+  CheckoutProvider,
+  getPaddleAllowedIps,
+  isIpInPaddleCidrList
+} from './billing/billingVerifier.js'
+import { PaddleFulfillmentService } from './billing/paddleFulfillment.js'
 import { handleSttWebSocketProxy } from './proxy/deepgramWsProxy.js'
 import { handleSonioxWebSocketProxy } from './proxy/sonioxWsProxy.js'
 import { handleGeminiTranslateStream, TranslateProxyPayload } from './proxy/geminiStreamProxy.js'
@@ -37,6 +50,7 @@ export interface RunningGatewayServer {
   wsUrl: string
   authVerifier: AuthVerifier
   quotaStore: QuotaStore
+  paddleFulfillment: PaddleFulfillmentService
   close: () => Promise<void>
 }
 
@@ -118,6 +132,7 @@ export async function createGatewayServer(
   const quotaStore = customQuotaStore || createQuotaStore(config)
   const rateLimiter = customRateLimiter || new GatewayRateLimiter()
   const billingVerifier = new BillingVerifier(config, quotaStore, billingFetchImpl)
+  const paddleFulfillment = new PaddleFulfillmentService(config, quotaStore)
   const securityLogger = new SecurityEventLogger({
     sink: onSecurityEvent,
     silentConsole: config.nodeEnv === 'test' && !onSecurityEvent
@@ -128,7 +143,14 @@ export async function createGatewayServer(
 
     const parsedUrl = new URL(req.url || '/', 'http://localhost')
     const pathname = parsedUrl.pathname
-    const clientIp = req.socket.remoteAddress || 'unknown'
+    const flyClientIp = req.headers['fly-client-ip']
+    const xForwardedFor = req.headers['x-forwarded-for']
+    const rawForwarded = Array.isArray(xForwardedFor) ? xForwardedFor[0] : xForwardedFor
+    const clientIp =
+      (typeof flyClientIp === 'string' && flyClientIp.trim()) ||
+      (typeof rawForwarded === 'string' && rawForwarded.split(',')[0].trim()) ||
+      req.socket.remoteAddress ||
+      'unknown'
     const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin : undefined
 
     // Enforce TLS in production when behind reverse proxy terminating TLS
@@ -269,14 +291,47 @@ export async function createGatewayServer(
       return
     }
 
-    // 3. Cross-Platform Billing Webhook (PayPal / Paddle - verified via HMAC-SHA256)
-    if (req.method === 'POST' && pathname === '/v1/billing/webhook') {
+    // 3. Cross-Platform Billing Webhook (PayPal / Paddle - verified via HMAC-SHA256 & IP Allowlist)
+    if (req.method === 'POST' && (pathname === '/v1/billing/webhook' || pathname === '/api/webhook')) {
       try {
         const raw = await readRawBody(req, MAX_JSON_BODY_BYTES)
+        const rawBodyText = raw.toString('utf-8')
         const sigHeader = req.headers['x-dualai-signature']
         const sig = Array.isArray(sigHeader) ? sigHeader[0] : sigHeader
+        const paddleSigHeader = req.headers['paddle-signature']
+        const paddleSig = Array.isArray(paddleSigHeader) ? paddleSigHeader[0] : paddleSigHeader
+        const userAgent = req.headers['user-agent'] || ''
+        const isPaddleRequest = Boolean(paddleSig) || userAgent.toLowerCase().includes('paddle')
 
-        if (!billingVerifier.verifyWebhookSignature(raw, sig)) {
+        // Case A: Native Paddle Request with Paddle-Signature
+        if (paddleSig) {
+          try {
+            const eventData = await paddleFulfillment.unmarshalWebhook(rawBodyText, paddleSig)
+            if (eventData) {
+              const result = await paddleFulfillment.processVerifiedEvent(eventData)
+              sendJson(res, 200, { received: true, ...result })
+              return
+            }
+          } catch (unmarshalErr) {
+            securityLogger.log({
+              level: 'warn',
+              event: 'webhook_signature_failed',
+              route: pathname,
+              status: 401,
+              actorId: clientIp,
+              reason: unmarshalErr instanceof Error ? unmarshalErr.message : 'Paddle webhook unmarshal failed'
+            })
+            sendJson(res, 401, {
+              code: 'INVALID_WEBHOOK_SIGNATURE',
+              message: 'Cryptographic webhook signature verification failed.'
+            })
+            return
+          }
+        }
+
+        // Case B: Fallback / PayPal / Simulator IP Check / Internal Test Runner
+        const isSigValid = billingVerifier.verifyWebhookSignature(raw, sig, paddleSig)
+        if (!isSigValid) {
           securityLogger.log({
             level: 'warn',
             event: 'webhook_signature_failed',
@@ -292,28 +347,89 @@ export async function createGatewayServer(
           return
         }
 
-        const body = JSON.parse(raw.toString('utf-8')) as {
-          provider?: 'paypal' | 'paddle'
-          transactionId?: string
-          userId?: string
-          planId?: string
+        // 2. Strict IP Allowlist for live unauthenticated requests without Paddle-Signature
+        if (isPaddleRequest && !paddleSig && config.nodeEnv !== 'test') {
+          const allowedIps = await getPaddleAllowedIps()
+          if (!isIpInPaddleCidrList(clientIp, allowedIps)) {
+            securityLogger.log({
+              level: 'warn',
+              event: 'webhook_ip_rejected',
+              route: pathname,
+              status: 403,
+              actorId: clientIp,
+              reason: 'Webhook request IP is not within Paddle official IP range'
+            })
+            sendJson(res, 403, {
+              code: 'UNTRUSTED_WEBHOOK_IP',
+              message: 'Request origin IP does not belong to Paddle IP allowlist.'
+            })
+            return
+          }
+        }
+
+        const rawJson = JSON.parse(rawBodyText) as Record<string, unknown>
+        let provider: 'paypal' | 'paddle' = 'paddle'
+        let transactionId = ''
+        let userId = ''
+        let planId = ''
+
+        // Native Paddle Billing Webhook Format (e.g. transaction.completed, subscription.created)
+        if (rawJson.event_type && typeof rawJson.data === 'object' && rawJson.data !== null) {
+          const data = rawJson.data as Record<string, unknown>
+          const customData = (data.custom_data || {}) as Record<string, unknown>
+          provider = 'paddle'
+          transactionId = String(data.id || rawJson.event_id || '')
+          userId = String(customData.user_id || customData.userId || '')
+
+          const items = Array.isArray(data.items) ? (data.items as Array<Record<string, unknown>>) : []
+          const firstItem = items[0]
+          const priceObj = firstItem?.price as Record<string, unknown> | undefined
+          const priceId = priceObj?.id ? String(priceObj.id) : ''
+          const productId = priceObj?.product_id ? String(priceObj.product_id) : ''
+
+          const matchedPlan =
+            (priceId ? findPlanByPaddlePriceId(priceId) : null) ||
+            (productId ? findPlanByPaddleProductId(productId) : null)
+
+          if (matchedPlan) {
+            planId = matchedPlan.id
+          } else if (customData.plan_id || customData.planId) {
+            planId = String(customData.plan_id || customData.planId)
+          }
+
+          // Handle simulator test events gracefully: return 200 so Paddle simulator verifies immediately
+          if (!userId || !planId) {
+            sendJson(res, 200, {
+              received: true,
+              simulated: true,
+              eventType: rawJson.event_type,
+              message: 'Paddle simulation or test event verified and received successfully.'
+            })
+            return
+          }
+        } else {
+          // Standard / Direct Webhook Format
+          provider = (rawJson.provider as 'paypal' | 'paddle') || 'paddle'
+          transactionId = String(rawJson.transactionId || '')
+          userId = String(rawJson.userId || '')
+          planId = String(rawJson.planId || '')
         }
 
         if (
-          (body.provider !== 'paypal' && body.provider !== 'paddle') ||
-          !body.transactionId ||
-          !body.userId ||
-          !body.planId
+          (provider !== 'paypal' && provider !== 'paddle') ||
+          !transactionId ||
+          !userId ||
+          !planId
         ) {
           sendJson(res, 400, { code: 'INVALID_WEBHOOK_PAYLOAD', message: 'Malformed webhook body.' })
           return
         }
 
         const result = await billingVerifier.processVerifiedWebhook({
-          provider: body.provider,
-          transactionId: body.transactionId,
-          userId: body.userId,
-          planId: body.planId
+          provider,
+          transactionId,
+          userId,
+          planId
         })
         sendJson(res, result.verified ? 200 : 400, result)
       } catch {
@@ -322,8 +438,10 @@ export async function createGatewayServer(
       return
     }
 
-    // 4. All Remaining Routes Require Verified Bearer JWT
-    const token = authVerifier.extractBearerToken(req.headers.authorization)
+    // 4. All Remaining Routes Require Verified Bearer JWT (via header or query param)
+    const queryToken =
+      parsedUrl.searchParams.get('token') || parsedUrl.searchParams.get('access_token')
+    const token = authVerifier.extractBearerToken(req.headers.authorization) || queryToken || ''
     const user = await authVerifier.verifyToken(token)
     if (!user) {
       securityLogger.log({
@@ -473,6 +591,29 @@ export async function createGatewayServer(
           body.provider === 'paddle' || body.provider === 'microsoft_store'
             ? body.provider
             : 'paypal'
+
+        if (provider === 'paddle' && paddleFulfillment.getPaddleClient()) {
+          const paddleTx = await paddleFulfillment.createPaddleCheckoutTransaction(
+            body.planId || '',
+            { userId: user.userId, email: user.email }
+          )
+          if (paddleTx.ok && paddleTx.checkoutUrl) {
+            const plan = PLAN_CATALOG[body.planId as PlanId]
+            sendJson(res, 200, {
+              ok: true,
+              provider: 'paddle',
+              planId: body.planId,
+              planName: plan?.name,
+              monthlyPriceUsd: plan?.monthlyPriceUsd,
+              includedHours: Math.round((plan?.includedSeconds || 3600) / 3600),
+              checkoutSessionId: `chk_${Date.now()}`,
+              checkoutUrl: paddleTx.checkoutUrl,
+              paddlePriceId: plan?.paddlePriceId
+            })
+            return
+          }
+        }
+
         const sessionRes = billingVerifier.createCheckoutSession({
           userId: user.userId,
           planId: body.planId || '',
@@ -508,6 +649,45 @@ export async function createGatewayServer(
         sendJson(res, 400, {
           code: 'INVALID_REQUEST',
           message: 'Invalid Microsoft Store receipt body.'
+        })
+      }
+      return
+    }
+
+    // Customer Portal: POST /v1/billing/customer-portal or GET redirect endpoint
+    const isPortalRoute =
+      pathname === '/v1/billing/customer-portal' ||
+      pathname === '/api/customer-portal' ||
+      pathname === '/v1/billing/customer-portal/redirect' ||
+      pathname === '/account/portal'
+
+    if (isPortalRoute && (req.method === 'POST' || req.method === 'GET')) {
+      try {
+        const portalResult = await paddleFulfillment.createCustomerPortalSession({
+          userId: user.userId,
+          email: user.email
+        })
+
+        const wantsRedirect =
+          pathname.endsWith('/redirect') ||
+          pathname === '/account/portal' ||
+          parsedUrl.searchParams.get('redirect') === 'true' ||
+          (req.headers.accept && req.headers.accept.includes('text/html'))
+
+        if (wantsRedirect && portalResult.ok && portalResult.portalUrl) {
+          res.writeHead(302, {
+            Location: portalResult.portalUrl,
+            'Cache-Control': 'no-store, max-age=0'
+          })
+          res.end()
+          return
+        }
+
+        sendJson(res, portalResult.ok ? 200 : 400, portalResult)
+      } catch (err) {
+        sendJson(res, 500, {
+          ok: false,
+          error: err instanceof Error ? err.message : 'Failed to generate customer portal session.'
         })
       }
       return
@@ -684,6 +864,7 @@ export async function createGatewayServer(
     wsUrl: `ws://${config.host}:${actualPort}`,
     authVerifier,
     quotaStore,
+    paddleFulfillment,
     close: closeGracefully
   }
 }
