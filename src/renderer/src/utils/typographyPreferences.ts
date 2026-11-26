@@ -26,28 +26,28 @@ export interface FontFamilyOption {
 
 export const WORKSPACE_FONT_OPTIONS: FontFamilyOption[] = [
   {
-    id: 'inter',
-    label: 'Inter',
-    cssStack: '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    id: 'system_sans',
+    label: 'SF Pro',
+    cssStack: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif',
     letterSpacing: '-0.005em'
   },
   {
-    id: 'geist_mono',
-    label: 'Geist Mono',
-    cssStack: 'var(--font-mono)',
-    letterSpacing: '-0.01em'
+    id: 'inter',
+    label: 'Avenir',
+    cssStack: '"Avenir Next", "Avenir", "Century Gothic", "Trebuchet MS", sans-serif',
+    letterSpacing: '0.005em'
   },
   {
-    id: 'system_sans',
-    label: 'System Sans',
-    cssStack: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
-    letterSpacing: '0em'
+    id: 'geist_mono',
+    label: 'SF Mono',
+    cssStack: 'ui-monospace, "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace',
+    letterSpacing: '-0.015em'
   },
   {
     id: 'high_legibility',
-    label: 'High-Legibility',
-    cssStack: '"Atkinson Hyperlegible", Verdana, Tahoma, "Segoe UI", sans-serif',
-    letterSpacing: '0.018em'
+    label: 'Editorial Serif',
+    cssStack: 'ui-serif, "New York", Georgia, "Palatino Linotype", serif',
+    letterSpacing: '0.008em'
   }
 ]
 
@@ -265,7 +265,11 @@ export function sanitizeWorkspaceDisplaySettings(
     syncTypographyToHud:
       typeof raw.syncTypographyToHud === 'boolean'
         ? raw.syncTypographyToHud
-        : DEFAULT_WORKSPACE_DISPLAY_SETTINGS.syncTypographyToHud
+        : DEFAULT_WORKSPACE_DISPLAY_SETTINGS.syncTypographyToHud,
+    showShortcutHints:
+      typeof raw.showShortcutHints === 'boolean'
+        ? raw.showShortcutHints
+        : DEFAULT_WORKSPACE_DISPLAY_SETTINGS.showShortcutHints
   }
 }
 

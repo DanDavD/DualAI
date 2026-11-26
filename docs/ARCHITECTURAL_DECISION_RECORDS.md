@@ -502,3 +502,36 @@ We ship a turnkey cloud deployment and live billing stack:
 ### Consequences
 * **Positive:** Single-command cloud deployment to Railway or Fly.io over TLS, zero-downtime WebSocket rolling restarts, verified Honduras-compatible global + Windows Store checkout, and empirical proof of Force RLS protection.
 * **Negative:** Production cloud secrets (`SONIOX_API_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `BILLING_WEBHOOK_SECRET`, and optional Entra ID Store keys) must be provisioned in the Railway/Fly secrets vault per `docs/DEPLOYMENT_RUNBOOK.md`.
+
+---
+
+## ADR-021: APPLE MACOS TAHOE LIQUID GLASS DESIGN SYSTEM, READING-FIRST UNIFIED TOP COMMAND BAR & COMPACT RESPONSIVE UX (CARD-19)
+
+### Status
+Accepted (Approved by Chief Architect)
+
+### Context
+The prior flat rectangular DAW layout stacked four solid horizontal bars (native opaque titlebar + 48px `Header` + 40px `SubHeader` + 52px `MasterToolbar`) with sharp 4px corners and opaque borders, compressing vertical reading space and enforcing a rigid `860x580` minimum window size that hindered side-by-side use alongside Zoom, Microsoft Teams, and Google Meet.
+
+### Decision
+We transition DualAI's desktop interface to an authentic **Apple macOS Tahoe / iOS 26 Liquid Glass** design language engineered strictly around real-time reading and translation clarity:
+1. **Native OS Window Integration (`src/main/index.ts`):** Enabled macOS `titleBarStyle: 'hiddenInset'`, `trafficLightPosition: { x: 16, y: 19 }`, `vibrancy: 'under-window'`, and Windows 11 `backgroundMaterial: 'mica'` with `titleBarOverlay`, while lowering minimum window bounds to `420x340` for sleek side-by-side companion placement. Also authorized `https://*.fly.dev` and `wss://*.fly.dev` in Electron CSP for live Fly.io production connectivity.
+2. **Reading-First Spatial Architecture (`Header.tsx`, `SessionControlCenterPopover.tsx`, `App.tsx`):** Consolidated all session transport (`Start`/`Stop` high-contrast Apple CTA pill, `Space` Cough Mute, live acoustic pulse), unified Language Pair capsule (`⇄` with 180-degree spring spin), macOS Control Center popover (audio routing tiles, `GlassSegmentedControl`, `AppleSwitch` DSP toggles, domain & glossary), Layout/Typography popovers, Teleprompter HUD controls, and circular SVG Quota Avatar into a **single 54px Liquid Glass Top Command Bar** — eliminating both the secondary SubHeader and bottom Footer so 100% of the viewport below is dedicated strictly to reading and translating.
+3. **Auto-Adaptive Narrow Window & Auto-Hiding Teleprompter HUD (`DualPaneWorkspace.tsx`, `TeleprompterHud.tsx`):** Automatically transitions Dual-Pane 50/50 into readable Stacked mode below `620px` width (restoring 50/50 when widened), and upgrades the floating Teleprompter HUD to an auto-hiding Liquid Glass plaque that fades its drag/control strip away whenever the cursor leaves so 100% of the overlay is pure translated text.
+4. **ProMotion 120fps GPU-Only Physics & Optical Materials (`main.css`, `components/UI/`):** Built pure CSS optical refraction (`backdrop-filter: blur + saturate`, specular inner highlights) and GPU-composited spring animations (`transform` + `opacity` only, respecting `prefers-reduced-motion`) with zero decorative gradients (`bg-gradient-to-`), zero emojis, and zero AudioWorklet main-thread jitter.
+
+### Consequences
+* **Positive:** +92px reclaimed vertical reading space, flagship native macOS/Windows aesthetics, full usability down to `420x340` compact windows, zero chrome distraction in the floating Teleprompter HUD, and 100% preservation of underlying Soniox/Supabase/Zero-Trust engine behavior.
+* **Negative:** Legacy `SubHeader.tsx` and `MasterToolbar.tsx` remain preserved in source for backwards test verification while production `App.tsx` mounts solely the unified `Header.tsx` command bar.
+
+### Addendum: Interactive Empty State Pill & Cross-Platform Parity (macOS & Windows 11)
+1. **Interactive Hero Capsule (`DualPaneWorkspace.tsx`):**
+   * Clicking Source Language ("English") opens a dedicated liquid glass search dropdown to immediately switch the spoken source language.
+   * Clicking Target Language ("Español") opens a dedicated search dropdown to change the target translation feed.
+   * Clicking Swap ("⇄") symmetrically reverses the source and target channels with instant feedback.
+   * Clicking Domain ("Medical") invokes `openSettingsModal('interpretation')`, opening Settings directly focused on specialized field vocabulary (Medical, Legal, Technical, Business, General).
+2. **Symmetrical Mute/Unmute Haptic Feedback (`FloatingTransportPill.tsx`):**
+   * Tactile CSS `@keyframes hapticVibrate` triggers on both mute engagement (crimson icon) and un-mute release (white icon), delivering equitable micro-feedback.
+3. **Cross-Platform OS Accelerator Parity (`platform.ts` & `GlassTooltip.tsx`):**
+   * Dynamic platform detection maps `CommandOrControl` and `Cmd` to native `Ctrl` on Windows/Linux and `Cmd` on macOS across all tooltips, keyboard strips, and rebind dialogs.
+   * Windows 11 `titleBarOverlay` preserves standard minimize/maximize/close hitboxes while macOS `hiddenInset` preserves native traffic lights.

@@ -1,13 +1,29 @@
 import React from 'react'
-import { Clock } from 'lucide-react'
+import { User } from 'lucide-react'
 import { useSession } from '../../context/SessionContext'
+import { GlassTooltip } from '../UI/GlassTooltip'
 
+function getInitials(email?: string): string {
+  if (!email) return ''
+  const namePart = email.split('@')[0] || ''
+  const segments = namePart.split(/[._-]+/).filter(Boolean)
+  if (segments.length >= 2) {
+    return `${segments[0][0]}${segments[1][0]}`.toUpperCase()
+  }
+  return namePart.slice(0, 2).toUpperCase()
+}
+
+/**
+ * Apple-style Account Avatar with Circular Quota Progress Ring.
+ * Displays remaining hours elegantly without visual clutter.
+ */
 export const QuotaGauge: React.FC = () => {
   const {
     quotaRemainingHours,
     quotaTotalHours,
     isGatewayAuthenticated,
     isQuotaExhausted,
+    authSession,
     openAccountModal
   } = useSession()
 
@@ -18,49 +34,80 @@ export const QuotaGauge: React.FC = () => {
   const remainingMinutes = totalMinutes % 60
 
   const labelText = !isGatewayAuthenticated
-    ? '1h Free'
+    ? 'Sign In'
     : isQuotaExhausted
-      ? '0m left'
+      ? '0m'
       : wholeHours > 0
         ? `${wholeHours}h ${remainingMinutes}m`
         : `${remainingMinutes}m`
 
+  const initials = getInitials(authSession?.user?.email)
+  const radius = 11
+  const circumference = 2 * Math.PI * radius
+  const dashOffset = circumference - (percentage / 100) * circumference
+
   return (
-    <button
-      type="button"
-      onClick={openAccountModal}
-      className={`flex h-8 items-center space-x-2.5 rounded border px-2.5 text-xs transition select-none ${
-        isQuotaExhausted
-          ? 'border-accent-crimson bg-accent-crimson/15 text-accent-crimson hover:bg-accent-crimson/25'
-          : 'border-surface-border bg-surface-base text-text-secondary hover:border-accent-steel'
-      }`}
-      title={
-        isGatewayAuthenticated
-          ? `Server-Authoritative Plan Quota: ${quotaRemainingHours.toFixed(2)}h remaining of ${quotaTotalHours.toFixed(1)}h total. Click to manage plan.`
-          : 'Sign in to activate your 1-Hour Free Tier on the DualAI Zero-Trust Gateway'
-      }
-    >
-      <Clock
-        className={`h-3 w-3 ${isQuotaExhausted ? 'text-accent-crimson' : 'text-text-muted'}`}
-        strokeWidth={1.5}
-      />
-      <div className="flex flex-col justify-center text-left">
-        <div className="flex items-center space-x-1.5 font-mono text-[11px] leading-tight text-text-primary">
-          <span>{labelText}</span>
-          <span className="text-[10px] text-text-muted">
-            {!isGatewayAuthenticated ? 'Sign In' : isQuotaExhausted ? 'Upgrade' : 'left'}
+    <div data-tour-id="account" className="inline-flex">
+      <GlassTooltip
+        label={isGatewayAuthenticated ? 'Account & Hours' : 'Sign In'}
+        description={
+          isGatewayAuthenticated && authSession
+            ? `${authSession.user.email} · ${labelText} remaining`
+            : 'Start your 1-hour free trial & view plans'
+        }
+        align="right"
+      >
+        <button
+          type="button"
+          data-toolbar-item="true"
+          onClick={openAccountModal}
+          aria-label={
+            isGatewayAuthenticated && authSession
+              ? `Account ${authSession.user.email}, ${labelText} remaining`
+              : 'Sign in for 1-Hour Free Tier'
+          }
+          className={`glass-control-hover flex h-7 items-center space-x-1.5 rounded-full pl-1 pr-2 text-[11px] font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-steel/70 ${
+            isQuotaExhausted ? 'text-accent-crimson' : 'text-white/85 hover:text-white'
+          }`}
+        >
+          {/* Circular Avatar with Live SVG Quota Progress Ring */}
+          <span className="relative flex h-6 w-6 shrink-0 items-center justify-center">
+            <svg className="absolute inset-0 h-6 w-6 -rotate-90" viewBox="0 0 26 26" aria-hidden="true">
+              <circle
+                cx="13"
+                cy="13"
+                r={radius}
+                fill="none"
+                stroke="rgba(255,255,255,0.12)"
+                strokeWidth="1.75"
+              />
+              {isGatewayAuthenticated && (
+                <circle
+                  cx="13"
+                  cy="13"
+                  r={radius}
+                  fill="none"
+                  stroke={isQuotaExhausted ? '#ff453a' : '#0a84ff'}
+                  strokeWidth="1.75"
+                  strokeLinecap="round"
+                  strokeDasharray={circumference}
+                  strokeDashoffset={dashOffset}
+                  style={{ transition: 'stroke-dashoffset 400ms var(--ease-apple-spring)' }}
+                />
+              )}
+            </svg>
+            <span className="flex h-[18px] w-[18px] items-center justify-center rounded-full bg-white/[0.12] text-[9px] font-semibold tracking-tight text-white">
+              {isGatewayAuthenticated && initials ? (
+                initials
+              ) : (
+                <User className="h-3 w-3 text-white/75" strokeWidth={1.75} />
+              )}
+            </span>
           </span>
-        </div>
-        {/* Micro High-Density Progress Bar */}
-        <div className="mt-0.5 h-1 w-20 overflow-hidden rounded-full bg-surface-border">
-          <div
-            className={`h-full transition-all duration-300 ${
-              isQuotaExhausted ? 'bg-accent-crimson' : 'bg-accent-steel'
-            }`}
-            style={{ width: `${percentage}%` }}
-          />
-        </div>
-      </div>
-    </button>
+
+          <span className="hidden lg:inline tabular-nums text-[11px] whitespace-nowrap">{labelText}</span>
+        </button>
+      </GlassTooltip>
+    </div>
   )
 }

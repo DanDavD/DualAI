@@ -279,7 +279,37 @@ export class SupabaseQuotaStore implements QuotaStore {
     })
 
     if (!insertRes.ok) {
-      throw new Error(`Supabase quota provisioning failed (${insertRes.status})`)
+      if (insertRes.status === 409) {
+        const retryRes = await fetch(
+          `${this.baseUrl}/rest/v1/user_quotas?user_id=eq.${encodeURIComponent(userId)}&select=*`,
+          { headers: this.headers() }
+        )
+        if (retryRes.ok) {
+          const retryRows = (await retryRes.json()) as Array<{
+            user_id: string
+            plan_id: PlanId
+            remaining_seconds: number
+            total_allocated_seconds: number
+            total_consumed_seconds: number
+            subscription_status: UserQuotaRecord['subscriptionStatus']
+          }>
+          if (retryRows.length > 0) {
+            const row = retryRows[0]
+            const plan = PLAN_CATALOG[row.plan_id] || PLAN_CATALOG.free_tier
+            return {
+              userId: row.user_id,
+              planId: plan.id,
+              remainingSeconds: row.remaining_seconds,
+              totalAllocatedSeconds: row.total_allocated_seconds,
+              totalConsumedSeconds: row.total_consumed_seconds,
+              subscriptionStatus: row.subscription_status,
+              maxConcurrentSessions: plan.maxConcurrentSessions
+            }
+          }
+        }
+      }
+      const errText = await insertRes.text().catch(() => '')
+      throw new Error(`Supabase quota provisioning failed (${insertRes.status}): ${errText}`)
     }
 
     return {
@@ -367,7 +397,7 @@ export class SupabaseQuotaStore implements QuotaStore {
 }
 
 export function createQuotaStore(config: GatewayConfig): QuotaStore {
-  if (config.supabaseUrl && config.supabaseServiceRoleKey) {
+  if (config.nodeEnv !== 'test' && config.supabaseUrl && config.supabaseServiceRoleKey) {
     return new SupabaseQuotaStore(config.supabaseUrl, config.supabaseServiceRoleKey)
   }
   return new InMemoryQuotaStore()

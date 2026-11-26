@@ -83,15 +83,37 @@ function hardenBrowserWindow(win: BrowserWindow): void {
 }
 
 function createMainWindow(): void {
+  const isMac = process.platform === 'darwin'
+  const isWin = process.platform === 'win32'
+
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 760,
-    minWidth: 860,
-    minHeight: 580,
+    minWidth: 420,
+    minHeight: 340,
     show: false,
     autoHideMenuBar: true,
     title: 'DualAI - Professional Interpretation Engine',
-    backgroundColor: '#09090b',
+    backgroundColor: isMac ? '#00000000' : '#111114',
+    ...(isMac
+      ? {
+          titleBarStyle: 'hiddenInset' as const,
+          trafficLightPosition: { x: 16, y: 19 },
+          vibrancy: 'under-window' as const,
+          visualEffectState: 'active' as const,
+          transparent: true
+        }
+      : isWin
+        ? {
+            titleBarStyle: 'hidden' as const,
+            titleBarOverlay: {
+              color: '#111114',
+              symbolColor: '#f4f4f5',
+              height: 52
+            },
+            backgroundMaterial: 'mica' as const
+          }
+        : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: true,
@@ -160,8 +182,8 @@ function createHudWindow(initialBounds?: HudBounds): BrowserWindow {
     y,
     width,
     height,
-    minWidth: 380,
-    minHeight: 110,
+    minWidth: 320,
+    minHeight: 100,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -415,8 +437,8 @@ function registerIpcHandlers(): void {
 function registerSecurityHeaders(): void {
   const isDev = Boolean(process.env['ELECTRON_RENDERER_URL'])
   const connectSources = isDev
-    ? "'self' http://127.0.0.1:8787 ws://127.0.0.1:8787 http://localhost:8787 ws://localhost:8787 ws://localhost:5173 https://*.supabase.co blob: data:"
-    : "'self' https://*.universalaisync.com wss://*.universalaisync.com https://*.dualai.app wss://*.dualai.app https://*.supabase.co blob: data:"
+    ? "'self' http://127.0.0.1:8787 ws://127.0.0.1:8787 http://localhost:8787 ws://localhost:8787 ws://localhost:5173 https://*.fly.dev wss://*.fly.dev https://*.supabase.co blob: data:"
+    : "'self' https://*.universalaisync.com wss://*.universalaisync.com https://*.dualai.app wss://*.dualai.app https://*.fly.dev wss://*.fly.dev https://*.supabase.co blob: data:"
 
   const scriptSources = isDev
     ? "'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:"

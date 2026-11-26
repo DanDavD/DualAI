@@ -1,28 +1,48 @@
 /**
- * DUALAI - Module 3 Teleprompter & Floating Overlay HUD Window (Day 10)
- * Secondary frameless, transparent, alwaysOnTop Electron overlay engineered
- * to float seamlessly above full-screen Zoom, Microsoft Teams, and Google Meet sessions.
- * Features zero-latency opacity & Geist Mono font scaling, line limit selector (2/4/6),
- * click-through toggle via setIgnoreMouseEvents, and persistent localStorage configuration.
+ * DUALAI - Compact Floating Mini View Overlay (Apple Liquid Glass)
+ * Frameless, translucent, alwaysOnTop Electron overlay engineered for pure reading clarity
+ * above full-screen Zoom, Microsoft Teams, and Google Meet sessions at any window size.
+ * Features an auto-hiding floating glass pill and a compact right-anchored settings submenu
+ * with live Text Color picker, Opacity, Text Size, Visible Lines, Spacing, Font & Click-Through.
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   GripHorizontal,
-  MousePointerClick,
   X,
   Lock,
   Unlock,
-  SlidersHorizontal
+  Settings,
+  PictureInPicture2
 } from 'lucide-react'
-import { HudSettings, DEFAULT_HUD_SETTINGS } from '../../../../types/settings'
+import {
+  HudSettings,
+  DEFAULT_HUD_SETTINGS,
+  WorkspaceLineSpacing
+} from '../../../../types/settings'
 import { TranscriptPayload } from '../../../../types/ipc'
 import {
+  CONVERSATION_COLOR_PRESETS,
+  WORKSPACE_FONT_OPTIONS,
   resolveFontFamilyCss,
   resolveLineSpacingMetrics
 } from '../../utils/typographyPreferences'
+import { AppleSwitch } from '../UI/AppleSwitch'
 
 const STORAGE_KEY_HUD = 'dualai_hud_settings'
+
+const SHORT_FONT_LABELS: Record<string, string> = {
+  system_sans: 'SF Pro',
+  inter: 'Avenir',
+  geist_mono: 'Mono',
+  high_legibility: 'Serif'
+}
+
+const SHORT_SPACING_LABELS: Record<WorkspaceLineSpacing, string> = {
+  compact: 'Tight',
+  standard: 'Std',
+  relaxed: 'Wide'
+}
 
 function loadHudSettings(): HudSettings {
   try {
@@ -45,16 +65,42 @@ interface HudLine {
 export const TeleprompterHud: React.FC = () => {
   const [settings, setSettings] = useState<HudSettings>(loadHudSettings)
   const [showControls, setShowControls] = useState<boolean>(false)
+  const [isHovered, setIsHovered] = useState<boolean>(false)
   const [lines, setLines] = useState<HudLine[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
+  const submenuRef = useRef<HTMLDivElement>(null)
+  const settingsBtnRef = useRef<HTMLButtonElement>(null)
 
-  // Ensure transparent root background for frameless Electron overlay
   useEffect(() => {
     document.documentElement.style.backgroundColor = 'transparent'
     document.body.style.backgroundColor = 'transparent'
   }, [])
 
-  // Persist HUD settings locally and broadcast back to main window
+  // Close compact settings submenu on outside click or Escape
+  useEffect(() => {
+    if (!showControls) return
+    const handleOutside = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (
+        submenuRef.current &&
+        !submenuRef.current.contains(target) &&
+        settingsBtnRef.current &&
+        !settingsBtnRef.current.contains(target)
+      ) {
+        setShowControls(false)
+      }
+    }
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowControls(false)
+    }
+    document.addEventListener('mousedown', handleOutside)
+    document.addEventListener('keydown', handleEsc)
+    return () => {
+      document.removeEventListener('mousedown', handleOutside)
+      document.removeEventListener('keydown', handleEsc)
+    }
+  }, [showControls])
+
   const updateSettings = useCallback((partial: Partial<HudSettings>) => {
     setSettings((prev) => {
       const next: HudSettings = {
@@ -77,7 +123,6 @@ export const TeleprompterHud: React.FC = () => {
     })
   }, [])
 
-  // Subscribe to Main -> HUD IPC transcript streams and remote config changes
   useEffect(() => {
     const cleanups: Array<() => void> = []
 
@@ -135,21 +180,21 @@ export const TeleprompterHud: React.FC = () => {
     }
   }, [])
 
-  // Auto-scroll smoothly whenever new lines or interim tokens arrive
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
   }, [lines, settings.lineLimit, settings.fontSizePx])
 
-  // Temporarily allow mouse interaction over the slim header bar when click-through is locked
   const handleControlStripEnter = () => {
+    setIsHovered(true)
     if (settings.isClickThrough) {
       void window.electronAPI?.setHudClickThrough?.(false)
     }
   }
 
   const handleControlStripLeave = () => {
+    setIsHovered(false)
     if (settings.isClickThrough) {
       void window.electronAPI?.setHudClickThrough?.(true)
     }
@@ -157,161 +202,308 @@ export const TeleprompterHud: React.FC = () => {
 
   const visibleLines = lines.slice(-settings.lineLimit)
   const zincBackground = `rgba(9, 9, 11, ${settings.opacity})`
-  const borderAlpha = Math.max(0.25, settings.opacity * 0.9)
-  const fontMetrics = resolveFontFamilyCss(settings.fontFamily || 'geist_mono')
+  const borderAlpha = Math.max(0.12, settings.opacity * 0.24)
+  const fontMetrics = resolveFontFamilyCss(settings.fontFamily || 'inter')
   const lineMetrics = resolveLineSpacingMetrics(settings.lineSpacing || 'standard')
   const isHighContrast = Boolean(settings.highContrast)
-  const showSpeakers = settings.showSpeakerLabels ?? true
+  const showSpeakers = settings.showSpeakerLabels ?? false
   const showTimes = Boolean(settings.showTimestamps)
+  const activeTextColor = settings.textColor || '#ffffff'
+  const showChrome = isHovered || showControls || visibleLines.length === 0
 
   return (
     <div
-      className="flex h-screen w-screen flex-col overflow-hidden rounded-lg select-none"
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
+      className="relative flex h-screen w-screen flex-col overflow-hidden rounded-[22px] select-none font-sans"
       style={{
         backgroundColor: zincBackground,
-        border: `1px solid rgba(39, 39, 42, ${borderAlpha})`
+        backdropFilter: settings.opacity > 0.04 ? 'blur(34px) saturate(185%)' : 'none',
+        WebkitBackdropFilter: settings.opacity > 0.04 ? 'blur(34px) saturate(185%)' : 'none',
+        border: `1px solid rgba(255, 255, 255, ${borderAlpha})`,
+        boxShadow:
+          settings.opacity > 0.04
+            ? 'inset 0 1px 0.5px rgba(255, 255, 255, 0.16), 0 18px 44px -8px rgba(0, 0, 0, 0.62)'
+            : 'none'
       }}
     >
-      {/* Frameless Draggable Control Strip */}
+      {/* Floating Minimalist Auto-Hiding Top Capsules */}
       <div
         onMouseEnter={handleControlStripEnter}
         onMouseLeave={handleControlStripLeave}
-        className="flex h-8 shrink-0 items-center justify-between border-b px-3 font-mono text-[10px] text-text-secondary"
+        className={`absolute top-2.5 left-3 right-3 z-30 flex items-center justify-between gap-2 transition-opacity duration-200 ${
+          showChrome ? 'opacity-100' : 'opacity-0 pointer-events-none'
+        }`}
         style={{
-          backgroundColor: `rgba(18, 18, 21, ${Math.max(0.55, settings.opacity)})`,
-          borderColor: 'rgba(39, 39, 42, 0.7)',
           // @ts-expect-error Electron WebKit draggable window region
           WebkitAppRegion: 'drag'
         }}
       >
-        {/* Drag Grip & Identity */}
-        <div className="flex items-center space-x-2">
-          <GripHorizontal className="h-3.5 w-3.5 text-text-muted" />
-          <span className="font-bold tracking-wider text-text-primary">DUALAI TELEPROMPTER HUD</span>
-          <span className="rounded border border-surface-border bg-surface-base/70 px-1.5 py-0.5 text-[9px] text-accent-emerald">
-            TOP-MOST
+        {/* Left Drag Pill */}
+        <div className="glass-capsule flex h-7 items-center space-x-1.5 rounded-full px-2.5 text-[11px] text-white/80">
+          <GripHorizontal className="h-3.5 w-3.5 text-white/45 shrink-0" />
+          <span className="font-semibold tracking-tight text-white/90 whitespace-nowrap">
+            DualAI
           </span>
+          {settings.isClickThrough && (
+            <span
+              className="h-1.5 w-1.5 rounded-full bg-accent-steel shrink-0"
+              title="Click-through active"
+            />
+          )}
         </div>
 
-        {/* Non-Draggable Quick Action Buttons */}
+        {/* Right Floating Action Capsule */}
         <div
-          className="flex items-center space-x-1.5"
+          className="glass-capsule flex h-7 items-center space-x-0.5 rounded-full p-0.5"
           style={{
             // @ts-expect-error Disable drag on interactive controls
             WebkitAppRegion: 'no-drag'
           }}
         >
-          {/* Toggle Inline Sliders Drawer */}
           <button
             type="button"
-            onClick={() => setShowControls((prev) => !prev)}
-            className={`flex items-center space-x-1 rounded border px-1.5 py-0.5 transition ${
-              showControls
-                ? 'border-accent-steel bg-accent-steel/20 text-accent-steel'
-                : 'border-surface-border bg-surface-base/80 text-text-secondary hover:text-text-primary'
-            }`}
-            title="Adjust Opacity, Font Scale & Line Limit"
-          >
-            <SlidersHorizontal className="h-3 w-3" />
-            <span>TUNE</span>
-          </button>
-
-          {/* Click-Through Lock Toggle */}
-          <button
-            type="button"
-            onClick={() => updateSettings({ isClickThrough: !settings.isClickThrough })}
-            className={`flex items-center space-x-1 rounded border px-1.5 py-0.5 font-bold transition ${
+            onClick={(e) => {
+              e.currentTarget.blur()
+              updateSettings({ isClickThrough: !settings.isClickThrough })
+            }}
+            title={
               settings.isClickThrough
-                ? 'border-accent-amber bg-accent-amber/20 text-accent-amber'
-                : 'border-surface-border bg-surface-base/80 text-text-secondary hover:text-text-primary'
+                ? 'Click-through ON (clicks pass behind)'
+                : 'Click-through OFF (interactive)'
+            }
+            aria-label="Toggle Click-Through Mode"
+            className={`glass-control-hover flex h-6 items-center space-x-1 rounded-full px-2 text-[10px] font-medium focus:outline-none ${
+              settings.isClickThrough
+                ? 'bg-accent-steel/22 text-accent-steel border border-accent-steel/45'
+                : 'text-white/70 hover:text-white'
             }`}
-            title="Toggle Click-Through Mode (setIgnoreMouseEvents)"
           >
             {settings.isClickThrough ? (
-              <>
-                <Lock className="h-3 w-3" />
-                <span>CLICK-THROUGH ON</span>
-              </>
+              <Lock className="h-3 w-3 shrink-0" />
             ) : (
-              <>
-                <Unlock className="h-3 w-3" />
-                <span>INTERACTIVE</span>
-              </>
+              <Unlock className="h-3 w-3 shrink-0" />
             )}
+            <span className="hidden sm:inline">
+              {settings.isClickThrough ? 'Pass-Through' : 'Interactive'}
+            </span>
           </button>
 
-          {/* Close HUD */}
+          <button
+            ref={settingsBtnRef}
+            type="button"
+            onClick={() => setShowControls((prev) => !prev)}
+            title="Mini View Settings"
+            aria-label="Mini View Settings"
+            aria-expanded={showControls}
+            className={`glass-control-hover flex h-6 w-6 items-center justify-center rounded-full ${
+              showControls ? 'bg-white/[0.18] text-white' : 'text-white/70 hover:text-white'
+            }`}
+          >
+            <Settings className="h-3.5 w-3.5" strokeWidth={1.75} />
+          </button>
+
           <button
             type="button"
             onClick={() => void window.electronAPI?.closeHud?.()}
-            className="rounded p-0.5 text-text-muted hover:bg-accent-crimson/20 hover:text-accent-crimson transition"
-            title="Close Teleprompter HUD (Cmd/Ctrl+Shift+H)"
+            title="Close Mini View (Cmd/Ctrl+Shift+H)"
+            aria-label="Close Mini View"
+            className="glass-control-hover flex h-6 w-6 items-center justify-center rounded-full text-white/60 hover:bg-accent-crimson/25 hover:text-accent-crimson"
           >
-            <X className="h-3.5 w-3.5" />
+            <X className="h-3.5 w-3.5" strokeWidth={1.85} />
           </button>
         </div>
       </div>
 
-      {/* Zero-Latency Inline Calibration Strip */}
+      {/* Compact Right-Anchored Settings Submenu Popover (Live Preview Remains Visible!) */}
       {showControls && (
         <div
+          ref={submenuRef}
+          role="dialog"
+          aria-label="Mini View Settings Submenu"
           onMouseEnter={handleControlStripEnter}
           onMouseLeave={handleControlStripLeave}
-          className="flex flex-wrap items-center justify-between gap-3 border-b border-surface-border bg-surface-panel/95 px-3 py-2 font-mono text-[10px] text-text-secondary"
+          className="glass-sheet animate-glass-pop absolute right-3 top-11 z-30 w-[264px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-54px)] overflow-y-auto rounded-[18px] p-3 text-[11px] space-y-2.5"
+          style={{
+            // @ts-expect-error Disable drag inside submenu
+            WebkitAppRegion: 'no-drag'
+          }}
         >
-          {/* Opacity Slider (0% - 100% Solid Zinc) */}
-          <label className="flex items-center space-x-2">
-            <span>OPACITY: {Math.round(settings.opacity * 100)}%</span>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
-              value={settings.opacity}
-              onChange={(e) => updateSettings({ opacity: parseFloat(e.target.value) })}
-              className="w-24 accent-accent-steel cursor-pointer"
-            />
-          </label>
+          {/* 1. Text Color Swatches + Custom Color Picker */}
+          <div className="glass-grouped-card rounded-xl px-2.5 py-2 space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-medium text-white/60">Text Color</span>
+              <label className="flex items-center space-x-1 cursor-pointer font-mono text-[9px] text-white/50 hover:text-white">
+                <span>{activeTextColor}</span>
+                <input
+                  type="color"
+                  value={activeTextColor}
+                  onChange={(e) => updateSettings({ textColor: e.target.value })}
+                  aria-label="Custom Mini View text color"
+                  className="h-3.5 w-3.5 cursor-pointer rounded-full border-0 bg-transparent p-0"
+                />
+              </label>
+            </div>
+            <div className="flex items-center justify-between gap-1">
+              {CONVERSATION_COLOR_PRESETS.map((preset) => {
+                const selected = activeTextColor.toLowerCase() === preset.hex.toLowerCase()
+                return (
+                  <button
+                    key={preset.hex}
+                    type="button"
+                    onClick={() => updateSettings({ textColor: preset.hex })}
+                    title={preset.label}
+                    aria-label={`Text color ${preset.label}`}
+                    className={`h-4 w-4 rounded-full transition-transform duration-150 hover:scale-110 ${
+                      selected
+                        ? 'ring-2 ring-white ring-offset-1 ring-offset-[#16161b]'
+                        : 'ring-1 ring-white/20'
+                    }`}
+                    style={{ backgroundColor: preset.hex }}
+                  />
+                )
+              })}
+            </div>
+          </div>
 
-          {/* Font Scale Slider (14px - 48px Geist Mono) */}
-          <label className="flex items-center space-x-2">
-            <span>SIZE: {settings.fontSizePx}px</span>
-            <input
-              type="range"
-              min="14"
-              max="48"
-              step="1"
-              value={settings.fontSizePx}
-              onChange={(e) => updateSettings({ fontSizePx: parseInt(e.target.value, 10) })}
-              className="w-24 accent-accent-steel cursor-pointer"
-            />
-          </label>
+          {/* 2. Compact Opacity & Font Size Sliders */}
+          <div className="glass-grouped-card rounded-xl px-2.5 py-2 space-y-2">
+            <div className="space-y-1">
+              <div className="flex justify-between text-[10px]">
+                <span className="text-white/60">Glass</span>
+                <span className="font-mono tabular-nums text-white">
+                  {Math.round(settings.opacity * 100)}%
+                </span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={settings.opacity}
+                onChange={(e) => updateSettings({ opacity: parseFloat(e.target.value) })}
+                className="apple-slider w-full"
+              />
+            </div>
 
-          {/* Line Limit Selector (2, 4, 6 sentences) */}
-          <div className="flex items-center space-x-1">
-            <span>LINES:</span>
-            {([2, 4, 6] as const).map((limit) => (
-              <button
-                key={limit}
-                type="button"
-                onClick={() => updateSettings({ lineLimit: limit })}
-                className={`rounded border px-1.5 py-0.5 transition ${
-                  settings.lineLimit === limit
-                    ? 'border-accent-steel bg-accent-steel/25 text-accent-steel font-bold'
-                    : 'border-surface-border bg-surface-base text-text-muted hover:text-text-primary'
-                }`}
-              >
-                {limit}
-              </button>
-            ))}
+            <div className="space-y-1">
+              <div className="flex justify-between text-[10px]">
+                <span className="text-white/60">Size</span>
+                <span className="font-mono tabular-nums text-white">{settings.fontSizePx}px</span>
+              </div>
+              <input
+                type="range"
+                min="14"
+                max="48"
+                step="1"
+                value={settings.fontSizePx}
+                onChange={(e) => updateSettings({ fontSizePx: parseInt(e.target.value, 10) })}
+                className="apple-slider w-full"
+              />
+            </div>
+          </div>
+
+          {/* 3. Compact Lines & Spacing Pills */}
+          <div className="glass-grouped-card rounded-xl px-2.5 py-2 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-white/60">Lines</span>
+              <div className="flex items-center space-x-0.5 rounded-full bg-white/[0.07] p-0.5">
+                {([2, 4, 6] as const).map((limit) => (
+                  <button
+                    key={limit}
+                    type="button"
+                    onClick={() => updateSettings({ lineLimit: limit })}
+                    className={`h-5 w-6 rounded-full text-[10px] font-medium transition ${
+                      settings.lineLimit === limit
+                        ? 'bg-white text-zinc-950 font-semibold'
+                        : 'text-white/55 hover:text-white'
+                    }`}
+                  >
+                    {limit}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-white/60">Spacing</span>
+              <div className="flex items-center space-x-0.5 rounded-full bg-white/[0.07] p-0.5">
+                {(['compact', 'standard', 'relaxed'] as WorkspaceLineSpacing[]).map((key) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => updateSettings({ lineSpacing: key })}
+                    className={`h-5 rounded-full px-2 text-[10px] font-medium transition ${
+                      (settings.lineSpacing || 'standard') === key
+                        ? 'bg-white/[0.2] text-white'
+                        : 'text-white/55 hover:text-white'
+                    }`}
+                  >
+                    {SHORT_SPACING_LABELS[key]}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* 4. Compact Font Chips */}
+          <div className="grid grid-cols-4 gap-1">
+            {WORKSPACE_FONT_OPTIONS.map((opt) => {
+              const active = (settings.fontFamily || 'inter') === opt.id
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => updateSettings({ fontFamily: opt.id })}
+                  style={{ fontFamily: opt.cssStack }}
+                  className={`glass-control-hover rounded-lg border py-1 text-center text-[10px] font-medium ${
+                    active
+                      ? 'border-accent-steel/55 bg-accent-steel/22 text-white'
+                      : 'border-white/[0.08] bg-white/[0.04] text-white/60 hover:text-white'
+                  }`}
+                >
+                  {SHORT_FONT_LABELS[opt.id] || opt.label}
+                </button>
+              )
+            })}
+          </div>
+
+          {/* 5. Compact Switches */}
+          <div className="glass-grouped-card rounded-xl divide-y divide-white/[0.06] px-2.5">
+            <div className="flex items-center justify-between py-1.5">
+              <span className="text-[10px] text-white/80">Click-Through</span>
+              <AppleSwitch
+                checked={settings.isClickThrough}
+                onChange={(next) => updateSettings({ isClickThrough: next })}
+                ariaLabel="Toggle Click-Through"
+              />
+            </div>
+            <div className="flex items-center justify-between py-1.5">
+              <span className="text-[10px] text-white/80">Speaker Tags</span>
+              <AppleSwitch
+                checked={showSpeakers}
+                onChange={(next) => updateSettings({ showSpeakerLabels: next })}
+                ariaLabel="Toggle Speaker Tags"
+              />
+            </div>
+            <div className="flex items-center justify-between py-1.5">
+              <span className="text-[10px] text-white/80">Timestamps</span>
+              <AppleSwitch
+                checked={showTimes}
+                onChange={(next) => updateSettings({ showTimestamps: next })}
+                ariaLabel="Toggle Timestamps"
+              />
+            </div>
           </div>
         </div>
       )}
 
-      {/* Teleprompter Streaming Canvas */}
+      {/* 100% Pure, Edge-to-Edge Live Reading Canvas */}
       <div
         ref={scrollRef}
-        className="flex-1 overflow-y-auto px-4 py-3 space-y-2"
+        className={`flex-1 overflow-y-auto px-4 sm:px-6 pb-4 space-y-2 transition-all duration-200 ${
+          showChrome ? 'pt-11' : 'pt-4'
+        }`}
         style={{
           fontFamily: fontMetrics.fontFamily,
           letterSpacing: fontMetrics.letterSpacing,
@@ -320,15 +512,21 @@ export const TeleprompterHud: React.FC = () => {
         }}
       >
         {visibleLines.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center text-center">
-            <p className="font-mono text-xs text-text-secondary">
-              Teleprompter HUD armed and floating above video calls.
+          <div className="flex h-full flex-col items-center justify-center text-center px-3">
+            <div className="glass-capsule-subtle mb-2 flex h-8 w-8 items-center justify-center rounded-2xl">
+              <PictureInPicture2 className="h-4 w-4 text-accent-steel" strokeWidth={1.75} />
+            </div>
+            <p
+              className="font-medium tracking-tight"
+              style={{
+                color: activeTextColor,
+                fontSize: `${Math.min(24, Math.max(13, settings.fontSizePx * 0.7))}px`
+              }}
+            >
+              Mini View ready
             </p>
-            <p className="mt-1 font-mono text-[11px] text-text-muted flex items-center space-x-1">
-              <MousePointerClick className="h-3 w-3 inline" />
-              <span>
-                Showing up to {settings.lineLimit} sentences at {settings.fontSizePx}px.
-              </span>
+            <p className="mt-1 text-xs text-white/45 max-w-[280px] leading-snug">
+              Live translations float cleanly here above Zoom, Teams, or Meet.
             </p>
           </div>
         ) : (
@@ -342,36 +540,32 @@ export const TeleprompterHud: React.FC = () => {
             return (
               <div
                 key={line.id}
-                className={`transition-opacity ${
-                  isHighContrast
-                    ? isNewest
-                      ? 'text-white opacity-100'
-                      : 'text-zinc-200 opacity-85'
-                    : isNewest
-                      ? 'text-text-primary opacity-100'
-                      : 'text-text-secondary opacity-70'
-                }`}
+                className="animate-utterance transition-opacity duration-200"
+                style={{
+                  color: activeTextColor,
+                  opacity: isHighContrast ? (isNewest ? 1 : 0.85) : isNewest ? 1 : 0.68
+                }}
               >
                 {showSpeakers && (
-                  <span className="mr-2 rounded border border-surface-border bg-surface-base/75 px-1.5 py-0.5 align-middle font-mono text-[10px] font-bold uppercase text-accent-emerald">
+                  <span className="mr-2 rounded-full bg-white/[0.1] border border-white/[0.12] px-2 py-0.5 align-middle text-[10px] font-medium text-accent-emerald">
                     {line.speakerLabel}
                   </span>
                 )}
                 {showTimes && (
-                  <span className="mr-2 align-middle font-mono text-[10px] text-text-muted">
+                  <span className="mr-2 align-middle font-mono text-[10px] tabular-nums text-white/45">
                     {formattedTime}
                   </span>
                 )}
                 <span
                   className={isHighContrast ? 'font-semibold tracking-tight' : 'font-medium tracking-tight'}
                   style={{
-                    textShadow: '0 1px 3px rgba(0, 0, 0, 0.85)'
+                    textShadow: '0 1px 4px rgba(0, 0, 0, 0.78)'
                   }}
                 >
                   {line.translatedText}
                 </span>
                 {line.isInterim && (
-                  <span className="ml-1.5 inline-block h-[0.85em] w-2 align-middle bg-accent-emerald animate-pulse" />
+                  <span className="ml-1.5 inline-block h-[0.82em] w-1.5 rounded-full align-middle bg-accent-emerald animate-pulse" />
                 )}
               </div>
             )

@@ -108,6 +108,7 @@ export interface SessionState {
   quotaRemainingHours: number
   isGlossaryModalOpen: boolean
   isSettingsModalOpen: boolean
+  settingsInitialTab: 'audio' | 'interpretation' | 'reading' | 'shortcuts' | 'privacy'
 
   // Audio Engine & Hardware Calibration State
   isAudioActive: boolean
@@ -192,7 +193,9 @@ export interface SessionState {
   setEchoCancellation: (enabled: boolean) => void
   openGlossaryModal: () => void
   closeGlossaryModal: () => void
-  openSettingsModal: () => void
+  openSettingsModal: (
+    initialTab?: 'audio' | 'interpretation' | 'reading' | 'shortcuts' | 'privacy' | unknown
+  ) => void
   closeSettingsModal: () => void
   openAccountModal: () => void
   closeAccountModal: () => void
@@ -270,6 +273,9 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [latencyPingMs, setLatencyPingMs] = useState(42)
   const [isGlossaryModalOpen, setIsGlossaryModalOpen] = useState(false)
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false)
+  const [settingsInitialTab, setSettingsInitialTab] = useState<
+    'audio' | 'interpretation' | 'reading' | 'shortcuts' | 'privacy'
+  >('audio')
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false)
 
   // Zero-Trust SaaS Account & Authoritative Quota State
@@ -1741,7 +1747,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     })
   }, [targetLang])
 
-  // Day 09: Global Spacebar Cough Mute Toggle (when not typing in inputs)
+  // Day 09: Global Spacebar Cough Mute Toggle (intercepts Space in workspace so focused buttons like Mini View never accidentally re-trigger)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null
@@ -1758,14 +1764,21 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         return
       }
 
-      if (e.code === 'Space' && !e.repeat && !isEditable && tag !== 'button') {
+      const insideModalOrMenu = Boolean(
+        target?.closest('[role="dialog"], [role="listbox"], [role="menu"]')
+      )
+
+      if (e.code === 'Space' && !isEditable && !insideModalOrMenu) {
         e.preventDefault()
-        toggleCoughMute()
+        e.stopPropagation()
+        if (!e.repeat) {
+          toggleCoughMute()
+        }
       }
     }
 
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
+    window.addEventListener('keydown', handleKeyDown, { capture: true })
+    return () => window.removeEventListener('keydown', handleKeyDown, { capture: true })
   }, [toggleCoughMute])
 
   // Listen to Electron Global Background Shortcuts & HUD IPC Events
@@ -1826,7 +1839,18 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const openGlossaryModal = useCallback(() => setIsGlossaryModalOpen(true), [])
   const closeGlossaryModal = useCallback(() => setIsGlossaryModalOpen(false), [])
-  const openSettingsModal = useCallback(() => setIsSettingsModalOpen(true), [])
+  const openSettingsModal = useCallback((initialTab?: unknown) => {
+    if (
+      initialTab === 'audio' ||
+      initialTab === 'interpretation' ||
+      initialTab === 'reading' ||
+      initialTab === 'shortcuts' ||
+      initialTab === 'privacy'
+    ) {
+      setSettingsInitialTab(initialTab)
+    }
+    setIsSettingsModalOpen(true)
+  }, [])
   const closeSettingsModal = useCallback(() => setIsSettingsModalOpen(false), [])
   const openAccountModal = useCallback(() => setIsAccountModalOpen(true), [])
   const closeAccountModal = useCallback(() => setIsAccountModalOpen(false), [])
@@ -1847,6 +1871,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         quotaRemainingHours,
         isGlossaryModalOpen,
         isSettingsModalOpen,
+        settingsInitialTab,
         isAudioActive,
         isInitializingAudio,
         isCoughMuted,

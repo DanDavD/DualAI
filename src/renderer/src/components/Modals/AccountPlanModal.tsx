@@ -1,28 +1,37 @@
 /**
- * DUALAI - Zero-Trust Account, Verified Email Gate, Password Recovery & Plan Upgrade Modal (CARD-17)
- * Allows end users to sign in with zero API key configuration, enforces verified email before
- * activating the 1-hour Free Tier, supports password reset and email verification resend,
- * and supports Microsoft Store (Windows MSIX) and PayPal/Paddle (macOS/Web) upgrades.
+ * DUALAI - Apple-Style Account & Horizontal Plans Modal
+ * Separates Sign In / Account Profile cleanly from the 4-column left-to-right Plans view,
+ * using calm consumer-friendly language with zero technical jargon while keeping 100%
+ * of verified-email auth, password reset, quota sync, and Paddle/PayPal/Microsoft Store checkout.
  */
 
 import React, { useState } from 'react'
 import {
   X,
-  ShieldCheck,
-  Lock,
   LogOut,
   RefreshCw,
   Check,
-  CreditCard,
-  KeyRound,
   MailCheck,
-  ExternalLink
+  ExternalLink,
+  ArrowRight,
+  Sparkles,
+  User
 } from 'lucide-react'
 import { CheckoutProvider, CheckoutSessionResult, PlanId } from '../../../../types/account'
 import { useSession } from '../../context/SessionContext'
 import { isSupabaseAuthEnabled } from '../../services/gatewayAuthService'
+import { GlassSegmentedControl } from '../UI/GlassSegmentedControl'
 
 type AccountAuthView = 'signin' | 'signup' | 'reset'
+type ModalSection = 'account' | 'plans'
+
+function getInitials(email?: string): string {
+  if (!email) return ''
+  const namePart = email.split('@')[0] || ''
+  const parts = namePart.split(/[._-]+/).filter(Boolean)
+  if (parts.length >= 2) return `${parts[0][0]}${parts[1][0]}`.toUpperCase()
+  return namePart.slice(0, 2).toUpperCase()
+}
 
 export const AccountPlanModal: React.FC = () => {
   const {
@@ -41,6 +50,7 @@ export const AccountPlanModal: React.FC = () => {
     verifyMsStoreReceipt
   } = useSession()
 
+  const [section, setSection] = useState<ModalSection>('account')
   const [authMode, setAuthMode] = useState<AccountAuthView>('signin')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -48,7 +58,7 @@ export const AccountPlanModal: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [statusNotice, setStatusNotice] = useState<string | null>(null)
   const [pendingVerificationEmail, setPendingVerificationEmail] = useState<string | null>(null)
-  const [checkoutProvider, setCheckoutProvider] = useState<CheckoutProvider>('paypal')
+  const [checkoutProvider, setCheckoutProvider] = useState<CheckoutProvider>('paddle')
   const [activeCheckout, setActiveCheckout] = useState<CheckoutSessionResult | null>(null)
   const [checkoutNotice, setCheckoutNotice] = useState<string | null>(null)
   const [checkoutError, setCheckoutError] = useState<string | null>(null)
@@ -66,6 +76,7 @@ export const AccountPlanModal: React.FC = () => {
   const modMinutes = remainingMinutes % 60
   const remainingPct = Math.min(100, Math.max(0, Math.round((remainingSec / allocatedSec) * 100)))
   const isUnverifiedSession = Boolean(authSession && authSession.user.emailVerified === false)
+  const initials = getInitials(authSession?.user?.email)
 
   const switchAuthView = (nextMode: AccountAuthView) => {
     setAuthMode(nextMode)
@@ -92,14 +103,13 @@ export const AccountPlanModal: React.FC = () => {
       if (outcome.emailVerificationRequired) {
         setPendingVerificationEmail(trimmedEmail)
         setStatusNotice(
-          outcome.message ||
-            'Please verify your email address from your inbox before activating the 1-hour free tier.'
+          outcome.message || 'Check your inbox to verify your email and activate your free hour.'
         )
       } else {
         setPendingVerificationEmail(null)
       }
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : 'Unable to authenticate.')
+      setErrorMessage(err instanceof Error ? err.message : 'Unable to sign in right now.')
     } finally {
       setIsSubmitting(false)
     }
@@ -120,57 +130,55 @@ export const AccountPlanModal: React.FC = () => {
   }
 
   const handleSelectPlan = async (planId: PlanId, planName: string) => {
+    if (planId === 'free_tier') return
     setCheckoutError(null)
     setCheckoutNotice(null)
 
     if (!authSession) {
-      setCheckoutError(`Sign in above before upgrading to "${planName}".`)
+      setSection('account')
+      setErrorMessage('Sign in or create a free account first to choose a plan.')
+      return
+    }
+    if (isUnverifiedSession) {
+      setSection('account')
+      setErrorMessage('Please verify your email address before upgrading.')
       return
     }
 
     setIsCheckoutLoading(true)
     try {
-      const session = await startPlanCheckout(planId, checkoutProvider)
-      if (!session.ok) {
-        setCheckoutError(session.error || 'Unable to initialize checkout session.')
+      const result = await startPlanCheckout(planId, checkoutProvider)
+      setActiveCheckout(result)
+      if (!result.ok) {
+        setCheckoutError(result.error || `Unable to start checkout for ${planName}.`)
         return
       }
-
-      setActiveCheckout(session)
-
-      if (session.provider === 'microsoft_store') {
-        setCheckoutNotice(
-          `Microsoft Store checkout ready for "${planName}" (Product ID: ${session.msStoreProductId}). Complete purchase in Microsoft Store, then verify your Store ID Key below.`
-        )
-        return
-      }
-
-      if (session.checkoutUrl) {
-        window.open(session.checkoutUrl, '_blank', 'noopener,noreferrer')
-        setCheckoutNotice(
-          `Opened secure ${session.provider === 'paddle' ? 'Paddle' : 'PayPal'} checkout for "${planName}" (Ref: ${session.checkoutSessionId}). Once completed, click Sync Quota to load your hours.`
-        )
+      if (checkoutProvider === 'microsoft_store') {
+        setCheckoutNotice(`Complete your purchase for ${planName} in Microsoft Store, then verify below.`)
+      } else {
+        setCheckoutNotice(`Checkout opened in your browser for ${planName}. Click Refresh once finished.`)
       }
     } catch (err) {
-      setCheckoutError(err instanceof Error ? err.message : 'Unable to start checkout.')
+      setCheckoutError(err instanceof Error ? err.message : 'Checkout could not be started.')
     } finally {
       setIsCheckoutLoading(false)
     }
   }
 
-  const handleVerifyMsStoreReceipt = async (e: React.FormEvent) => {
+  const handleVerifyStoreReceipt = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!activeCheckout?.msStoreProductId) return
+    if (!activeCheckout?.planId || !msStoreIdKey.trim()) return
     setCheckoutError(null)
+    setCheckoutNotice(null)
     setIsVerifyingStoreReceipt(true)
     try {
-      const res = await verifyMsStoreReceipt(msStoreIdKey.trim(), activeCheckout.msStoreProductId)
+      const res = await verifyMsStoreReceipt(activeCheckout.planId, msStoreIdKey.trim())
       if (res.verified) {
         setMsStoreIdKey('')
         setActiveCheckout(null)
-        setCheckoutNotice('Microsoft Store entitlement verified and hours credited to your account.')
+        setCheckoutNotice('Purchase confirmed. Your hours have been added to your account.')
       } else {
-        setCheckoutError(res.error || 'Microsoft Store receipt verification failed.')
+        setCheckoutError(res.error || 'Could not verify Microsoft Store receipt.')
       }
     } catch (err) {
       setCheckoutError(err instanceof Error ? err.message : 'Receipt verification failed.')
@@ -179,471 +187,503 @@ export const AccountPlanModal: React.FC = () => {
     }
   }
 
+  const isPlansView = section === 'plans'
+
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4"
+      className="animate-glass-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-md p-4"
       role="dialog"
       aria-modal="true"
-      aria-label="DualAI Account and Subscription Plans"
+      aria-label="DualAI Account and Plans"
     >
-      <div className="flex max-h-[88vh] w-full max-w-[780px] flex-col overflow-hidden rounded-lg border border-surface-border bg-surface-panel text-xs text-text-primary shadow-2xl">
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-surface-border bg-surface-base px-5 py-3.5">
-          <div className="flex items-center space-x-2.5">
-            <ShieldCheck className="h-4 w-4 text-accent-emerald" strokeWidth={1.75} />
-            <div>
-              <h2 className="text-sm font-semibold tracking-tight text-text-primary">
-                DualAI Account & Interpretation Quota
-              </h2>
-              <p className="font-mono text-[10px] text-text-muted">
-                Zero-Trust Cloud Gateway | Verified Email Auth | Silent JWT Refresh | OS Keychain Vault
-              </p>
-            </div>
-          </div>
+      <div
+        key={section}
+        className={`glass-sheet animate-glass-modal flex max-h-[90vh] w-full flex-col overflow-hidden rounded-[26px] text-xs text-text-primary ${
+          isPlansView ? 'max-w-[960px]' : 'max-w-[460px]'
+        }`}
+      >
+        {/* Clean Top Navigation Bar */}
+        <div className="flex items-center justify-between border-b border-white/[0.07] px-5 py-3.5">
+          <GlassSegmentedControl<ModalSection>
+            ariaLabel="Account or Plans view"
+            value={section}
+            onChange={(next) => {
+              setSection(next)
+              setErrorMessage(null)
+              setCheckoutError(null)
+            }}
+            options={[
+              { id: 'account', label: authSession ? 'Account' : 'Sign In' },
+              { id: 'plans', label: 'Plans & Pricing' }
+            ]}
+          />
+
           <button
             type="button"
             onClick={closeAccountModal}
             aria-label="Close Account Modal"
-            className="rounded p-1 text-text-muted hover:bg-surface-active hover:text-text-primary transition"
+            className="glass-control-hover flex h-7 w-7 items-center justify-center rounded-full bg-white/[0.07] text-white/60 hover:text-white"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto p-5 space-y-5">
+        <div className="flex-1 overflow-y-auto p-6">
+          {/* Status Alerts */}
           {isQuotaExhausted && (
             <div
               role="alert"
-              className="rounded border border-accent-crimson/50 bg-accent-crimson/10 p-3 font-mono text-[11px] text-accent-crimson"
+              className="mb-5 flex items-center justify-between gap-3 rounded-2xl border border-accent-crimson/40 bg-accent-crimson/12 px-4 py-3 text-xs text-accent-crimson"
             >
-              Your available interpretation hours have reached 0m. Select a plan below to add hours
-              and resume live translation immediately.
+              <span>You have used all your available hours for this cycle.</span>
+              {!isPlansView && (
+                <button
+                  type="button"
+                  onClick={() => setSection('plans')}
+                  className="shrink-0 rounded-full bg-accent-crimson px-3 py-1 text-[11px] font-semibold text-white"
+                >
+                  View Plans
+                </button>
+              )}
             </div>
           )}
 
           {isUnverifiedSession && authSession && (
             <div
               role="alert"
-              className="flex flex-wrap items-center justify-between gap-2 rounded border border-accent-amber/50 bg-accent-amber/10 p-3 font-mono text-[11px] text-accent-amber"
+              className="mb-5 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-accent-amber/40 bg-accent-amber/12 px-4 py-3 text-xs text-accent-amber"
             >
               <span className="flex items-center space-x-2">
                 <MailCheck className="h-4 w-4 shrink-0" />
-                <span>
-                  Email verification required before activating live free-tier streaming.
-                </span>
+                <span>Verify your email to activate your free hour.</span>
               </span>
               <button
                 type="button"
                 disabled={isSubmitting}
                 onClick={() => void handleResendVerification(authSession.user.email)}
-                className="rounded border border-accent-amber/60 bg-surface-base px-2.5 py-1 text-[10px] font-bold text-text-primary hover:bg-surface-active disabled:opacity-50 transition"
+                className="glass-control-hover rounded-full border border-accent-amber/50 bg-white/[0.08] px-3 py-1 text-[11px] font-medium text-white disabled:opacity-50"
               >
                 Resend Verification
               </button>
             </div>
           )}
 
-          {!authSession ? (
-            <form
-              onSubmit={(e) => void handleSubmitAuth(e)}
-              className="rounded-lg border border-surface-border bg-surface-base p-5 space-y-4"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h3 className="text-sm font-semibold text-text-primary">
+          {/* ================================================================
+           * VIEW 1: CLEAN APPLE-STYLE SIGN IN / ACCOUNT PROFILE
+           * ================================================================ */}
+          {!isPlansView ? (
+            !authSession ? (
+              <div className="space-y-6 py-1">
+                {/* Centered Welcome Title */}
+                <div className="text-center space-y-1.5">
+                  <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.08] border border-white/[0.12] shadow-[inset_0_1px_0_rgba(255,255,255,0.2)]">
+                    <User className="h-5 w-5 text-white" strokeWidth={1.75} />
+                  </div>
+                  <h2 className="pt-1 text-lg font-semibold tracking-tight text-white">
                     {authMode === 'signup'
-                      ? 'Create Account - 1 Hour Free Included'
+                      ? 'Create your DualAI account'
                       : authMode === 'reset'
-                        ? 'Reset Account Password'
-                        : 'Sign In to DualAI Cloud Gateway'}
-                  </h3>
-                  <p className="mt-0.5 text-[11px] text-text-muted">
-                    {authMode === 'reset'
-                      ? 'Enter your registered email address to receive a secure password reset link.'
-                      : 'Verified email required to unlock your 60-minute free trial. No API keys needed.'}
+                        ? 'Reset your password'
+                        : 'Sign in to DualAI'}
+                  </h2>
+                  <p className="text-xs text-white/50">
+                    {authMode === 'signup'
+                      ? 'Includes 1 free hour of live translation right away.'
+                      : authMode === 'reset'
+                        ? 'We will send a password reset link to your inbox.'
+                        : 'Sync your translation hours and settings automatically.'}
                   </p>
                 </div>
-                <div className="flex rounded border border-surface-border bg-surface-panel p-0.5 font-mono text-[10px]">
-                  <button
-                    type="button"
-                    onClick={() => switchAuthView('signin')}
-                    className={`rounded px-2.5 py-1 transition ${
-                      authMode === 'signin'
-                        ? 'bg-accent-steel text-white font-bold'
-                        : 'text-text-secondary hover:text-text-primary'
-                    }`}
-                  >
-                    Sign In
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => switchAuthView('signup')}
-                    className={`rounded px-2.5 py-1 transition ${
-                      authMode === 'signup'
-                        ? 'bg-accent-steel text-white font-bold'
-                        : 'text-text-secondary hover:text-text-primary'
-                    }`}
-                  >
-                    Sign Up (1h Free)
-                  </button>
-                </div>
-              </div>
 
-              <div
-                className={`grid grid-cols-1 gap-3 ${authMode === 'reset' ? '' : 'sm:grid-cols-2'}`}
-              >
-                <label className="space-y-1">
-                  <span className="block font-mono text-[10px] uppercase text-text-secondary">
-                    Email Address
-                  </span>
-                  <input
-                    type="email"
-                    required
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="interpreter@clinic.org"
-                    className="w-full rounded border border-surface-border bg-surface-panel px-3 py-2 font-mono text-xs text-text-primary outline-none focus:border-accent-steel"
-                  />
-                </label>
-
+                {/* Auth Mode Switcher */}
                 {authMode !== 'reset' && (
-                  <label className="space-y-1">
-                    <span className="block font-mono text-[10px] uppercase text-text-secondary">
-                      Password {!supabaseEnabled && '(Optional in Local Dev)'}
-                    </span>
-                    <input
-                      type="password"
-                      required={supabaseEnabled}
-                      minLength={supabaseEnabled ? 8 : undefined}
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder={supabaseEnabled ? 'Minimum 8 characters' : 'Local Gateway Dev Mode'}
-                      className="w-full rounded border border-surface-border bg-surface-panel px-3 py-2 font-mono text-xs text-text-primary outline-none focus:border-accent-steel"
+                  <div className="flex justify-center">
+                    <GlassSegmentedControl<'signin' | 'signup'>
+                      ariaLabel="Sign in or create account"
+                      value={authMode}
+                      onChange={switchAuthView}
+                      size="md"
+                      fullWidth
+                      options={[
+                        { id: 'signin', label: 'Sign In' },
+                        { id: 'signup', label: 'Create Account (1h Free)' }
+                      ]}
                     />
-                  </label>
+                  </div>
                 )}
-              </div>
 
-              {statusNotice && (
-                <div
-                  role="status"
-                  className="flex flex-wrap items-center justify-between gap-2 rounded border border-accent-emerald/40 bg-accent-emerald/10 px-3 py-2 font-mono text-[11px] text-accent-emerald"
-                >
-                  <span>{statusNotice}</span>
-                  {pendingVerificationEmail && (
-                    <button
-                      type="button"
-                      disabled={isSubmitting}
-                      onClick={() => void handleResendVerification(pendingVerificationEmail)}
-                      className="rounded border border-accent-emerald/50 bg-surface-base px-2.5 py-1 text-[10px] font-bold text-text-primary hover:bg-surface-active disabled:opacity-50 transition"
+                <form onSubmit={(e) => void handleSubmitAuth(e)} className="space-y-4">
+                  <div className="space-y-3">
+                    <label className="block space-y-1.5">
+                      <span className="text-[11px] font-medium text-white/65 pl-1">Email</span>
+                      <input
+                        type="email"
+                        required
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="you@example.com"
+                        className="h-10 w-full rounded-2xl border border-white/[0.1] bg-white/[0.06] px-3.5 text-sm text-white placeholder:text-white/30 outline-none focus:border-accent-steel/80 focus:bg-white/[0.09] transition"
+                      />
+                    </label>
+
+                    {authMode !== 'reset' && (
+                      <label className="block space-y-1.5">
+                        <span className="text-[11px] font-medium text-white/65 pl-1">
+                          Password
+                        </span>
+                        <input
+                          type="password"
+                          required={supabaseEnabled}
+                          minLength={supabaseEnabled ? 8 : undefined}
+                          value={password}
+                          onChange={(e) => setPassword(e.target.value)}
+                          placeholder="Minimum 8 characters"
+                          className="h-10 w-full rounded-2xl border border-white/[0.1] bg-white/[0.06] px-3.5 text-sm text-white placeholder:text-white/30 outline-none focus:border-accent-steel/80 focus:bg-white/[0.09] transition"
+                        />
+                      </label>
+                    )}
+                  </div>
+
+                  {statusNotice && (
+                    <div
+                      role="status"
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-accent-emerald/40 bg-accent-emerald/12 px-3.5 py-2.5 text-xs text-accent-emerald"
                     >
-                      Resend Verification Email
-                    </button>
+                      <span>{statusNotice}</span>
+                      {pendingVerificationEmail && (
+                        <button
+                          type="button"
+                          disabled={isSubmitting}
+                          onClick={() => void handleResendVerification(pendingVerificationEmail)}
+                          className="rounded-full bg-white/[0.1] px-3 py-1 text-[11px] font-medium text-white"
+                        >
+                          Resend
+                        </button>
+                      )}
+                    </div>
                   )}
-                </div>
-              )}
 
-              {errorMessage && (
-                <p
-                  role="alert"
-                  className="rounded border border-accent-crimson/40 bg-accent-crimson/10 px-3 py-2 font-mono text-[11px] text-accent-crimson"
-                >
-                  {errorMessage}
-                </p>
-              )}
+                  {errorMessage && (
+                    <p
+                      role="alert"
+                      className="rounded-2xl border border-accent-crimson/40 bg-accent-crimson/12 px-3.5 py-2.5 text-xs text-accent-crimson"
+                    >
+                      {errorMessage}
+                    </p>
+                  )}
 
-              <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-                <div className="flex flex-col space-y-1">
-                  <span className="flex items-center space-x-1.5 font-mono text-[10px] text-text-muted">
-                    <Lock className="h-3 w-3 text-accent-emerald" />
-                    <span>
-                      Token encrypted via Electron safeStorage (Keychain / Windows DPAPI)
-                    </span>
-                  </span>
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="glass-cta-start h-10 w-full rounded-full text-sm font-semibold disabled:opacity-50"
+                  >
+                    {isSubmitting
+                      ? 'Please wait...'
+                      : authMode === 'signup'
+                        ? 'Create Free Account'
+                        : authMode === 'reset'
+                          ? 'Send Reset Link'
+                          : 'Sign In'}
+                  </button>
+                </form>
+
+                {/* Subtle Bottom Links */}
+                <div className="flex items-center justify-between border-t border-white/[0.07] pt-4 text-xs">
                   {authMode === 'signin' ? (
                     <button
                       type="button"
                       onClick={() => switchAuthView('reset')}
-                      className="w-fit font-mono text-[10px] text-accent-steel underline underline-offset-4 hover:text-blue-400 transition"
+                      className="text-white/50 hover:text-white transition"
                     >
                       Forgot password?
                     </button>
-                  ) : authMode === 'reset' ? (
+                  ) : (
                     <button
                       type="button"
                       onClick={() => switchAuthView('signin')}
-                      className="w-fit font-mono text-[10px] text-text-secondary underline underline-offset-4 hover:text-text-primary transition"
+                      className="text-white/50 hover:text-white transition"
                     >
                       Back to Sign In
                     </button>
-                  ) : null}
-                </div>
+                  )}
 
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="rounded bg-accent-steel px-4 py-2 font-mono text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-50 transition"
-                >
-                  {isSubmitting
-                    ? 'PROCESSING...'
-                    : authMode === 'signup'
-                      ? 'START 1-HOUR FREE TIER'
-                      : authMode === 'reset'
-                        ? 'SEND RESET LINK'
-                        : 'SIGN IN'}
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => setSection('plans')}
+                    className="flex items-center space-x-1 font-medium text-accent-steel hover:text-blue-400 transition"
+                  >
+                    <span>See plans</span>
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
-            </form>
-          ) : (
-            <div className="rounded-lg border border-surface-border bg-surface-base p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2.5">
-                  <KeyRound className="h-4 w-4 text-accent-emerald" />
+            ) : (
+              /* Signed-In Clean Account Profile */
+              <div className="space-y-5 py-1">
+                <div className="flex flex-col items-center text-center space-y-2">
+                  <div className="flex h-16 w-16 items-center justify-center rounded-full bg-accent-steel/22 border border-accent-steel/45 text-lg font-semibold text-white">
+                    {initials || 'U'}
+                  </div>
                   <div>
-                    <p className="font-mono text-xs font-semibold text-text-primary">
-                      {authSession.user.email}
-                    </p>
-                    <p className="font-mono text-[10px] text-text-muted">
-                      Plan: {accountQuota?.planId.toUpperCase() || 'FREE_TIER'} | Status:{' '}
-                      {accountQuota?.subscriptionStatus.toUpperCase() || 'FREE_TRIAL'} | Email:{' '}
-                      {isUnverifiedSession ? 'UNVERIFIED' : 'VERIFIED'}
+                    <p className="text-sm font-semibold text-white">{authSession.user.email}</p>
+                    <p className="mt-0.5 text-xs text-white/50">
+                      Current plan:{' '}
+                      <span className="font-medium text-white/85">
+                        {availablePlans.find((p) => p.id === accountQuota?.planId)?.name ||
+                          'Free Trial (1 Hour)'}
+                      </span>
                     </p>
                   </div>
                 </div>
-                <div className="flex items-center space-x-2">
+
+                {/* Clean Remaining Time Card */}
+                <div className="glass-grouped-card rounded-2xl p-4 space-y-2.5">
+                  <div className="flex items-baseline justify-between">
+                    <span className="text-xs text-white/55">Time remaining</span>
+                    <span className="text-base font-semibold tabular-nums text-white">
+                      {remainingHours > 0 ? `${remainingHours}h ${modMinutes}m` : `${modMinutes}m`}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-white/[0.1]">
+                    <div
+                      className={`h-full rounded-full transition-all duration-300 ${
+                        remainingPct <= 10 ? 'bg-accent-crimson' : 'bg-accent-steel'
+                      }`}
+                      style={{ width: `${remainingPct}%` }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] text-white/40">
+                    <span>{remainingPct}% left in current cycle</span>
+                    <button
+                      type="button"
+                      onClick={() => void refreshAccountQuota()}
+                      className="flex items-center space-x-1 text-white/65 hover:text-white transition"
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      <span>Refresh</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-2.5">
                   <button
                     type="button"
-                    onClick={() => void refreshAccountQuota()}
-                    className="flex items-center space-x-1 rounded border border-surface-border bg-surface-panel px-2.5 py-1.5 font-mono text-[11px] text-text-secondary hover:text-text-primary transition"
+                    onClick={() => setSection('plans')}
+                    className="glass-cta-start flex h-10 w-full items-center justify-center space-x-2 rounded-full text-sm font-semibold"
                   >
-                    <RefreshCw className="h-3 w-3" />
-                    <span>Sync Quota</span>
+                    <Sparkles className="h-4 w-4" />
+                    <span>Upgrade or Add Hours</span>
                   </button>
+
                   <button
                     type="button"
                     onClick={() => void signOutAccount()}
-                    className="flex items-center space-x-1 rounded border border-accent-crimson/40 bg-accent-crimson/10 px-2.5 py-1.5 font-mono text-[11px] text-accent-crimson hover:bg-accent-crimson/20 transition"
+                    className="glass-control-hover flex h-9 w-full items-center justify-center space-x-1.5 rounded-full border border-white/[0.09] bg-white/[0.04] text-xs font-medium text-white/65 hover:text-accent-crimson"
                   >
-                    <LogOut className="h-3 w-3" />
+                    <LogOut className="h-3.5 w-3.5" />
                     <span>Sign Out</span>
                   </button>
                 </div>
               </div>
-
-              <div className="space-y-1.5 pt-1">
-                <div className="flex items-center justify-between font-mono text-[11px]">
-                  <span className="text-text-secondary">Server-Authoritative Balance</span>
-                  <span className="font-bold text-text-primary">
-                    {remainingHours > 0 ? `${remainingHours}h ${modMinutes}m` : `${modMinutes}m`}{' '}
-                    remaining ({remainingPct}%)
-                  </span>
+            )
+          ) : (
+            /* ================================================================
+             * VIEW 2: 4 HORIZONTAL PLAN CARDS LEFT-TO-RIGHT
+             * ================================================================ */
+            <div className="space-y-5">
+              {/* Plans Header + Subtle Payment Method Switcher */}
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold tracking-tight text-white">
+                    Simple, transparent plans
+                  </h2>
+                  <p className="mt-0.5 text-xs text-white/50">
+                    Every plan includes 60+ languages, speaker detection, and the floating teleprompter.
+                  </p>
                 </div>
-                <div className="h-2 w-full overflow-hidden rounded-full bg-surface-border">
-                  <div
-                    className={`h-full transition-all duration-300 ${
-                      remainingPct <= 10 ? 'bg-accent-crimson' : 'bg-accent-steel'
-                    }`}
-                    style={{ width: `${remainingPct}%` }}
-                  />
-                </div>
-              </div>
-            </div>
-          )}
 
-          {/* Tiered Plans Matrix (Microsoft Store MSIX + PayPal/Paddle Honduras-Compatible) */}
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-text-secondary">
-                Available Interpretation Hour Plans
-              </h3>
-              <div
-                role="radiogroup"
-                aria-label="Checkout payment provider"
-                className="flex items-center rounded border border-surface-border bg-surface-base p-0.5 font-mono text-[10px]"
-              >
-                {(
-                  [
+                <GlassSegmentedControl<CheckoutProvider>
+                  ariaLabel="Payment method"
+                  value={checkoutProvider}
+                  onChange={(next) => {
+                    setCheckoutProvider(next)
+                    setActiveCheckout(null)
+                    setCheckoutError(null)
+                  }}
+                  options={[
+                    { id: 'paddle', label: 'Card / Paddle' },
                     { id: 'paypal', label: 'PayPal' },
-                    { id: 'paddle', label: 'Paddle' },
                     { id: 'microsoft_store', label: 'Microsoft Store' }
-                  ] as Array<{ id: CheckoutProvider; label: string }>
-                ).map((opt) => (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    role="radio"
-                    aria-checked={checkoutProvider === opt.id}
-                    onClick={() => {
-                      setCheckoutProvider(opt.id)
-                      setActiveCheckout(null)
-                      setCheckoutError(null)
-                    }}
-                    className={`rounded px-2 py-1 transition ${
-                      checkoutProvider === opt.id
-                        ? 'bg-accent-steel text-white font-bold'
-                        : 'text-text-secondary hover:text-text-primary'
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
+                  ]}
+                />
               </div>
-            </div>
 
-            <div className="flex items-center space-x-1.5 font-mono text-[10px] text-text-muted">
-              <CreditCard className="h-3 w-3 shrink-0" />
-              <span>
-                {checkoutProvider === 'microsoft_store'
-                  ? 'Windows MSIX native billing via Microsoft Store Collections API v9.0'
-                  : 'Global & Honduras-compatible checkout via PayPal / Paddle Merchant of Record'}
-              </span>
-            </div>
+              {/* 4 Horizontal Cards Side-by-Side (Left -> Right) */}
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                {availablePlans.map((plan) => {
+                  const isCurrent = accountQuota?.planId === plan.id
+                  const isPopular = plan.id === 'pro_plus_70h'
+                  const hours = Math.round(plan.includedSeconds / 3600)
+                  const cleanName =
+                    plan.id === 'free_tier'
+                      ? 'Free'
+                      : plan.id === 'pro_40h'
+                        ? 'Pro'
+                        : plan.id === 'pro_plus_70h'
+                          ? 'Pro+'
+                          : 'Unlimited'
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {availablePlans.map((plan) => {
-                const isCurrent = accountQuota?.planId === plan.id
-                const hours = Math.round(plan.includedSeconds / 3600)
-                return (
-                  <div
-                    key={plan.id}
-                    className={`flex flex-col justify-between rounded-lg border p-4 ${
-                      isCurrent
-                        ? 'border-accent-emerald bg-accent-emerald/5'
-                        : 'border-surface-border bg-surface-base'
-                    }`}
-                  >
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <span className="font-semibold text-text-primary">{plan.name}</span>
-                        <span className="font-mono text-xs font-bold text-accent-steel">
-                          {plan.monthlyPriceUsd === 0 ? 'FREE' : `$${plan.monthlyPriceUsd.toFixed(2)}/mo`}
-                        </span>
-                      </div>
-                      <p className="text-[11px] leading-relaxed text-text-muted">
-                        {plan.description}
-                      </p>
-                      <div className="flex items-center space-x-3 pt-1 font-mono text-[10px] text-text-secondary">
-                        <span className="flex items-center space-x-1">
-                          <Check className="h-3 w-3 text-accent-emerald" />
-                          <span>
-                            {plan.isUnlimitedFairUse ? 'Unlimited hours/mo*' : `${hours}h / month`}
+                  return (
+                    <div
+                      key={plan.id}
+                      className={`relative flex flex-col justify-between rounded-[22px] border p-4 transition-all duration-200 ${
+                        isPopular
+                          ? 'border-accent-steel/60 bg-accent-steel/12 shadow-[inset_0_1px_0.5px_rgba(255,255,255,0.22),0_12px_32px_-8px_rgba(10,132,255,0.28)]'
+                          : isCurrent
+                            ? 'border-accent-emerald/50 bg-accent-emerald/10'
+                            : 'glass-grouped-card hover:bg-white/[0.07]'
+                      }`}
+                    >
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-semibold text-white">{cleanName}</span>
+                          {isPopular ? (
+                            <span className="rounded-full bg-accent-steel px-2 py-0.5 text-[10px] font-semibold text-white">
+                              Popular
+                            </span>
+                          ) : isCurrent ? (
+                            <span className="rounded-full bg-accent-emerald/20 px-2 py-0.5 text-[10px] font-medium text-accent-emerald">
+                              Current
+                            </span>
+                          ) : null}
+                        </div>
+
+                        {/* Big Crisp Price */}
+                        <div className="flex items-baseline space-x-1">
+                          <span className="text-2xl font-bold tracking-tight tabular-nums text-white">
+                            {plan.monthlyPriceUsd === 0
+                              ? '$0'
+                              : `$${plan.monthlyPriceUsd.toFixed(2)}`}
                           </span>
-                        </span>
-                        <span className="flex items-center space-x-1">
-                          <Check className="h-3 w-3 text-accent-emerald" />
-                          <span>Multi-speaker + 60+ languages</span>
-                        </span>
+                          {plan.monthlyPriceUsd > 0 && (
+                            <span className="text-[11px] text-white/45">/ month</span>
+                          )}
+                        </div>
+
+                        <div className="h-px w-full bg-white/[0.08]" />
+
+                        {/* Concise Scannable Highlights */}
+                        <ul className="space-y-2 text-[11px] text-white/75">
+                          <li className="flex items-center space-x-2">
+                            <Check className="h-3.5 w-3.5 shrink-0 text-accent-emerald" strokeWidth={2.2} />
+                            <span className="font-medium text-white">
+                              {plan.isUnlimitedFairUse
+                                ? 'Unlimited hours*'
+                                : plan.id === 'free_tier'
+                                  ? '1 hour included'
+                                  : `${hours} hours / month`}
+                            </span>
+                          </li>
+                          <li className="flex items-center space-x-2">
+                            <Check className="h-3.5 w-3.5 shrink-0 text-accent-emerald" strokeWidth={2.2} />
+                            <span>60+ live languages</span>
+                          </li>
+                          <li className="flex items-center space-x-2">
+                            <Check className="h-3.5 w-3.5 shrink-0 text-accent-emerald" strokeWidth={2.2} />
+                            <span>Multi-speaker & HUD</span>
+                          </li>
+                        </ul>
+                      </div>
+
+                      <div className="pt-5">
+                        {plan.id === 'free_tier' ? (
+                          <div className="flex h-9 w-full items-center justify-center rounded-full border border-white/[0.09] bg-white/[0.04] text-[11px] font-medium text-white/50">
+                            {isCurrent ? 'Active Plan' : 'Included Free'}
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={isCheckoutLoading}
+                            onClick={() => void handleSelectPlan(plan.id, cleanName)}
+                            className={`flex h-9 w-full items-center justify-center space-x-1.5 rounded-full text-xs font-semibold disabled:opacity-50 ${
+                              isPopular
+                                ? 'glass-cta-start'
+                                : 'glass-control-hover border border-white/[0.14] bg-white/[0.1] text-white hover:bg-white/[0.18]'
+                            }`}
+                          >
+                            <span>{isCurrent ? 'Add Hours' : `Choose ${cleanName}`}</span>
+                            {checkoutProvider !== 'microsoft_store' && (
+                              <ExternalLink className="h-3 w-3 opacity-70" />
+                            )}
+                          </button>
+                        )}
                       </div>
                     </div>
-
-                    <div className="pt-3">
-                      {plan.id === 'free_tier' ? (
-                        <span className="block w-full rounded border border-surface-border bg-surface-panel py-1.5 text-center font-mono text-[10px] text-text-muted">
-                          {isCurrent ? 'ACTIVE FREE TIER' : 'INCLUDED ON SIGNUP'}
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          disabled={isCheckoutLoading}
-                          onClick={() => void handleSelectPlan(plan.id, plan.name)}
-                          className="flex w-full items-center justify-center space-x-1.5 rounded bg-accent-steel py-1.5 font-mono text-[11px] font-bold text-white hover:bg-blue-700 disabled:opacity-50 transition"
-                        >
-                          <span>
-                            {isCurrent
-                              ? 'ADD MORE HOURS'
-                              : checkoutProvider === 'microsoft_store'
-                                ? 'BUY IN MICROSOFT STORE'
-                                : checkoutProvider === 'paddle'
-                                  ? 'UPGRADE VIA PADDLE'
-                                  : 'UPGRADE VIA PAYPAL'}
-                          </span>
-                          <ExternalLink className="h-3 w-3" />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-
-            {checkoutError && (
-              <div
-                role="alert"
-                className="rounded border border-accent-crimson/40 bg-accent-crimson/10 p-3 font-mono text-[11px] text-accent-crimson"
-              >
-                {checkoutError}
+                  )
+                })}
               </div>
-            )}
 
-            {checkoutNotice && (
-              <div
-                role="status"
-                className="flex flex-wrap items-center justify-between gap-2 rounded border border-accent-steel/40 bg-accent-steel/10 p-3 font-mono text-[11px] text-text-primary"
-              >
-                <span>{checkoutNotice}</span>
-                {authSession && activeCheckout?.provider !== 'microsoft_store' && (
+              {/* Feedback Banners */}
+              {checkoutNotice && (
+                <div
+                  role="status"
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-accent-emerald/40 bg-accent-emerald/12 px-4 py-3 text-xs text-accent-emerald"
+                >
+                  <span>{checkoutNotice}</span>
                   <button
                     type="button"
                     onClick={() => void refreshAccountQuota()}
-                    className="flex items-center space-x-1 rounded border border-accent-steel/60 bg-surface-base px-2.5 py-1 text-[10px] font-bold text-text-primary hover:bg-surface-active transition"
+                    className="rounded-full bg-white/[0.1] px-3 py-1 text-[11px] font-medium text-white"
                   >
-                    <RefreshCw className="h-3 w-3" />
-                    <span>Sync Quota Now</span>
+                    Refresh Balance
                   </button>
-                )}
-              </div>
-            )}
+                </div>
+              )}
 
-            {activeCheckout?.provider === 'microsoft_store' && activeCheckout.msStoreProductId && (
-              <form
-                onSubmit={(e) => void handleVerifyMsStoreReceipt(e)}
-                className="rounded-lg border border-surface-border bg-surface-base p-4 space-y-3"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="font-mono text-[11px] font-bold text-text-primary">
-                      Microsoft Store Collections v9.0 Receipt Verification
-                    </p>
-                    <p className="font-mono text-[10px] text-text-muted">
-                      Product ID: {activeCheckout.msStoreProductId} ({activeCheckout.planName})
-                    </p>
-                  </div>
-                  {activeCheckout.storeUri && (
+              {checkoutError && (
+                <p
+                  role="alert"
+                  className="rounded-2xl border border-accent-crimson/40 bg-accent-crimson/12 px-4 py-3 text-xs text-accent-crimson"
+                >
+                  {checkoutError}
+                </p>
+              )}
+
+              {/* Microsoft Store Receipt Verification (Shown only when active) */}
+              {activeCheckout?.ok && checkoutProvider === 'microsoft_store' && (
+                <form
+                  onSubmit={(e) => void handleVerifyStoreReceipt(e)}
+                  className="glass-grouped-card rounded-2xl p-4 space-y-3"
+                >
+                  <p className="text-xs font-medium text-white">
+                    Verify your Microsoft Store purchase
+                  </p>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <input
+                      type="text"
+                      required
+                      value={msStoreIdKey}
+                      onChange={(e) => setMsStoreIdKey(e.target.value)}
+                      placeholder="Paste Microsoft Store receipt ID"
+                      className="h-9 flex-1 rounded-full border border-white/[0.1] bg-white/[0.06] px-4 text-xs text-white placeholder:text-white/35 outline-none focus:border-accent-steel"
+                    />
                     <button
-                      type="button"
-                      onClick={() =>
-                        window.open(activeCheckout.storeUri, '_blank', 'noopener,noreferrer')
-                      }
-                      className="flex items-center space-x-1 rounded border border-surface-border bg-surface-panel px-2.5 py-1 font-mono text-[10px] text-text-secondary hover:text-text-primary transition"
+                      type="submit"
+                      disabled={isVerifyingStoreReceipt}
+                      className="glass-cta-start h-9 rounded-full px-5 text-xs font-semibold disabled:opacity-50"
                     >
-                      <span>Open Store App</span>
-                      <ExternalLink className="h-3 w-3" />
+                      {isVerifyingStoreReceipt ? 'Verifying...' : 'Confirm Purchase'}
                     </button>
-                  )}
-                </div>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <input
-                    type="text"
-                    required
-                    minLength={16}
-                    value={msStoreIdKey}
-                    onChange={(e) => setMsStoreIdKey(e.target.value)}
-                    placeholder="Paste Windows MSIX Store ID Key to credit hours"
-                    aria-label="Microsoft Store ID Key"
-                    className="flex-1 rounded border border-surface-border bg-surface-panel px-3 py-1.5 font-mono text-xs text-text-primary outline-none focus:border-accent-steel"
-                  />
-                  <button
-                    type="submit"
-                    disabled={isVerifyingStoreReceipt}
-                    className="rounded bg-accent-emerald px-3.5 py-1.5 font-mono text-[11px] font-bold text-black hover:opacity-90 disabled:opacity-50 transition"
-                  >
-                    {isVerifyingStoreReceipt ? 'VERIFYING...' : 'VERIFY RECEIPT'}
-                  </button>
-                </div>
-              </form>
-            )}
-          </div>
+                  </div>
+                </form>
+              )}
+
+              <p className="text-center text-[11px] text-white/35">
+                * Unlimited plan covers normal single-user daily interpretation (fair use). Cancel anytime.
+              </p>
+            </div>
+          )}
         </div>
       </div>
     </div>
