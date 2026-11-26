@@ -453,3 +453,34 @@ export async function verifyMicrosoftStorePurchase(params: {
     error: data.error
   }
 }
+
+/**
+ * Requests an authenticated self-service Paddle Customer Portal session URL from the Cloud Gateway.
+ * Server resolves customer_id from authenticated session (never client-trusted).
+ */
+export async function requestCustomerPortalSession(
+  accessToken: string
+): Promise<{ ok: boolean; portalUrl?: string; error?: string }> {
+  const response = await fetch(`${GATEWAY_BASE_URL}/v1/billing/customer-portal`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`
+    }
+  })
+
+  const data = (await response.json().catch(() => ({}))) as {
+    ok?: boolean
+    portalUrl?: string
+    error?: string
+  }
+
+  if (!response.ok || !data.ok || !data.portalUrl) {
+    return {
+      ok: false,
+      error: data.error || `Unable to open customer portal (${response.status}).`
+    }
+  }
+
+  return { ok: true, portalUrl: data.portalUrl }
+}

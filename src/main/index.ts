@@ -437,20 +437,21 @@ function registerIpcHandlers(): void {
 function registerSecurityHeaders(): void {
   const isDev = Boolean(process.env['ELECTRON_RENDERER_URL'])
   const connectSources = isDev
-    ? "'self' http://127.0.0.1:8787 ws://127.0.0.1:8787 http://localhost:8787 ws://localhost:8787 ws://localhost:5173 https://*.fly.dev wss://*.fly.dev https://*.supabase.co blob: data:"
-    : "'self' https://*.universalaisync.com wss://*.universalaisync.com https://*.dualai.app wss://*.dualai.app https://*.fly.dev wss://*.fly.dev https://*.supabase.co blob: data:"
+    ? "'self' http://127.0.0.1:8787 ws://127.0.0.1:8787 http://localhost:8787 ws://localhost:8787 ws://localhost:5173 https://*.fly.dev wss://*.fly.dev https://*.supabase.co https://*.paddle.com https://api.paddle.com https://buy.paddle.com blob: data:"
+    : "'self' https://*.universalaisync.com wss://*.universalaisync.com https://*.dualai.app wss://*.dualai.app https://*.fly.dev wss://*.fly.dev https://*.supabase.co https://*.paddle.com https://api.paddle.com https://buy.paddle.com blob: data:"
 
   const scriptSources = isDev
-    ? "'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:"
-    : "'self' 'wasm-unsafe-eval' blob:"
+    ? "'self' 'unsafe-inline' 'wasm-unsafe-eval' https://*.paddle.com https://cdn.paddle.com blob:"
+    : "'self' 'wasm-unsafe-eval' https://*.paddle.com https://cdn.paddle.com blob:"
 
   const cspHeader = [
     "default-src 'self'",
     `script-src ${scriptSources}`,
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob:",
+    "img-src 'self' data: blob: https://*.paddle.com",
     "font-src 'self' data:",
     "worker-src 'self' blob:",
+    "frame-src 'self' https://*.paddle.com https://buy.paddle.com https://checkout.paddle.com",
     `connect-src ${connectSources}`,
     "object-src 'none'",
     "frame-ancestors 'none'"

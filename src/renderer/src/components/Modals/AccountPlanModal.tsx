@@ -5,7 +5,8 @@
  * of verified-email auth, password reset, quota sync, and Paddle/PayPal/Microsoft Store checkout.
  */
 
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
+import { initializePaddle, type Paddle } from '@paddle/paddle-js'
 import {
   X,
   LogOut,
@@ -15,11 +16,12 @@ import {
   ExternalLink,
   ArrowRight,
   Sparkles,
-  User
+  User,
+  CreditCard
 } from 'lucide-react'
 import { CheckoutProvider, CheckoutSessionResult, PlanId } from '../../../../types/account'
 import { useSession } from '../../context/SessionContext'
-import { isSupabaseAuthEnabled } from '../../services/gatewayAuthService'
+import { isSupabaseAuthEnabled, requestCustomerPortalSession } from '../../services/gatewayAuthService'
 import { GlassSegmentedControl } from '../UI/GlassSegmentedControl'
 
 type AccountAuthView = 'signin' | 'signup' | 'reset'
@@ -65,6 +67,31 @@ export const AccountPlanModal: React.FC = () => {
   const [isCheckoutLoading, setIsCheckoutLoading] = useState(false)
   const [msStoreIdKey, setMsStoreIdKey] = useState('')
   const [isVerifyingStoreReceipt, setIsVerifyingStoreReceipt] = useState(false)
+  const [isOpeningPortal, setIsOpeningPortal] = useState(false)
+  const [paddleInstance, setPaddleInstance] = useState<Paddle | null>(null)
+
+  useEffect(() => {
+    const clientToken = import.meta.env.VITE_PADDLE_CLIENT_TOKEN
+    const paddleEnv = (import.meta.env.VITE_PADDLE_ENV || 'production') as 'sandbox' | 'production'
+    if (!clientToken) return
+
+    initializePaddle({
+      token: clientToken,
+      environment: paddleEnv,
+      eventCallback: (event) => {
+        if (event.name === 'checkout.completed') {
+          void refreshAccountQuota()
+          setCheckoutNotice('Payment completed. Your hours have been activated.')
+        }
+      }
+    })
+      .then((paddle) => {
+        if (paddle) setPaddleInstance(paddle)
+      })
+      .catch((err) => {
+        console.warn('Paddle overlay initialization error:', err)
+      })
+  }, [refreshAccountQuota])
 
   if (!isAccountModalOpen) return null
 
@@ -154,9 +181,34 @@ export const AccountPlanModal: React.FC = () => {
         return
       }
       if (checkoutProvider === 'microsoft_store') {
+        if (result.storeUri) {
+          window.open(result.storeUri, '_blank')
+        }
         setCheckoutNotice(`Complete your purchase for ${planName} in Microsoft Store, then verify below.`)
-      } else {
-        setCheckoutNotice(`Checkout opened in your browser for ${planName}. Click Refresh once finished.`)
+      } else if (result.checkoutUrl) {
+        // Open the Paddle official hosted checkout in external browser (avoids iframe domain block in Electron)
+        window.open(result.checkoutUrl, '_blank')
+        setCheckoutNotice(`Payment window opened in your browser for ${planName}. Click Refresh once finished.`)
+      } else if (checkoutProvider === 'paddle' && paddleInstance && result.paddlePriceId) {
+        paddleInstance.Checkout.open({
+          settings: {
+            displayMode: 'overlay',
+            theme: 'dark',
+            locale: 'en'
+          },
+          items: [
+            {
+              priceId: result.paddlePriceId,
+              quantity: 1
+            }
+          ],
+          customer: authSession?.user?.email ? { email: authSession.user.email } : undefined,
+          customData: {
+            userId: authSession.user.userId,
+            planId: planId
+          }
+        })
+        setCheckoutNotice(`Payment window opened for ${planName}.`)
       }
     } catch (err) {
       setCheckoutError(err instanceof Error ? err.message : 'Checkout could not be started.')
@@ -184,6 +236,35 @@ export const AccountPlanModal: React.FC = () => {
       setCheckoutError(err instanceof Error ? err.message : 'Receipt verification failed.')
     } finally {
       setIsVerifyingStoreReceipt(false)
+    }
+  }
+
+  const handleOpenCustomerPortal = async () => {
+    if (!authSession?.accessToken) {
+      console.warn('[CustomerPortal] No authenticated session or accessToken.')
+      setErrorMessage('Please sign in first to access your billing portal.')
+      return
+    }
+    setIsOpeningPortal(true)
+    setErrorMessage(null)
+    setCheckoutError(null)
+    try {
+      console.log('[CustomerPortal] Requesting portal session for user:', authSession.user.email)
+      const res = await requestCustomerPortalSession(authSession.accessToken)
+      console.log('[CustomerPortal] Response from gateway:', res)
+      if (res.ok && res.portalUrl) {
+        window.open(res.portalUrl, '_blank')
+      } else {
+        setErrorMessage(
+          res.error || 'Could not open billing portal. No active subscription found for this account.'
+        )
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to launch billing portal.'
+      console.error('[CustomerPortal] Error:', msg)
+      setErrorMessage(msg)
+    } finally {
+      setIsOpeningPortal(false)
     }
   }
 
@@ -466,6 +547,15 @@ export const AccountPlanModal: React.FC = () => {
                   </div>
                 </div>
 
+                {errorMessage && (
+                  <p
+                    role="alert"
+                    className="rounded-2xl border border-accent-crimson/40 bg-accent-crimson/12 px-3.5 py-2.5 text-xs text-accent-crimson"
+                  >
+                    {errorMessage}
+                  </p>
+                )}
+
                 <div className="space-y-2.5">
                   <button
                     type="button"
@@ -474,6 +564,16 @@ export const AccountPlanModal: React.FC = () => {
                   >
                     <Sparkles className="h-4 w-4" />
                     <span>Upgrade or Add Hours</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isOpeningPortal}
+                    onClick={() => void handleOpenCustomerPortal()}
+                    className="glass-control-hover flex h-9 w-full items-center justify-center space-x-1.5 rounded-full border border-white/[0.09] bg-white/[0.04] text-xs font-medium text-white/80 hover:text-white disabled:opacity-50"
+                  >
+                    <CreditCard className="h-3.5 w-3.5" />
+                    <span>{isOpeningPortal ? 'Opening Portal...' : 'Manage Billing & Invoices'}</span>
                   </button>
 
                   <button
@@ -679,9 +779,36 @@ export const AccountPlanModal: React.FC = () => {
                 </form>
               )}
 
-              <p className="text-center text-[11px] text-white/35">
-                * Unlimited plan covers normal single-user daily interpretation (fair use). Cancel anytime.
-              </p>
+              <div className="flex flex-wrap items-center justify-center gap-3 text-[11px] text-white/40 pt-2">
+                <span>* Unlimited covers fair-use single-user interpretation.</span>
+                <span className="opacity-40">•</span>
+                <a
+                  href="https://dualai.universalaisync.com/terms"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="hover:text-white/80 transition-colors underline"
+                >
+                  Terms
+                </a>
+                <span className="opacity-40">•</span>
+                <a
+                  href="https://dualai.universalaisync.com/privacy"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="hover:text-white/80 transition-colors underline"
+                >
+                  Privacy
+                </a>
+                <span className="opacity-40">•</span>
+                <a
+                  href="https://dualai.universalaisync.com/refunds"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="hover:text-white/80 transition-colors underline"
+                >
+                  Refunds
+                </a>
+              </div>
             </div>
           )}
         </div>

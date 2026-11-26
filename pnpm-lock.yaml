@@ -11,6 +11,12 @@ importers:
       '@google/genai':
         specifier: ^3.6.0
         version: 3.6.0(supports-color@7.2.0)
+      '@paddle/paddle-js':
+        specifier: ^1.6.6
+        version: 1.6.6
+      '@paddle/paddle-node-sdk':
+        specifier: ^3.12.0
+        version: 3.12.0
       '@supabase/supabase-js':
         specifier: ^2.119.1
         version: 2.119.1
@@ -420,6 +426,13 @@ packages:
 
   '@oxc-project/types@0.156.0':
     resolution: {integrity: sha512-1Duyg48TdJNdyhEB8Xn1L36bT9Pv6GUtlKjHxOys8xkaF/rQq3XJE+bAurSK/AgIz5mGFsb77cn9Pb20+WCScw==}
+
+  '@paddle/paddle-js@1.6.6':
+    resolution: {integrity: sha512-MHkqW4b7DP6F0HvbNG6HnGcSUdX2znwsvENIqJQuMqTtwcRPo6tTg8m1ail02mAODbFu/wsWUcRdsW7a9DVyTQ==}
+
+  '@paddle/paddle-node-sdk@3.12.0':
+    resolution: {integrity: sha512-xys3kymfnx8uhdO/aKuT5oxX+14SKMB2pv9QT/wDXwuzhghb+5POxOP5GdqXQH7pgAhznCz3AYVJaCIoX//FVw==}
+    engines: {node: '>=20'}
 
   '@peculiar/asn1-schema@2.11.1':
     resolution: {integrity: sha512-jaU9OaCcbZUdyXx9hMETZB9xoNmxTGjOGFqd3cOwKFkpKnyKd9WxF3uqj4PvX4cyOMP9bSdHg5YyML2qtx/d/g==}
@@ -2538,6 +2551,10 @@ snapshots:
   '@noble/hashes@1.8.0': {}
 
   '@oxc-project/types@0.156.0': {}
+
+  '@paddle/paddle-js@1.6.6': {}
+
+  '@paddle/paddle-node-sdk@3.12.0': {}
 
   '@peculiar/asn1-schema@2.11.1':
     dependencies:
