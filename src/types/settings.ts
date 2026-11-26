@@ -31,6 +31,7 @@ export interface WorkspaceDisplaySettings {
   showSpeakerLabels: boolean
   showLatencyBadges: boolean
   syncTypographyToHud: boolean
+  showShortcutHints: boolean
 }
 
 export const DEFAULT_WORKSPACE_DISPLAY_SETTINGS: WorkspaceDisplaySettings = {
@@ -44,7 +45,8 @@ export const DEFAULT_WORKSPACE_DISPLAY_SETTINGS: WorkspaceDisplaySettings = {
   showTimestamps: false,
   showSpeakerLabels: false,
   showLatencyBadges: false,
-  syncTypographyToHud: true
+  syncTypographyToHud: true,
+  showShortcutHints: true
 }
 
 export interface HudBounds {
@@ -65,6 +67,7 @@ export interface HudSettings {
   highContrast?: boolean
   showSpeakerLabels?: boolean
   showTimestamps?: boolean
+  textColor?: string
 }
 
 export interface GlossaryEntry {

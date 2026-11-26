@@ -59,47 +59,51 @@ export const GlossaryModal: React.FC = () => {
       role="dialog"
       aria-modal="true"
       aria-labelledby="glossary-modal-title"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 select-none"
+      className="animate-glass-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-md p-4 select-none"
     >
       <div
         ref={modalRef}
-        className="w-full max-w-xl rounded-lg border border-surface-border bg-surface-panel p-5 shadow-2xl space-y-4"
+        className="glass-sheet animate-glass-modal w-full max-w-xl rounded-[24px] p-5 space-y-4"
       >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-surface-border pb-3">
-          <div className="flex items-center space-x-2.5">
-            <BookOpen className="h-4 w-4 text-accent-steel" strokeWidth={1.5} />
+        <div className="flex items-center justify-between border-b border-white/[0.08] pb-3.5">
+          <div className="flex items-center space-x-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-accent-steel/20 text-accent-steel">
+              <BookOpen className="h-4 w-4" strokeWidth={1.75} />
+            </div>
             <div>
-              <h2 id="glossary-modal-title" className="text-sm font-semibold text-text-primary">
+              <h2 id="glossary-modal-title" className="text-sm font-semibold tracking-tight text-white">
                 Custom Terminology & Glossaries
               </h2>
-              <p className="text-[11px] text-text-muted">
-                Active Domain Target: {activeDomain.label}
+              <p className="text-[11px] text-white/50">
+                Active Domain: {activeDomain.label}
               </p>
             </div>
           </div>
           <button
             type="button"
             onClick={closeGlossaryModal}
-            className="rounded p-1 text-text-muted hover:bg-surface-active hover:text-text-primary transition"
+            className="glass-control-hover flex h-7 w-7 items-center justify-center rounded-full bg-white/[0.07] text-white/60 hover:text-white"
             title="Close (Escape)"
           >
-            <X className="h-4 w-4" strokeWidth={1.5} />
+            <X className="h-4 w-4" strokeWidth={1.75} />
           </button>
         </div>
 
         {/* Content */}
-        <div className="space-y-3 text-xs text-text-secondary">
-          <p className="text-text-secondary leading-relaxed">
+        <div className="space-y-3.5 text-xs text-white/70">
+          <p className="leading-relaxed">
             Upload custom CSV or JSON dictionaries containing paired source and target terms. Validated
-            entries are injected immediately into the Gemini 2.0 Flash prompt pipeline.
+            entries are applied immediately during live interpretation.
           </p>
 
           {/* Upload Dropzone */}
-          <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-surface-border bg-surface-base p-5 text-center space-y-2">
-            <Upload className="h-5 w-5 text-accent-steel" strokeWidth={1.5} />
-            <span className="font-medium text-text-primary">Select terminology CSV / JSON file</span>
-            <span className="text-[10px] font-mono text-text-muted">
+          <div className="glass-grouped-card flex flex-col items-center justify-center rounded-2xl border-dashed border-white/[0.15] p-5 text-center space-y-2">
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent-steel/18 text-accent-steel">
+              <Upload className="h-5 w-5" strokeWidth={1.75} />
+            </div>
+            <span className="font-semibold text-white">Select terminology CSV or JSON file</span>
+            <span className="font-mono text-[10px] text-white/45">
               Format: source_term, target_term, notes (Max 2MB)
             </span>
             <input
@@ -109,18 +113,18 @@ export const GlossaryModal: React.FC = () => {
               onChange={(e) => void handleFileChange(e)}
               className="hidden"
             />
-            <div className="flex items-center space-x-2 pt-1">
+            <div className="flex items-center space-x-2 pt-1.5">
               <button
                 type="button"
                 onClick={handleLoadSample}
-                className="rounded border border-surface-border bg-surface-panel px-2.5 py-1 font-mono text-[11px] text-text-secondary hover:text-text-primary transition"
+                className="glass-control-hover rounded-full border border-white/[0.1] bg-white/[0.06] px-3.5 py-1.5 text-[11px] font-medium text-white/80 hover:text-white"
               >
                 Load Sample CSV
               </button>
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="rounded bg-accent-steel px-3 py-1 font-mono text-[11px] font-semibold text-white hover:bg-blue-700 transition"
+                className="glass-cta-start rounded-full px-4 py-1.5 text-[11px] font-semibold"
               >
                 Choose File
               </button>
@@ -129,10 +133,10 @@ export const GlossaryModal: React.FC = () => {
 
           {validation && (
             <div
-              className={`rounded border p-2.5 font-mono text-[11px] ${
+              className={`rounded-2xl border p-3 text-[11px] ${
                 validation.isValid
-                  ? 'border-accent-emerald/40 bg-accent-emerald/10 text-accent-emerald'
-                  : 'border-accent-crimson/40 bg-accent-crimson/10 text-accent-crimson'
+                  ? 'border-accent-emerald/40 bg-accent-emerald/12 text-accent-emerald'
+                  : 'border-accent-crimson/40 bg-accent-crimson/12 text-accent-crimson'
               }`}
             >
               {validation.isValid ? (
@@ -151,18 +155,18 @@ export const GlossaryModal: React.FC = () => {
 
           {/* Active Terms List */}
           {customGlossaryEntries.length > 0 && (
-            <div className="max-h-32 overflow-y-auto rounded border border-surface-border bg-surface-base divide-y divide-surface-border-subtle font-mono text-[11px]">
+            <div className="glass-grouped-card max-h-36 overflow-y-auto rounded-2xl divide-y divide-white/[0.06] text-[11px]">
               {customGlossaryEntries.map((entry) => (
-                <div key={entry.id} className="flex items-center justify-between px-3 py-1.5">
+                <div key={entry.id} className="flex items-center justify-between px-3.5 py-2">
                   <span>
-                    <strong className="text-text-primary">{entry.source}</strong>{' '}
-                    <span className="text-text-muted">-&gt;</span>{' '}
-                    <strong className="text-accent-emerald">{entry.target}</strong>
+                    <strong className="text-white font-medium">{entry.source}</strong>{' '}
+                    <span className="text-white/35 mx-1">{'->'}</span>{' '}
+                    <strong className="text-accent-emerald font-medium">{entry.target}</strong>
                   </span>
                   <button
                     type="button"
                     onClick={() => removeGlossaryEntry(entry.id)}
-                    className="text-text-muted hover:text-accent-crimson"
+                    className="glass-control-hover rounded-full p-1 text-white/45 hover:text-accent-crimson"
                   >
                     <Trash2 className="h-3 w-3" />
                   </button>
@@ -171,29 +175,29 @@ export const GlossaryModal: React.FC = () => {
             </div>
           )}
 
-          {/* Active Preset Injection Rules */}
-          <div className="rounded border border-surface-border bg-surface-base p-3 space-y-1 font-mono text-[11px]">
-            <div className="flex items-center justify-between text-text-muted">
-              <span>Active Directive ({customGlossaryEntries.length} custom terms):</span>
-              <span className="text-accent-emerald flex items-center space-x-1">
+          {/* Active Preset Directive */}
+          <div className="glass-grouped-card rounded-2xl p-3.5 space-y-1.5 text-[11px]">
+            <div className="flex items-center justify-between text-white/50">
+              <span>Active Directive ({customGlossaryEntries.length} custom terms)</span>
+              <span className="rounded-full bg-accent-emerald/15 px-2 py-0.5 text-[10px] font-medium text-accent-emerald flex items-center space-x-1">
                 <Check className="h-3 w-3" strokeWidth={2} />
-                <span>INJECTED</span>
+                <span>Active</span>
               </span>
             </div>
-            <p className="text-text-secondary text-[11px] font-sans italic mt-1">
+            <p className="text-white/75 text-[11px] italic leading-relaxed">
               "{activeDomain.systemDirective}"
             </p>
           </div>
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end space-x-2 border-t border-surface-border pt-3">
+        <div className="flex items-center justify-end border-t border-white/[0.08] pt-3">
           <button
             type="button"
             onClick={closeGlossaryModal}
-            className="rounded border border-surface-border bg-surface-base px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-surface-active hover:text-text-primary transition"
+            className="glass-control-hover rounded-full border border-white/[0.1] bg-white/[0.07] px-4 py-1.5 text-xs font-medium text-white"
           >
-            Close
+            Done
           </button>
         </div>
       </div>

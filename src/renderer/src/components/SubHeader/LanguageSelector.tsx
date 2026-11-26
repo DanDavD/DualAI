@@ -1,17 +1,20 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react'
-import { ChevronDown, Search, Check, Languages } from 'lucide-react'
+import { ChevronDown, Search, Check } from 'lucide-react'
 import { SUPPORTED_LANGUAGES, SupportedLanguage } from '../../../../types/language'
+import { GlassTooltip } from '../UI/GlassTooltip'
 
 interface LanguageSelectorProps {
   label: 'Source Language' | 'Target Language'
   selectedCode: string
   onSelectLanguage: (code: string) => void
+  compact?: boolean
 }
 
 export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
   label,
   selectedCode,
-  onSelectLanguage
+  onSelectLanguage,
+  compact = false
 }) => {
   const [isOpen, setIsOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -23,7 +26,6 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
   const currentLanguage =
     SUPPORTED_LANGUAGES.find((l) => l.code === selectedCode) || SUPPORTED_LANGUAGES[0]
 
-  // Filtered languages based on search query
   const filteredLanguages = useMemo(() => {
     if (!searchQuery.trim()) return SUPPORTED_LANGUAGES
     const q = searchQuery.toLowerCase()
@@ -36,7 +38,6 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
     )
   }, [searchQuery])
 
-  // Click outside listener
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
@@ -45,8 +46,7 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
     }
     if (isOpen) {
       document.addEventListener('mousedown', handleClickOutside)
-      // Focus search input on open
-      setTimeout(() => searchInputRef.current?.focus(), 50)
+      setTimeout(() => searchInputRef.current?.focus(), 40)
     } else {
       setSearchQuery('')
     }
@@ -55,7 +55,6 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
     }
   }, [isOpen])
 
-  // Keyboard accessibility
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (!isOpen) {
       if (e.key === 'Enter' || e.key === 'ArrowDown' || e.key === ' ') {
@@ -70,10 +69,12 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
       setIsOpen(false)
     } else if (e.key === 'ArrowDown') {
       e.preventDefault()
-      setFocusedIndex((prev) => (prev + 1) % filteredLanguages.length)
+      setFocusedIndex((prev) => (prev + 1) % Math.max(1, filteredLanguages.length))
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
-      setFocusedIndex((prev) => (prev - 1 + filteredLanguages.length) % filteredLanguages.length)
+      setFocusedIndex(
+        (prev) => (prev - 1 + Math.max(1, filteredLanguages.length)) % Math.max(1, filteredLanguages.length)
+      )
     } else if (e.key === 'Enter') {
       e.preventDefault()
       if (filteredLanguages[focusedIndex]) {
@@ -85,40 +86,58 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
 
   return (
     <div className="relative" ref={dropdownRef}>
-      {/* Trigger Button */}
-      <button
-        type="button"
-        onClick={() => setIsOpen(!isOpen)}
-        onKeyDown={handleKeyDown}
-        aria-haspopup="listbox"
-        aria-expanded={isOpen}
-        aria-label={label}
-        className="flex h-8 items-center space-x-2 rounded border border-surface-border bg-surface-base px-2.5 text-xs text-text-primary hover:bg-surface-active hover:border-surface-border-subtle focus:outline-none focus:ring-1 focus:ring-accent-steel transition select-none"
-        title={`${label}: ${currentLanguage.displayName}`}
+      <GlassTooltip
+        label={label}
+        description={`Currently ${currentLanguage.displayName}`}
+        disabled={isOpen}
       >
-        <span className="font-mono text-[9px] uppercase tracking-wider text-text-muted">
-          {label === 'Source Language' ? 'SRC' : 'TRG'}
-        </span>
-        <span className="h-3 w-px bg-surface-border" />
-        <span className="font-mono font-medium text-text-primary">{currentLanguage.isoName}</span>
-        <ChevronDown
-          className={`h-3 w-3 text-text-muted transition-transform duration-150 ${
-            isOpen ? 'rotate-180' : ''
+        <button
+          type="button"
+          data-toolbar-item="true"
+          onClick={() => setIsOpen(!isOpen)}
+          onKeyDown={handleKeyDown}
+          aria-haspopup="listbox"
+          aria-expanded={isOpen}
+          aria-label={label}
+          className={`glass-control-hover flex h-7 w-[86px] sm:w-[98px] items-center justify-between rounded-full px-2.5 text-xs font-medium whitespace-nowrap select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-steel/70 ${
+            isOpen ? 'bg-white/[0.15] text-white' : 'text-white/90 hover:text-white'
           }`}
-          strokeWidth={1.5}
-        />
-      </button>
+        >
+          <span
+            className={
+              compact
+                ? 'inline font-mono text-[11px] uppercase'
+                : 'hidden sm:inline truncate pr-1 text-left'
+            }
+          >
+            {compact ? currentLanguage.code.toUpperCase() : currentLanguage.nativeName}
+          </span>
+          {!compact && (
+            <span className="inline sm:hidden font-mono text-[11px] uppercase truncate pr-1">
+              {currentLanguage.code.toUpperCase()}
+            </span>
+          )}
+          <ChevronDown
+            className={`h-3 w-3 shrink-0 text-white/45 transition-transform duration-200 ${
+              isOpen ? 'rotate-180' : ''
+            }`}
+            strokeWidth={1.75}
+          />
+        </button>
+      </GlassTooltip>
 
-      {/* Searchable Dropdown Popover */}
       {isOpen && (
         <div
           role="listbox"
           tabIndex={-1}
-          className="absolute left-0 top-10 z-50 w-64 rounded-md border border-surface-border bg-surface-panel p-1.5 shadow-2xl backdrop-blur-md outline-none"
+          className="glass-sheet animate-glass-pop absolute left-1/2 -translate-x-1/2 top-10 z-50 w-[292px] rounded-[20px] p-2 outline-none"
         >
-          {/* Search Input */}
-          <div className="relative mb-1.5 px-1">
-            <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-text-muted" strokeWidth={1.5} />
+          {/* Liquid Glass Search Input */}
+          <div className="relative mb-2">
+            <Search
+              className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-white/40"
+              strokeWidth={1.75}
+            />
             <input
               ref={searchInputRef}
               type="text"
@@ -128,21 +147,20 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
                 setFocusedIndex(0)
               }}
               onKeyDown={handleKeyDown}
-              placeholder="Search language or code..."
-              className="w-full rounded border border-surface-border bg-surface-base py-1.5 pl-8 pr-2 text-xs font-mono text-text-primary placeholder-text-muted focus:border-accent-steel focus:outline-none"
+              placeholder="Search language..."
+              className="h-8 w-full rounded-full border border-white/[0.09] bg-white/[0.06] pl-8 pr-3 text-xs text-white placeholder:text-white/35 focus:border-accent-steel/70 focus:bg-white/[0.09] focus:outline-none transition"
             />
           </div>
 
-          {/* Languages List */}
-          <div className="max-h-56 overflow-y-auto space-y-0.5">
+          {/* Scrollable 2-Line Language List (Zero Truncation Overlap) */}
+          <div className="max-h-64 overflow-y-auto space-y-0.5 pr-1">
             {filteredLanguages.length === 0 ? (
-              <div className="py-4 text-center font-mono text-xs text-text-muted">
-                No matching ISO languages found
-              </div>
+              <div className="py-5 text-center text-xs text-white/40">No languages found</div>
             ) : (
-              filteredLanguages.map((lang, index) => {
+              filteredLanguages.map((lang: SupportedLanguage, idx: number) => {
                 const isSelected = lang.code === selectedCode
-                const isFocused = index === focusedIndex
+                const isFocused = idx === focusedIndex
+                const showSecondary = lang.nativeName.toLowerCase() !== lang.displayName.toLowerCase()
 
                 return (
                   <button
@@ -150,20 +168,39 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
                     type="button"
                     role="option"
                     aria-selected={isSelected}
+                    onMouseEnter={() => setFocusedIndex(idx)}
                     onClick={() => {
                       onSelectLanguage(lang.code)
                       setIsOpen(false)
                     }}
-                    onMouseEnter={() => setFocusedIndex(index)}
-                    className={`flex w-full items-center justify-between rounded px-2.5 py-1.5 text-left text-xs transition select-none ${
-                      isFocused ? 'bg-surface-active' : ''
-                    } ${isSelected ? 'text-text-primary font-semibold' : 'text-text-secondary'}`}
+                    className={`flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left transition-colors duration-150 ${
+                      isSelected
+                        ? 'bg-accent-steel/22 text-white'
+                        : isFocused
+                          ? 'bg-white/[0.08] text-white'
+                          : 'text-white/80 hover:bg-white/[0.06]'
+                    }`}
                   >
-                    <div className="flex items-center space-x-2">
-                      <span className="font-mono text-[11px]">{lang.isoName}</span>
+                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                      <span className="w-8 shrink-0 rounded-md bg-white/[0.06] py-0.5 text-center font-mono text-[10px] uppercase text-white/55">
+                        {lang.code}
+                      </span>
+                      <div className="min-w-0 flex-1 leading-tight">
+                        <div className="text-xs font-medium text-white truncate">
+                          {lang.nativeName}
+                        </div>
+                        {showSecondary && (
+                          <div className="mt-0.5 text-[10px] text-white/45 truncate">
+                            {lang.displayName}
+                          </div>
+                        )}
+                      </div>
                     </div>
                     {isSelected && (
-                      <Check className="h-3 w-3 text-accent-steel" strokeWidth={2} />
+                      <Check
+                        className="h-3.5 w-3.5 shrink-0 text-accent-steel"
+                        strokeWidth={2.25}
+                      />
                     )}
                   </button>
                 )

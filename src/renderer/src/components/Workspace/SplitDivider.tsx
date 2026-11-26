@@ -98,27 +98,27 @@ export const SplitDivider: React.FC<SplitDividerProps> = ({
       aria-valuemax={maxPercent}
       onMouseDown={handleMouseDown}
       onKeyDown={handleKeyDown}
-      className={`relative w-2.5 -mx-1.5 flex flex-col items-center justify-center cursor-col-resize z-20 group outline-none select-none transition-colors ${
-        isDragging ? 'bg-accent-steel/40' : 'hover:bg-accent-steel/20'
+      className={`relative w-3 -mx-1.5 flex flex-col items-center justify-center cursor-col-resize z-20 group outline-none select-none transition-colors ${
+        isDragging ? 'bg-accent-steel/15' : 'hover:bg-white/[0.03]'
       }`}
     >
-      {/* Central Divider Line */}
+      {/* Optical Hairline Divider */}
       <div
-        className={`w-px h-full transition-colors ${
-          isDragging ? 'bg-accent-steel' : 'bg-surface-border group-hover:bg-accent-steel/60'
+        className={`w-px h-full transition-colors duration-200 ${
+          isDragging ? 'bg-accent-steel' : 'bg-white/[0.06] group-hover:bg-white/[0.22]'
         }`}
       />
 
-      {/* Grip Handle Pill */}
+      {/* Frosted Liquid Glass Grip Pill (Appears softly on hover/drag) */}
       <div
-        className={`absolute top-1/2 -translate-y-1/2 w-4 h-8 rounded border flex items-center justify-center transition-all shadow-sm ${
+        className={`absolute top-1/2 -translate-y-1/2 w-3.5 h-8 rounded-full border flex items-center justify-center transition-all duration-200 ${
           isDragging
-            ? 'bg-accent-steel text-white border-accent-steel scale-105'
-            : 'bg-surface-panel text-text-muted border-surface-border group-hover:border-accent-steel/60 group-hover:text-text-primary'
+            ? 'bg-accent-steel text-white border-accent-steel scale-105 opacity-100 shadow-lg'
+            : 'glass-capsule text-white/60 opacity-0 group-hover:opacity-100 group-focus:opacity-100'
         }`}
         title={`Split divider: ${Math.round(splitRatio)}% / ${100 - Math.round(splitRatio)}% (Drag or use arrow keys)`}
       >
-        <GripVertical className="h-3 w-3" strokeWidth={2} />
+        <GripVertical className="h-2.5 w-2.5" strokeWidth={2} />
       </div>
     </div>
   )

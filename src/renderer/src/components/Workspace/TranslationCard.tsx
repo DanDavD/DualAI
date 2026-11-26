@@ -75,10 +75,10 @@ export const TranslationCard: React.FC<TranslationCardProps> = React.memo(({
 
   return (
     <div className="group relative text-sm select-none">
-      {/* Quiet Hover-Only Action Rail (Zero Layout Shift) */}
+      {/* Quiet Hover-Only Liquid Glass Action Pill (Zero Layout Shift) */}
       {!isDraft && !isWaitingForPause && (
         <div
-          className={`absolute -top-0.5 right-0 z-10 flex items-center space-x-1 rounded bg-surface-base/95 pl-2 font-mono transition-opacity ${
+          className={`glass-capsule absolute -top-1 right-0 z-10 flex items-center space-x-0.5 rounded-full p-0.5 transition-opacity duration-200 ${
             isFlagged || copied || showGlossaryInput
               ? 'opacity-100'
               : 'opacity-0 group-hover:opacity-100'
@@ -88,10 +88,8 @@ export const TranslationCard: React.FC<TranslationCardProps> = React.memo(({
             type="button"
             onClick={handleCopy}
             disabled={!translation?.translatedText}
-            className={`flex items-center space-x-1 rounded px-1.5 py-0.5 text-[10px] transition ${
-              copied
-                ? 'text-accent-emerald'
-                : 'text-text-muted hover:bg-surface-active hover:text-text-primary'
+            className={`glass-control-hover flex items-center space-x-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+              copied ? 'text-accent-emerald' : 'text-white/75 hover:text-white'
             }`}
             title="Copy translation"
             aria-label="Copy translation"
@@ -103,10 +101,8 @@ export const TranslationCard: React.FC<TranslationCardProps> = React.memo(({
           <button
             type="button"
             onClick={() => onToggleFlag(utteranceId)}
-            className={`flex items-center space-x-1 rounded px-1.5 py-0.5 text-[10px] transition ${
-              isFlagged
-                ? 'text-accent-amber font-semibold'
-                : 'text-text-muted hover:bg-surface-active hover:text-text-primary'
+            className={`glass-control-hover flex items-center space-x-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+              isFlagged ? 'text-accent-amber' : 'text-white/65 hover:text-white'
             }`}
             title="Flag translation for review"
             aria-label="Flag translation"
@@ -118,10 +114,8 @@ export const TranslationCard: React.FC<TranslationCardProps> = React.memo(({
           <button
             type="button"
             onClick={() => setShowGlossaryInput((prev) => !prev)}
-            className={`flex items-center space-x-1 rounded px-1.5 py-0.5 text-[10px] transition ${
-              showGlossaryInput
-                ? 'text-accent-steel'
-                : 'text-text-muted hover:bg-surface-active hover:text-text-primary'
+            className={`glass-control-hover flex items-center justify-center rounded-full p-1 ${
+              showGlossaryInput ? 'text-accent-steel bg-white/[0.1]' : 'text-white/65 hover:text-white'
             }`}
             title="Add custom terminology to glossary"
             aria-label="Add terminology to glossary"
@@ -157,17 +151,17 @@ export const TranslationCard: React.FC<TranslationCardProps> = React.memo(({
         )}
       </div>
 
-      {/* Optional Inline Glossary Quick-Add (Hidden by Default) */}
+      {/* Optional Inline Glossary Quick-Add (Liquid Glass Pill Row) */}
       {showGlossaryInput && (
-        <div className="mt-2 flex items-center space-x-1.5 rounded border border-surface-border bg-surface-panel p-2 text-xs font-mono">
+        <div className="glass-grouped-card animate-glass-pop mt-2 flex items-center space-x-1.5 rounded-2xl p-2 text-xs">
           <input
             type="text"
             placeholder="Source term"
             value={sourceTerm}
             onChange={(e) => setSourceTerm(e.target.value)}
-            className="flex-1 rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-text-primary outline-none focus:border-accent-steel"
+            className="flex-1 rounded-full border border-white/[0.1] bg-white/[0.06] px-3 py-1 text-[11px] text-white placeholder:text-white/35 outline-none focus:border-accent-steel/70"
           />
-          <span className="text-text-muted">{'->'}</span>
+          <span className="text-white/40 text-[11px]">{'->'}</span>
           <input
             type="text"
             placeholder="Target term"
@@ -176,19 +170,19 @@ export const TranslationCard: React.FC<TranslationCardProps> = React.memo(({
             onKeyDown={(e) => {
               if (e.key === 'Enter') handleSaveGlossaryTerm()
             }}
-            className="flex-1 rounded border border-surface-border bg-surface-base px-2 py-1 text-[11px] text-text-primary outline-none focus:border-accent-steel"
+            className="flex-1 rounded-full border border-white/[0.1] bg-white/[0.06] px-3 py-1 text-[11px] text-white placeholder:text-white/35 outline-none focus:border-accent-steel/70"
           />
           <button
             type="button"
             onClick={handleSaveGlossaryTerm}
-            className="rounded bg-accent-steel px-2 py-1 text-[10px] font-semibold text-white hover:bg-blue-700"
+            className="glass-control-hover rounded-full bg-white px-3 py-1 text-[10px] font-semibold text-zinc-950"
           >
             Save
           </button>
           <button
             type="button"
             onClick={() => setShowGlossaryInput(false)}
-            className="p-1 text-text-muted hover:text-text-primary"
+            className="glass-control-hover rounded-full p-1 text-white/50 hover:text-white"
             aria-label="Close glossary quick add"
           >
             <X className="h-3 w-3" />

@@ -1,35 +1,52 @@
 /**
- * DUALAI - Module 4 Configuration Matrix & Custom Glossary Engine (Day 11)
- * 4-Tab enterprise settings modal:
- * - Tab 1: Audio & Hardware (Device selection, gain calibration w/ audible monitor, RNNoise, AEC, VAD)
- * - Tab 2: Translation & Domain (CSV/JSON custom glossary upload, syntax validator, prompt injection)
- * - Tab 3: Global Keyboard Shortcuts (PTT, Mute, Swap, HUD toggle, Buffer clear - active in background)
- * - Tab 4: Account & Compliance (Usage quota gauge, Zero-Data Retention HIPAA/GDPR policy)
+ * DUALAI - Consumer-Friendly macOS System Settings Modal
+ * Clean, plain-English settings organized strictly around everyday user experience:
+ *  - Audio: Microphone, Speakers, Sound Quality switches, Volume & Test Audio
+ *  - Reading & HUD: Layout style, Font family & size, Line spacing, Teleprompter controls
+ *  - Shortcuts: Everyday keyboard shortcuts with one-click rebind
+ *  - Privacy & Account: Plain-English privacy guarantees (ZDR / HIPAA / GDPR) & Account link
+ * Zero developer jargon, zero API key confusion, zero CSV/JSON export clutter.
  */
 
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect } from 'react'
 import {
   X,
-  Sliders,
-  BookOpen,
+  Volume2,
+  Type,
   Keyboard,
   ShieldCheck,
-  Volume2,
-  Upload,
-  CheckCircle2,
-  AlertCircle,
-  Trash2,
   RotateCcw,
-  Plus,
   Mic,
-  Key
+  Columns2,
+  Maximize2,
+  Rows2,
+  MousePointerClick,
+  ArrowRight,
+  ArrowRightLeft,
+  Sparkles,
+  Zap,
+  Check
 } from 'lucide-react'
 import { useSession } from '../../context/SessionContext'
-import { DOMAIN_PRESETS } from '../../../../types/domain'
-import { GlossaryValidationResult, ShortcutActionId } from '../../../../types/settings'
-import { parseGlossaryFile, SAMPLE_GLOSSARY_CSV } from '../../utils/glossaryParser'
+import {
+  ShortcutActionId,
+  WorkspaceLineSpacing,
+  WorkspaceViewMode
+} from '../../../../types/settings'
+import { DomainId, DOMAIN_PRESETS } from '../../../../types/domain'
+import { OperatingMode, LatencyMode } from '../../../../types/audio'
+import {
+  LINE_SPACING_METRICS,
+  MAX_WORKSPACE_FONT_SIZE_PX,
+  MIN_WORKSPACE_FONT_SIZE_PX,
+  VIEW_MODE_OPTIONS,
+  WORKSPACE_FONT_OPTIONS
+} from '../../utils/typographyPreferences'
+import { AppleSwitch } from '../UI/AppleSwitch'
+import { GlassSegmentedControl } from '../UI/GlassSegmentedControl'
+import { formatPlatformShortcut } from '../../utils/platform'
 
-type SettingsTabId = 'audio' | 'domain' | 'shortcuts' | 'compliance'
+type SettingsTabId = 'audio' | 'interpretation' | 'reading' | 'shortcuts' | 'privacy'
 
 interface EnumeratedDevice {
   deviceId: string
@@ -37,11 +54,19 @@ interface EnumeratedDevice {
   kind: 'audioinput' | 'audiooutput'
 }
 
+const VIEW_ICONS: Record<
+  WorkspaceViewMode,
+  React.ComponentType<{ className?: string; strokeWidth?: number }>
+> = {
+  dual: Columns2,
+  target_only: Maximize2,
+  stacked: Rows2
+}
+
 export const SettingsModal: React.FC = () => {
   const {
     isSettingsModalOpen,
     closeSettingsModal,
-    domainId,
     gainChannelA,
     gainChannelB,
     setGainChannelA,
@@ -55,8 +80,6 @@ export const SettingsModal: React.FC = () => {
     selectedInputDeviceId,
     selectedLoopbackDeviceId,
     selectedOutputDeviceId,
-    loopbackStatus,
-    loopbackStatusMessage,
     setSelectedInputDeviceId,
     setSelectedLoopbackDeviceId,
     setSelectedOutputDeviceId,
@@ -64,37 +87,38 @@ export const SettingsModal: React.FC = () => {
     isMonitorLoopbackActive,
     setMonitorLoopback,
     isAudioActive,
-    customGlossaryEntries,
-    addGlossaryEntry,
-    importGlossaryEntries,
-    removeGlossaryEntry,
-    clearCustomGlossary,
+    workspaceDisplaySettings,
+    updateWorkspaceDisplaySettings,
+    resetWorkspaceDisplaySettings,
+    hudSettings,
+    updateHudSettings,
     shortcutBindings,
     updateShortcutBinding,
     resetShortcutBindings,
-    quotaTotalHours,
     quotaRemainingHours,
     authSession,
-    accountQuota,
     isGatewayAuthenticated,
-    openAccountModal
+    openAccountModal,
+    domainId,
+    setDomainId,
+    operatingMode,
+    setOperatingMode,
+    latencyMode,
+    setLatencyMode,
+    settingsInitialTab
   } = useSession()
 
-  const [activeTab, setActiveTab] = useState<SettingsTabId>('audio')
+  const [activeTab, setActiveTab] = useState<SettingsTabId>(settingsInitialTab || 'audio')
   const [devices, setDevices] = useState<EnumeratedDevice[]>([])
-  const [validationResult, setValidationResult] = useState<GlossaryValidationResult | null>(null)
-  const [manualSource, setManualSource] = useState('')
-  const [manualTarget, setManualTarget] = useState('')
-  const [manualNotes, setManualNotes] = useState('')
   const [recordingActionId, setRecordingActionId] = useState<ShortcutActionId | null>(null)
   const [shortcutFeedback, setShortcutFeedback] = useState<string | null>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const activeDomain = DOMAIN_PRESETS[domainId] || DOMAIN_PRESETS.general
-  const hoursUsed = Math.max(0, quotaTotalHours - quotaRemainingHours)
-  const remainingPercent = Math.min(100, Math.max(0, (quotaRemainingHours / quotaTotalHours) * 100))
+  useEffect(() => {
+    if (isSettingsModalOpen && settingsInitialTab) {
+      setActiveTab(settingsInitialTab)
+    }
+  }, [isSettingsModalOpen, settingsInitialTab])
 
-  // Enumerate hardware audio devices when modal opens
   useEffect(() => {
     if (!isSettingsModalOpen) return
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) return
@@ -108,109 +132,73 @@ export const SettingsModal: React.FC = () => {
             deviceId: d.deviceId || `dev-${idx}`,
             label:
               d.label ||
-              (d.kind === 'audioinput'
-                ? `System Microphone #${idx + 1}`
-                : `System Output #${idx + 1}`),
+              (d.kind === 'audioinput' ? `Microphone ${idx + 1}` : `Speaker ${idx + 1}`),
             kind: d.kind as 'audioinput' | 'audiooutput'
           }))
         setDevices(filtered)
       })
-      .catch(() => {
-        setDevices([])
-      })
+      .catch(() => setDevices([]))
   }, [isSettingsModalOpen])
 
-  // Escape key closes modal (unless currently recording a shortcut)
   useEffect(() => {
     if (!isSettingsModalOpen) return
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (recordingActionId) {
-        e.preventDefault()
-        e.stopPropagation()
-
-        if (e.key === 'Escape') {
-          setRecordingActionId(null)
-          return
-        }
-
-        const modifiers: string[] = []
-        if (e.metaKey || e.ctrlKey) modifiers.push('CommandOrControl')
-        if (e.shiftKey) modifiers.push('Shift')
-        if (e.altKey) modifiers.push('Alt')
-
-        const keyUpper = e.key.length === 1 ? e.key.toUpperCase() : e.key
-        if (
-          ['Control', 'Shift', 'Alt', 'Meta'].includes(e.key) ||
-          modifiers.length === 0
-        ) {
-          return
-        }
-
-        const accelerator = `${modifiers.join('+')}+${keyUpper}`
-        const targetId = recordingActionId
-        setRecordingActionId(null)
-
-        void updateShortcutBinding(targetId, accelerator).then((ok) => {
-          setShortcutFeedback(
-            ok
-              ? `Global shortcut bound to ${accelerator} (active in background).`
-              : `Warning: OS declined global registration for ${accelerator}.`
-          )
-          setTimeout(() => setShortcutFeedback(null), 3500)
-        })
-        return
-      }
-
-      if (e.key === 'Escape') {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !recordingActionId) {
         closeSettingsModal()
       }
     }
+    window.addEventListener('keydown', handleEscape)
+    return () => window.removeEventListener('keydown', handleEscape)
+  }, [isSettingsModalOpen, recordingActionId, closeSettingsModal])
 
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [isSettingsModalOpen, recordingActionId, closeSettingsModal, updateShortcutBinding])
+  useEffect(() => {
+    if (!recordingActionId) return
+
+    const handleCaptureShortcut = (e: KeyboardEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return
+
+      const parts: string[] = []
+      if (e.metaKey || e.ctrlKey) parts.push('CommandOrControl')
+      if (e.altKey) parts.push('Alt')
+      if (e.shiftKey) parts.push('Shift')
+
+      const normalizedKey =
+        e.key === ' ' ? 'Space' : e.key.length === 1 ? e.key.toUpperCase() : e.key
+      parts.push(normalizedKey)
+
+      const accelerator = parts.join('+')
+      void updateShortcutBinding(recordingActionId, accelerator).then((ok) => {
+        if (!ok) {
+          setShortcutFeedback(`Shortcut "${accelerator}" is already in use by another app.`)
+        } else {
+          setShortcutFeedback(`Shortcut updated to ${accelerator}.`)
+        }
+        setTimeout(() => setShortcutFeedback(null), 3000)
+      })
+      setRecordingActionId(null)
+    }
+
+    window.addEventListener('keydown', handleCaptureShortcut, { capture: true })
+    return () => window.removeEventListener('keydown', handleCaptureShortcut, { capture: true })
+  }, [recordingActionId, updateShortcutBinding])
 
   if (!isSettingsModalOpen) return null
 
   const inputDevices = devices.filter((d) => d.kind === 'audioinput')
   const outputDevices = devices.filter((d) => d.kind === 'audiooutput')
 
-  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    const text = await file.text()
-    const result = parseGlossaryFile(file.name, text)
-    setValidationResult(result)
-    if (result.entries.length > 0) {
-      importGlossaryEntries(result.entries, false)
-    }
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ''
-    }
-  }
-
-  const handleLoadSampleCsv = () => {
-    const result = parseGlossaryFile('sample_terminology.csv', SAMPLE_GLOSSARY_CSV)
-    setValidationResult(result)
-    if (result.entries.length > 0) {
-      importGlossaryEntries(result.entries, false)
-    }
-  }
-
-  const handleManualAddTerm = () => {
-    if (!manualSource.trim() || !manualTarget.trim()) return
-    addGlossaryEntry(manualSource, manualTarget, manualNotes || undefined)
-    setManualSource('')
-    setManualTarget('')
-    setManualNotes('')
-  }
-
   const tabs: Array<{ id: SettingsTabId; label: string; icon: React.ReactNode }> = [
-    { id: 'audio', label: 'Audio & Hardware', icon: <Sliders className="h-3.5 w-3.5" /> },
-    { id: 'domain', label: 'Translation & Domain', icon: <BookOpen className="h-3.5 w-3.5" /> },
-    { id: 'shortcuts', label: 'Global Shortcuts', icon: <Keyboard className="h-3.5 w-3.5" /> },
-    { id: 'compliance', label: 'Account & Compliance', icon: <ShieldCheck className="h-3.5 w-3.5" /> }
+    { id: 'audio', label: 'Audio', icon: <Volume2 className="h-4 w-4" strokeWidth={1.75} /> },
+    {
+      id: 'interpretation',
+      label: 'Interpretation',
+      icon: <Sparkles className="h-4 w-4" strokeWidth={1.75} />
+    },
+    { id: 'reading', label: 'Reading & HUD', icon: <Type className="h-4 w-4" strokeWidth={1.75} /> },
+    { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard className="h-4 w-4" strokeWidth={1.75} /> },
+    { id: 'privacy', label: 'Privacy', icon: <ShieldCheck className="h-4 w-4" strokeWidth={1.75} /> }
   ]
 
   return (
@@ -218,41 +206,35 @@ export const SettingsModal: React.FC = () => {
       role="dialog"
       aria-modal="true"
       aria-labelledby="settings-modal-title"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 select-none"
+      className="animate-glass-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-md p-4 select-none"
     >
-      <div className="flex h-[620px] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-surface-border bg-surface-panel shadow-2xl">
-        {/* Top Modal Header */}
-        <div className="flex h-12 shrink-0 items-center justify-between border-b border-surface-border px-5">
-          <div className="flex items-center space-x-2.5">
-            <Sliders className="h-4 w-4 text-accent-steel" strokeWidth={1.5} />
-            <h2
-              id="settings-modal-title"
-              className="text-sm font-semibold tracking-tight text-text-primary"
-            >
-              Configuration Matrix & Custom Glossary Engine
-            </h2>
-            <span className="rounded border border-surface-border bg-surface-base px-1.5 py-0.5 font-mono text-[10px] text-text-muted">
-              MODULE 4
-            </span>
-          </div>
+      <div className="glass-sheet animate-glass-modal flex h-[600px] max-h-[88vh] w-full max-w-[840px] flex-col overflow-hidden rounded-[26px]">
+        {/* Clean macOS Settings Title Bar */}
+        <div className="flex h-13 shrink-0 items-center justify-between border-b border-white/[0.07] px-5">
+          <h2
+            id="settings-modal-title"
+            className="text-sm font-semibold tracking-tight text-white"
+          >
+            Settings
+          </h2>
           <button
             type="button"
             onClick={closeSettingsModal}
-            aria-label="Close Configuration Matrix"
-            className="rounded p-1 text-text-muted hover:bg-surface-active hover:text-text-primary transition"
+            aria-label="Close Settings"
+            className="glass-control-hover flex h-7 w-7 items-center justify-center rounded-full bg-white/[0.07] text-white/60 hover:text-white"
             title="Close (Escape)"
           >
-            <X className="h-4 w-4" strokeWidth={1.5} />
+            <X className="h-4 w-4" strokeWidth={1.75} />
           </button>
         </div>
 
-        {/* Body Layout: Left Navigation Rail + Tab Viewport */}
+        {/* macOS System Settings Split Body */}
         <div className="flex flex-1 overflow-hidden">
-          {/* Left Tab Navigation */}
+          {/* Left Navigation Rail */}
           <nav
             role="tablist"
             aria-orientation="vertical"
-            className="w-56 shrink-0 border-r border-surface-border bg-surface-base p-3 space-y-1 font-mono text-xs"
+            className="w-48 shrink-0 border-r border-white/[0.07] bg-white/[0.02] p-3 space-y-1 text-xs"
           >
             {tabs.map((tab) => {
               const isSelected = activeTab === tab.id
@@ -263,13 +245,13 @@ export const SettingsModal: React.FC = () => {
                   type="button"
                   aria-selected={isSelected}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`flex w-full items-center space-x-2.5 rounded px-3 py-2 text-left transition ${
+                  className={`glass-control-hover flex w-full items-center space-x-2.5 rounded-xl px-3 py-2 text-left ${
                     isSelected
-                      ? 'border border-accent-steel/40 bg-accent-steel/15 text-text-primary font-semibold'
-                      : 'border border-transparent text-text-secondary hover:bg-surface-panel hover:text-text-primary'
+                      ? 'bg-accent-steel/22 text-white font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]'
+                      : 'text-white/65 hover:bg-white/[0.06] hover:text-white'
                   }`}
                 >
-                  <span className={isSelected ? 'text-accent-steel' : 'text-text-muted'}>
+                  <span className={isSelected ? 'text-accent-steel' : 'text-white/45'}>
                     {tab.icon}
                   </span>
                   <span>{tab.label}</span>
@@ -278,33 +260,30 @@ export const SettingsModal: React.FC = () => {
             })}
           </nav>
 
-          {/* Right Tab Content Viewport */}
+          {/* Right Grouped Settings Viewport */}
           <div className="flex-1 overflow-y-auto p-6 space-y-5 text-xs">
-            {/* TAB 1: AUDIO & HARDWARE */}
+            {/* ============================================================
+             * TAB 1: AUDIO (Plain-English Everyday Audio Controls)
+             * ============================================================ */}
             {activeTab === 'audio' && (
               <div className="space-y-5">
-                <div className="border-b border-surface-border pb-2">
-                  <h3 className="text-sm font-semibold text-text-primary">
-                    Audio Hardware & Signal Calibration
-                  </h3>
-                  <p className="mt-0.5 text-text-muted">
-                    Configure hardware interfaces, studio gain levels with audible monitor feedback,
-                    and real-time DSP noise filtering.
+                <div>
+                  <h3 className="text-base font-semibold tracking-tight text-white">Audio</h3>
+                  <p className="mt-0.5 text-white/50">
+                    Choose your microphone, speakers, and sound clarity preferences.
                   </p>
                 </div>
 
-                {/* Device Selection */}
-                <div className="grid grid-cols-3 gap-3">
-                  <label className="space-y-1.5">
-                    <span className="block font-mono text-[11px] uppercase text-text-secondary">
-                      Channel A Input (Microphone)
-                    </span>
+                {/* Devices Grouped Card */}
+                <div className="glass-grouped-card rounded-2xl divide-y divide-white/[0.06]">
+                  <label className="flex items-center justify-between gap-4 px-4 py-3">
+                    <span className="font-medium text-white/85 shrink-0">Microphone</span>
                     <select
                       value={selectedInputDeviceId}
                       onChange={(e) => setSelectedInputDeviceId(e.target.value)}
-                      className="w-full rounded border border-surface-border bg-surface-base px-2.5 py-2 font-mono text-xs text-text-primary outline-none focus:border-accent-steel"
+                      className="max-w-[260px] rounded-xl border border-white/[0.1] bg-white/[0.06] px-3 py-1.5 text-xs text-white outline-none focus:border-accent-steel"
                     >
-                      <option value="default">Default System Microphone</option>
+                      <option value="default">System Default Microphone</option>
                       {inputDevices.map((d) => (
                         <option key={d.deviceId} value={d.deviceId}>
                           {d.label}
@@ -313,18 +292,14 @@ export const SettingsModal: React.FC = () => {
                     </select>
                   </label>
 
-                  <label className="space-y-1.5">
-                    <span className="block font-mono text-[11px] uppercase text-text-secondary">
-                      Channel B (System Loopback)
-                    </span>
+                  <label className="flex items-center justify-between gap-4 px-4 py-3">
+                    <span className="font-medium text-white/85 shrink-0">Call Audio Source</span>
                     <select
                       value={selectedLoopbackDeviceId}
                       onChange={(e) => setSelectedLoopbackDeviceId(e.target.value)}
-                      className="w-full rounded border border-surface-border bg-surface-base px-2.5 py-2 font-mono text-xs text-text-primary outline-none focus:border-accent-amber"
+                      className="max-w-[260px] rounded-xl border border-white/[0.1] bg-white/[0.06] px-3 py-1.5 text-xs text-white outline-none focus:border-accent-steel"
                     >
-                      <option value="system_loopback">
-                        Native OS System Audio Loopback (Recommended)
-                      </option>
+                      <option value="system_loopback">Automatic System Audio (Recommended)</option>
                       {inputDevices.map((d) => (
                         <option key={`lb-${d.deviceId}`} value={d.deviceId}>
                           {d.label}
@@ -333,16 +308,14 @@ export const SettingsModal: React.FC = () => {
                     </select>
                   </label>
 
-                  <label className="space-y-1.5">
-                    <span className="block font-mono text-[11px] uppercase text-text-secondary">
-                      Monitor Output Device
-                    </span>
+                  <label className="flex items-center justify-between gap-4 px-4 py-3">
+                    <span className="font-medium text-white/85 shrink-0">Speakers / Headphones</span>
                     <select
                       value={selectedOutputDeviceId}
                       onChange={(e) => setSelectedOutputDeviceId(e.target.value)}
-                      className="w-full rounded border border-surface-border bg-surface-base px-2.5 py-2 font-mono text-xs text-text-primary outline-none focus:border-accent-steel"
+                      className="max-w-[260px] rounded-xl border border-white/[0.1] bg-white/[0.06] px-3 py-1.5 text-xs text-white outline-none focus:border-accent-steel"
                     >
-                      <option value="default">Default System Audio Output</option>
+                      <option value="default">System Default Output</option>
                       {outputDevices.map((d) => (
                         <option key={d.deviceId} value={d.deviceId}>
                           {d.label}
@@ -352,71 +325,71 @@ export const SettingsModal: React.FC = () => {
                   </label>
                 </div>
 
-                {/* Channel B System Loopback Telemetry Banner */}
-                <div className="flex items-center justify-between rounded border border-surface-border bg-surface-base px-3 py-2 font-mono text-[11px]">
-                  <span className="text-text-secondary">
-                    System Loopback Status:{' '}
-                    <strong
-                      className={
-                        loopbackStatus === 'native_loopback' || loopbackStatus === 'virtual_device'
-                          ? 'text-accent-emerald'
-                          : loopbackStatus === 'unavailable'
-                            ? 'text-accent-crimson'
-                            : 'text-text-muted'
-                      }
-                    >
-                      {loopbackStatus.toUpperCase()}
-                    </strong>
-                  </span>
-                  <span className="text-text-muted truncate max-w-[420px]">
-                    {loopbackStatusMessage ||
-                      'Uses Electron native CoreAudio/WASAPI loopback or a selected virtual driver (BlackHole / VB-Cable).'}
-                  </span>
+                {/* Sound Clarity Switches */}
+                <div className="glass-grouped-card rounded-2xl divide-y divide-white/[0.06]">
+                  <div className="flex items-center justify-between px-4 py-3">
+                    <div className="pr-4">
+                      <p className="font-medium text-white">Background Noise Reduction</p>
+                      <p className="text-[11px] text-white/45">
+                        Reduces fans, keyboard typing, and room noise automatically
+                      </p>
+                    </div>
+                    <AppleSwitch
+                      checked={noiseSuppression}
+                      onChange={setNoiseSuppression}
+                      ariaLabel="Toggle Background Noise Reduction"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between px-4 py-3">
+                    <div className="pr-4">
+                      <p className="font-medium text-white">Echo Cancellation</p>
+                      <p className="text-[11px] text-white/45">
+                        Prevents remote voices from echoing back into your microphone
+                      </p>
+                    </div>
+                    <AppleSwitch
+                      checked={echoCancellation}
+                      onChange={setEchoCancellation}
+                      ariaLabel="Toggle Echo Cancellation"
+                    />
+                  </div>
                 </div>
 
-                {/* Hardware Gain Calibration Sliders with Audible Monitor Feedback */}
-                <div className="rounded-lg border border-surface-border bg-surface-base p-4 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-[11px] font-bold uppercase text-text-primary">
-                      Hardware Gain Calibration & Audible Monitor
-                    </span>
+                {/* Volume & Sound Test */}
+                <div className="glass-grouped-card rounded-2xl p-4 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-semibold text-white">Volume & Sound Check</span>
                     <div className="flex items-center space-x-2">
                       <button
                         type="button"
                         onClick={() => void playHardwareCalibrationTone(gainChannelA)}
-                        className="flex items-center space-x-1.5 rounded border border-accent-steel/40 bg-accent-steel/15 px-2.5 py-1 font-mono text-[11px] font-semibold text-accent-steel hover:bg-accent-steel/25 transition"
+                        aria-label="Play 440Hz Monitor Tone"
+                        className="glass-control-hover flex items-center space-x-1.5 rounded-full border border-white/[0.12] bg-white/[0.08] px-3 py-1 text-[11px] font-medium text-white"
                       >
-                        <Volume2 className="h-3.5 w-3.5" />
-                        <span>Play 440Hz Monitor Tone</span>
+                        <Volume2 className="h-3.5 w-3.5 text-accent-steel" />
+                        <span>Test Sound</span>
                       </button>
                       <button
                         type="button"
                         disabled={!isAudioActive}
                         onClick={() => setMonitorLoopback(!isMonitorLoopbackActive)}
-                        className={`flex items-center space-x-1.5 rounded border px-2.5 py-1 font-mono text-[11px] transition disabled:opacity-40 ${
+                        className={`glass-control-hover flex items-center space-x-1.5 rounded-full border px-3 py-1 text-[11px] font-medium disabled:opacity-35 ${
                           isMonitorLoopbackActive
-                            ? 'border-accent-emerald bg-accent-emerald/20 text-accent-emerald font-bold'
-                            : 'border-surface-border bg-surface-panel text-text-secondary hover:text-text-primary'
+                            ? 'border-accent-emerald/55 bg-accent-emerald/20 text-accent-emerald'
+                            : 'border-white/[0.1] bg-white/[0.06] text-white/75 hover:text-white'
                         }`}
-                        title={
-                          isAudioActive
-                            ? 'Route live microphone through speakers for hardware gain check'
-                            : 'Start audio capture to enable live mic monitor loopback'
-                        }
                       >
                         <Mic className="h-3.5 w-3.5" />
-                        <span>{isMonitorLoopbackActive ? 'Mic Monitor ON' : 'Live Mic Monitor'}</span>
+                        <span>{isMonitorLoopbackActive ? 'Listening to Mic' : 'Hear Myself'}</span>
                       </button>
                     </div>
                   </div>
 
-                  {/* Channel A Calibration Slider */}
-                  <div className="space-y-1.5 font-mono">
+                  <div className="space-y-1.5">
                     <div className="flex justify-between text-[11px]">
-                      <span className="text-text-secondary">
-                        Channel A (Mic) Calibration Gain (plays audible tone on release)
-                      </span>
-                      <span className="font-bold text-accent-steel">
+                      <span className="text-white/70">Microphone Volume</span>
+                      <span className="font-mono tabular-nums text-white">
                         {Math.round(gainChannelA * 100)}%
                       </span>
                     </div>
@@ -428,18 +401,14 @@ export const SettingsModal: React.FC = () => {
                       value={gainChannelA}
                       onChange={(e) => setGainChannelA(parseFloat(e.target.value))}
                       onMouseUp={() => void playHardwareCalibrationTone(gainChannelA)}
-                      onKeyUp={() => void playHardwareCalibrationTone(gainChannelA)}
-                      className="w-full accent-accent-steel cursor-pointer"
+                      className="apple-slider w-full"
                     />
                   </div>
 
-                  {/* Channel B Calibration Slider */}
-                  <div className="space-y-1.5 font-mono">
+                  <div className="space-y-1.5">
                     <div className="flex justify-between text-[11px]">
-                      <span className="text-text-secondary">
-                        Channel B (System Loopback) Input Gain
-                      </span>
-                      <span className="font-bold text-accent-amber">
+                      <span className="text-white/70">Call Audio Volume</span>
+                      <span className="font-mono tabular-nums text-white">
                         {Math.round(gainChannelB * 100)}%
                       </span>
                     </div>
@@ -450,18 +419,14 @@ export const SettingsModal: React.FC = () => {
                       step="0.05"
                       value={gainChannelB}
                       onChange={(e) => setGainChannelB(parseFloat(e.target.value))}
-                      onMouseUp={() => void playHardwareCalibrationTone(gainChannelB)}
-                      className="w-full accent-accent-amber cursor-pointer"
+                      className="apple-slider w-full"
                     />
                   </div>
 
-                  {/* Silero VAD Sensitivity Threshold */}
-                  <div className="space-y-1.5 border-t border-surface-border-subtle pt-3 font-mono">
+                  <div className="space-y-1.5 border-t border-white/[0.06] pt-3">
                     <div className="flex justify-between text-[11px]">
-                      <span className="text-text-secondary">
-                        Silero VAD v5 Speech Onset Threshold
-                      </span>
-                      <span className="font-bold text-accent-emerald">
+                      <span className="text-white/70">Voice Detection Sensitivity</span>
+                      <span className="font-mono tabular-nums text-white">
                         {Math.round(vadThreshold * 100)}%
                       </span>
                     </div>
@@ -472,285 +437,315 @@ export const SettingsModal: React.FC = () => {
                       step="0.05"
                       value={vadThreshold}
                       onChange={(e) => setVadThreshold(parseFloat(e.target.value))}
-                      className="w-full accent-accent-emerald cursor-pointer"
+                      className="apple-slider w-full"
                     />
-                  </div>
-                </div>
-
-                {/* Hardware DSP Toggles (RNNoise & AEC) */}
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="flex items-center justify-between rounded-lg border border-surface-border bg-surface-base p-3.5">
-                    <div>
-                      <p className="font-semibold text-text-primary">RNNoise Suppression</p>
-                      <p className="text-[11px] text-text-muted">
-                        Neural background fan & office noise gate
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={noiseSuppression}
-                      onClick={() => setNoiseSuppression(!noiseSuppression)}
-                      className={`rounded border px-3 py-1 font-mono text-[11px] font-bold transition ${
-                        noiseSuppression
-                          ? 'border-accent-emerald bg-accent-emerald/20 text-accent-emerald'
-                          : 'border-surface-border bg-surface-panel text-text-muted'
-                      }`}
-                    >
-                      {noiseSuppression ? 'ENABLED' : 'OFF'}
-                    </button>
-                  </div>
-
-                  <div className="flex items-center justify-between rounded-lg border border-surface-border bg-surface-base p-3.5">
-                    <div>
-                      <p className="font-semibold text-text-primary">Acoustic Echo Cancellation (AEC)</p>
-                      <p className="text-[11px] text-text-muted">
-                        Eliminate remote meeting speaker feedback
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={echoCancellation}
-                      onClick={() => setEchoCancellation(!echoCancellation)}
-                      className={`rounded border px-3 py-1 font-mono text-[11px] font-bold transition ${
-                        echoCancellation
-                          ? 'border-accent-emerald bg-accent-emerald/20 text-accent-emerald'
-                          : 'border-surface-border bg-surface-panel text-text-muted'
-                      }`}
-                    >
-                      {echoCancellation ? 'ENABLED' : 'OFF'}
-                    </button>
                   </div>
                 </div>
               </div>
             )}
 
-            {/* TAB 2: TRANSLATION & DOMAIN + CUSTOM GLOSSARY ENGINE */}
-            {activeTab === 'domain' && (
+            {/* ============================================================
+             * TAB: INTERPRETATION & DOMAIN PRESETS
+             * ============================================================ */}
+            {activeTab === 'interpretation' && (
               <div className="space-y-5">
-                <div className="border-b border-surface-border pb-2">
-                  <h3 className="text-sm font-semibold text-text-primary">
-                    Translation Engine & Custom Glossary Injection
+                <div>
+                  <h3 className="text-base font-semibold tracking-tight text-white">
+                    Interpretation & Vocabulary
                   </h3>
-                  <p className="mt-0.5 text-text-muted">
-                    Upload validated CSV or JSON glossaries injected directly into the Gemini 2.0
-                    Flash prompt pipeline. Active preset: <strong>{activeDomain.label}</strong>.
+                  <p className="mt-0.5 text-white/50">
+                    Fine-tune conversation direction, speed, and specialized field terminology.
                   </p>
                 </div>
 
-                {/* Zero-Trust Managed Cloud Gateway Status (Zero Client API Keys) */}
-                <div className="flex items-center justify-between rounded-lg border border-surface-border bg-surface-base p-4">
-                  <div className="space-y-1">
-                    <div className="flex items-center space-x-2">
-                      <Key className="h-3.5 w-3.5 text-accent-emerald" />
-                      <span className="font-mono text-xs font-semibold text-text-primary">
-                        Zero-Trust Managed AI Gateway
-                      </span>
-                      <span
-                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${
-                          isGatewayAuthenticated
-                            ? 'bg-accent-emerald/20 text-accent-emerald'
-                            : 'bg-surface-panel text-accent-amber'
-                        }`}
-                      >
-                        {isGatewayAuthenticated ? 'AUTHENTICATED (LIVE)' : 'SIGN IN FOR 1H FREE'}
-                      </span>
+                {/* Mode & Speed Grouped Card */}
+                <div className="glass-grouped-card rounded-2xl divide-y divide-white/[0.06]">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 px-4 py-3.5">
+                    <div className="pr-2 min-w-0">
+                      <p className="font-semibold text-white text-xs">Interpretation Mode</p>
+                      <p className="text-[11px] text-white/45 leading-normal">
+                        Choose whether to translate in one direction or alternate back-and-forth
+                      </p>
                     </div>
-                    <p className="text-[11px] text-text-muted">
-                      {isGatewayAuthenticated
-                        ? `Signed in as ${authSession?.user.email}. Plan: ${accountQuota?.planId.toUpperCase() || 'FREE_TIER'}. Zero provider API keys exist on this device.`
-                        : 'End users never configure API keys. Sign in to activate your server-protected 1-hour Free Tier.'}
+                    <div className="shrink-0">
+                      <GlassSegmentedControl<OperatingMode>
+                        ariaLabel="Interpretation Mode"
+                        value={operatingMode}
+                        onChange={setOperatingMode}
+                        options={[
+                          { id: 'translate', label: 'One-Way', icon: ArrowRight },
+                          { id: 'conversation', label: 'Two-Way', icon: ArrowRightLeft }
+                        ]}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 px-4 py-3.5">
+                    <div className="pr-2 min-w-0">
+                      <p className="font-semibold text-white text-xs">Speed & Delivery</p>
+                      <p className="text-[11px] text-white/45 leading-normal">
+                        Live streams words as spoken; Accurate waits for complete sentences
+                      </p>
+                    </div>
+                    <div className="shrink-0">
+                      <GlassSegmentedControl<LatencyMode>
+                        ariaLabel="Speed and Latency Mode"
+                        value={latencyMode}
+                        onChange={setLatencyMode}
+                        options={[
+                          { id: 'sub_second_live', label: 'Live', icon: Zap },
+                          { id: 'sentence_accurate', label: 'Accurate' }
+                        ]}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Domain & Vocabulary Presets */}
+                <div className="space-y-2">
+                  <span className="font-semibold text-white">Specialized Field & Vocabulary</span>
+                  <p className="text-[11px] text-white/45">
+                    Select a specialized vocabulary model to ensure industry terms, acronyms, and critical names are translated with clinical precision.
+                  </p>
+                  <div className="grid grid-cols-1 gap-2 pt-1">
+                    {(Object.keys(DOMAIN_PRESETS) as DomainId[]).map((dId) => {
+                      const preset = DOMAIN_PRESETS[dId]
+                      const isSelected = domainId === dId
+                      return (
+                        <button
+                          key={dId}
+                          type="button"
+                          onClick={() => setDomainId(dId)}
+                          className={`glass-control-hover flex items-start justify-between rounded-2xl border p-3.5 text-left transition-all ${
+                            isSelected
+                              ? 'border-accent-steel/60 bg-accent-steel/14 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.18)]'
+                              : 'glass-grouped-card text-white/70 hover:bg-white/[0.06] hover:text-white'
+                          }`}
+                        >
+                          <div className="space-y-1 pr-3">
+                            <div className="flex items-center space-x-2">
+                              <span className="font-semibold text-xs text-white">
+                                {preset.label}
+                              </span>
+                              <span className="rounded-full border border-white/[0.1] bg-white/[0.06] px-2 py-0.5 text-[9px] font-mono text-white/60 uppercase">
+                                {preset.category}
+                              </span>
+                            </div>
+                            <p className="text-[11px] leading-relaxed text-white/55">
+                              {preset.description}
+                            </p>
+                          </div>
+                          {isSelected && (
+                            <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent-steel text-white">
+                              <Check className="h-3 w-3" strokeWidth={2.5} />
+                            </div>
+                          )}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ============================================================
+             * TAB 2: READING & HUD (Pure Reading Comfort Controls)
+             * ============================================================ */}
+            {activeTab === 'reading' && (
+              <div className="space-y-5">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-base font-semibold tracking-tight text-white">
+                      Reading & Teleprompter
+                    </h3>
+                    <p className="mt-0.5 text-white/50">
+                      Customize how transcripts and the floating teleprompter look while you read.
                     </p>
                   </div>
                   <button
                     type="button"
-                    onClick={() => {
-                      closeSettingsModal()
-                      openAccountModal()
-                    }}
-                    className="shrink-0 rounded bg-accent-steel px-3 py-1.5 font-mono text-[11px] font-bold text-white hover:bg-blue-700 transition"
+                    onClick={resetWorkspaceDisplaySettings}
+                    className="glass-control-hover flex items-center space-x-1 rounded-full border border-white/[0.1] bg-white/[0.06] px-3 py-1 text-[11px] text-white/75 hover:text-white"
                   >
-                    {isGatewayAuthenticated ? 'Manage Plan' : 'Sign In (1h Free)'}
+                    <RotateCcw className="h-3 w-3" />
+                    <span>Reset</span>
                   </button>
                 </div>
 
-                {/* CSV / JSON Upload & Validation Zone */}
-                <div className="rounded-lg border border-dashed border-surface-border bg-surface-base p-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-2">
-                      <Upload className="h-4 w-4 text-accent-steel" />
-                      <div>
-                        <p className="font-semibold text-text-primary">
-                          Import Custom Glossary (CSV or JSON)
-                        </p>
-                        <p className="font-mono text-[10px] text-text-muted">
-                          CSV syntax: source_term,target_term,notes (Max 2MB)
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex items-center space-x-2">
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        accept=".csv,.json,text/csv,application/json"
-                        onChange={(e) => void handleFileSelected(e)}
-                        className="hidden"
-                      />
-                      <button
-                        type="button"
-                        onClick={handleLoadSampleCsv}
-                        className="rounded border border-surface-border bg-surface-panel px-2.5 py-1.5 font-mono text-[11px] text-text-secondary hover:text-text-primary transition"
-                      >
-                        Load Sample CSV
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => fileInputRef.current?.click()}
-                        className="rounded bg-accent-steel px-3 py-1.5 font-mono text-[11px] font-semibold text-white hover:bg-blue-700 transition"
-                      >
-                        Upload CSV / JSON
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Validation Result Report */}
-                  {validationResult && (
-                    <div
-                      className={`rounded border p-2.5 font-mono text-[11px] space-y-1 ${
-                        validationResult.isValid
-                          ? 'border-accent-emerald/40 bg-accent-emerald/10 text-accent-emerald'
-                          : 'border-accent-crimson/40 bg-accent-crimson/10 text-accent-crimson'
-                      }`}
-                    >
-                      <div className="flex items-center space-x-1.5 font-bold">
-                        {validationResult.isValid ? (
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                        ) : (
-                          <AlertCircle className="h-3.5 w-3.5" />
-                        )}
-                        <span>
-                          {validationResult.isValid
-                            ? `Validated & Injected ${validationResult.entries.length} terminology pairs into Gemini prompt context.`
-                            : `Validation encountered ${validationResult.errors.length} syntax error(s).`}
-                        </span>
-                      </div>
-                      {validationResult.errors.map((err, i) => (
-                        <p key={i} className="text-[10px] text-accent-crimson">
-                          - {err}
-                        </p>
-                      ))}
-                      {validationResult.warnings.map((warn, i) => (
-                        <p key={i} className="text-[10px] text-accent-amber">
-                          - {warn}
-                        </p>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Manual Quick Entry */}
-                <div className="grid grid-cols-12 gap-2">
-                  <input
-                    type="text"
-                    placeholder="Source term (e.g. dyspnea)"
-                    value={manualSource}
-                    onChange={(e) => setManualSource(e.target.value)}
-                    className="col-span-4 rounded border border-surface-border bg-surface-base px-2.5 py-1.5 font-mono text-xs text-text-primary outline-none focus:border-accent-steel"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Target term (e.g. disnea)"
-                    value={manualTarget}
-                    onChange={(e) => setManualTarget(e.target.value)}
-                    className="col-span-4 rounded border border-surface-border bg-surface-base px-2.5 py-1.5 font-mono text-xs text-text-primary outline-none focus:border-accent-steel"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Notes (optional)"
-                    value={manualNotes}
-                    onChange={(e) => setManualNotes(e.target.value)}
-                    className="col-span-2 rounded border border-surface-border bg-surface-base px-2 py-1.5 font-mono text-xs text-text-primary outline-none focus:border-accent-steel"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleManualAddTerm}
-                    className="col-span-2 flex items-center justify-center space-x-1 rounded bg-surface-active border border-surface-border font-mono text-xs font-semibold text-text-primary hover:border-accent-steel transition"
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                    <span>Add</span>
-                  </button>
-                </div>
-
-                {/* Active Injected Glossary Table */}
-                <div className="rounded-lg border border-surface-border bg-surface-base overflow-hidden">
-                  <div className="flex items-center justify-between border-b border-surface-border bg-surface-panel px-3 py-2 font-mono text-[11px]">
-                    <span className="font-semibold text-text-primary">
-                      Active Prompt-Injected Terms ({customGlossaryEntries.length})
-                    </span>
-                    {customGlossaryEntries.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={clearCustomGlossary}
-                        className="text-text-muted hover:text-accent-crimson transition flex items-center space-x-1"
-                      >
-                        <Trash2 className="h-3 w-3" />
-                        <span>Clear All</span>
-                      </button>
-                    )}
-                  </div>
-                  <div className="max-h-44 overflow-y-auto divide-y divide-surface-border-subtle font-mono text-[11px]">
-                    {customGlossaryEntries.length === 0 ? (
-                      <div className="p-4 text-center text-text-muted">
-                        No custom terms loaded. Upload a CSV/JSON file or click "Load Sample CSV" above.
-                      </div>
-                    ) : (
-                      customGlossaryEntries.map((entry) => (
-                        <div
-                          key={entry.id}
-                          className="flex items-center justify-between px-3 py-2 hover:bg-surface-panel/60"
+                {/* Layout Picker */}
+                <div className="space-y-2">
+                  <span className="text-[11px] font-medium text-white/55">Reading Layout</span>
+                  <div className="grid grid-cols-3 gap-2">
+                    {VIEW_MODE_OPTIONS.map((opt) => {
+                      const Icon = VIEW_ICONS[opt.id]
+                      const active = workspaceDisplaySettings.viewMode === opt.id
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => updateWorkspaceDisplaySettings({ viewMode: opt.id })}
+                          className={`glass-control-hover flex flex-col items-start rounded-2xl border p-3 text-left ${
+                            active
+                              ? 'border-accent-steel/55 bg-accent-steel/18 text-white'
+                              : 'border-white/[0.07] bg-white/[0.04] text-white/70 hover:text-white'
+                          }`}
                         >
-                          <div className="flex items-center space-x-2">
-                            <span className="text-text-primary font-semibold">{entry.source}</span>
-                            <span className="text-text-muted">-&gt;</span>
-                            <span className="text-accent-emerald font-semibold">{entry.target}</span>
-                            {entry.notes && (
-                              <span className="text-[10px] text-text-muted">({entry.notes})</span>
-                            )}
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => removeGlossaryEntry(entry.id)}
-                            className="text-text-muted hover:text-accent-crimson"
-                            title="Remove term"
-                          >
-                            <Trash2 className="h-3 w-3" />
-                          </button>
-                        </div>
-                      ))
-                    )}
+                          <Icon
+                            className={`h-4 w-4 mb-2 ${active ? 'text-accent-steel' : 'text-white/50'}`}
+                            strokeWidth={1.75}
+                          />
+                          <span className="text-xs font-semibold leading-tight">{opt.shortLabel}</span>
+                          <span className="mt-0.5 text-[10px] text-white/45 leading-snug">
+                            {opt.description}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {/* Typography Card */}
+                <div className="glass-grouped-card rounded-2xl p-4 space-y-4">
+                  <div className="grid grid-cols-2 gap-2">
+                    {WORKSPACE_FONT_OPTIONS.map((opt) => {
+                      const active = workspaceDisplaySettings.fontFamily === opt.id
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => updateWorkspaceDisplaySettings({ fontFamily: opt.id })}
+                          className={`glass-control-hover flex items-center justify-between rounded-xl border px-3 py-2 text-left ${
+                            active
+                              ? 'border-accent-steel/55 bg-accent-steel/18 text-white'
+                              : 'border-white/[0.07] bg-white/[0.04] text-white/70 hover:text-white'
+                          }`}
+                        >
+                          <span className="text-xs font-medium" style={{ fontFamily: opt.cssStack }}>
+                            {opt.label}
+                          </span>
+                          <span className="text-[10px] text-white/40" style={{ fontFamily: opt.cssStack }}>
+                            Aa
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-white/70">Workspace Text Size</span>
+                      <span className="font-mono tabular-nums text-white">
+                        {workspaceDisplaySettings.fontSizePx}px
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={MIN_WORKSPACE_FONT_SIZE_PX}
+                      max={MAX_WORKSPACE_FONT_SIZE_PX}
+                      step={1}
+                      value={workspaceDisplaySettings.fontSizePx}
+                      onChange={(e) =>
+                        updateWorkspaceDisplaySettings({ fontSizePx: parseInt(e.target.value, 10) })
+                      }
+                      className="apple-slider w-full"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] text-white/70">Line Spacing</span>
+                    <GlassSegmentedControl<WorkspaceLineSpacing>
+                      ariaLabel="Line Spacing"
+                      value={workspaceDisplaySettings.lineSpacing}
+                      onChange={(val) => updateWorkspaceDisplaySettings({ lineSpacing: val })}
+                      options={(Object.keys(LINE_SPACING_METRICS) as WorkspaceLineSpacing[]).map(
+                        (key) => ({ id: key, label: LINE_SPACING_METRICS[key].label })
+                      )}
+                    />
+                  </div>
+                </div>
+
+                {/* Floating Teleprompter Preferences */}
+                <div className="glass-grouped-card rounded-2xl p-4 space-y-3.5">
+                  <span className="block text-xs font-semibold text-white">
+                    Floating Teleprompter
+                  </span>
+
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-white/70">Background Transparency</span>
+                      <span className="font-mono tabular-nums text-white">
+                        {Math.round(hudSettings.opacity * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      value={hudSettings.opacity}
+                      onChange={(e) => updateHudSettings({ opacity: parseFloat(e.target.value) })}
+                      className="apple-slider w-full"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-[11px]">
+                      <span className="text-white/70">Teleprompter Text Size</span>
+                      <span className="font-mono tabular-nums text-white">
+                        {hudSettings.fontSizePx}px
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="14"
+                      max="48"
+                      step="1"
+                      value={hudSettings.fontSizePx}
+                      onChange={(e) =>
+                        updateHudSettings({ fontSizePx: parseInt(e.target.value, 10) })
+                      }
+                      className="apple-slider w-full"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1 border-t border-white/[0.06]">
+                    <div className="flex items-center space-x-2">
+                      <MousePointerClick className="h-3.5 w-3.5 text-white/55" />
+                      <div>
+                        <p className="text-xs font-medium text-white">Click-Through Mode</p>
+                        <p className="text-[10px] text-white/45">
+                          Let mouse clicks pass straight to Zoom or Teams behind the teleprompter
+                        </p>
+                      </div>
+                    </div>
+                    <AppleSwitch
+                      checked={hudSettings.isClickThrough}
+                      onChange={(next) => updateHudSettings({ isClickThrough: next })}
+                      ariaLabel="Toggle Teleprompter Click-Through"
+                    />
                   </div>
                 </div>
               </div>
             )}
 
-            {/* TAB 3: GLOBAL KEYBOARD SHORTCUTS */}
+            {/* ============================================================
+             * TAB 3: KEYBOARD SHORTCUTS
+             * ============================================================ */}
             {activeTab === 'shortcuts' && (
               <div className="space-y-5">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2">
+                <div className="flex items-center justify-between">
                   <div>
-                    <h3 className="text-sm font-semibold text-text-primary">
-                      Global OS Keyboard Shortcuts
+                    <h3 className="text-base font-semibold tracking-tight text-white">
+                      Keyboard Shortcuts
                     </h3>
-                    <p className="mt-0.5 text-text-muted">
-                      Registered at the OS level via Electron globalShortcut — responds reliably even
-                      when DualAI is minimized or unfocused behind Zoom/Teams.
+                    <p className="mt-0.5 text-white/50">
+                      Quick keys that work even while you are inside Zoom, Teams, or a browser.
                     </p>
                   </div>
                   <button
                     type="button"
                     onClick={() => void resetShortcutBindings()}
-                    className="flex items-center space-x-1.5 rounded border border-surface-border bg-surface-base px-2.5 py-1 font-mono text-[11px] text-text-secondary hover:text-text-primary transition"
+                    className="glass-control-hover flex items-center space-x-1.5 rounded-full border border-white/[0.1] bg-white/[0.06] px-3 py-1 text-[11px] text-white/75 hover:text-white"
                   >
                     <RotateCcw className="h-3 w-3" />
                     <span>Reset Defaults</span>
@@ -758,12 +753,29 @@ export const SettingsModal: React.FC = () => {
                 </div>
 
                 {shortcutFeedback && (
-                  <div className="rounded border border-accent-emerald/40 bg-accent-emerald/10 px-3 py-2 font-mono text-[11px] text-accent-emerald">
+                  <div className="rounded-2xl border border-accent-emerald/40 bg-accent-emerald/12 px-4 py-2.5 text-xs text-accent-emerald">
                     {shortcutFeedback}
                   </div>
                 )}
 
-                <div className="divide-y divide-surface-border rounded-lg border border-surface-border bg-surface-base">
+                {/* Toggle Bottom-Left Live Shortcut Hints */}
+                <div className="glass-grouped-card flex items-center justify-between rounded-2xl px-4 py-3">
+                  <div className="pr-4">
+                    <div className="font-medium text-white">Show Live Shortcut Hints</div>
+                    <p className="text-[11px] text-white/45">
+                      Keep common commands subtly visible at the bottom-left while interpreting
+                    </p>
+                  </div>
+                  <AppleSwitch
+                    checked={workspaceDisplaySettings.showShortcutHints}
+                    onChange={(next) =>
+                      updateWorkspaceDisplaySettings({ showShortcutHints: next })
+                    }
+                    ariaLabel="Toggle live bottom-left shortcut hints"
+                  />
+                </div>
+
+                <div className="glass-grouped-card divide-y divide-white/[0.06] rounded-2xl">
                   {shortcutBindings.map((binding) => {
                     const isRecording = recordingActionId === binding.id
                     return (
@@ -771,32 +783,25 @@ export const SettingsModal: React.FC = () => {
                         key={binding.id}
                         className="flex items-center justify-between px-4 py-3"
                       >
-                        <div className="space-y-0.5">
-                          <div className="flex items-center space-x-2">
-                            <span className="font-semibold text-text-primary">{binding.label}</span>
-                            <span className="rounded border border-accent-emerald/30 bg-accent-emerald/10 px-1.5 py-0.5 font-mono text-[9px] text-accent-emerald">
-                              BACKGROUND ACTIVE
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-text-muted">{binding.description}</p>
+                        <div className="pr-4">
+                          <div className="font-medium text-white">{binding.label}</div>
+                          <p className="text-[11px] text-white/45">{binding.description}</p>
                         </div>
 
-                        <div className="flex items-center space-x-2">
-                          <kbd className="rounded border border-surface-border bg-surface-panel px-2.5 py-1 font-mono text-[11px] text-text-primary">
-                            {isRecording ? 'PRESS KEYS...' : binding.accelerator}
+                        <div className="flex items-center space-x-2 shrink-0">
+                          <kbd className="rounded-lg border border-white/[0.1] bg-white/[0.06] px-2.5 py-1 font-mono text-[11px] text-white/90">
+                            {isRecording ? 'Press keys...' : formatPlatformShortcut(binding.accelerator)}
                           </kbd>
                           <button
                             type="button"
-                            onClick={() =>
-                              setRecordingActionId(isRecording ? null : binding.id)
-                            }
-                            className={`rounded border px-2.5 py-1 font-mono text-[11px] transition ${
+                            onClick={() => setRecordingActionId(isRecording ? null : binding.id)}
+                            className={`glass-control-hover rounded-full border px-3 py-1 text-[11px] font-medium ${
                               isRecording
-                                ? 'border-accent-amber bg-accent-amber/20 text-accent-amber font-bold'
-                                : 'border-surface-border bg-surface-panel text-text-secondary hover:text-text-primary'
+                                ? 'border-accent-amber/55 bg-accent-amber/20 text-accent-amber'
+                                : 'border-white/[0.1] bg-white/[0.06] text-white/75 hover:text-white'
                             }`}
                           >
-                            {isRecording ? 'Cancel' : 'Rebind'}
+                            {isRecording ? 'Cancel' : 'Change'}
                           </button>
                         </div>
                       </div>
@@ -806,100 +811,78 @@ export const SettingsModal: React.FC = () => {
               </div>
             )}
 
-            {/* TAB 4: ACCOUNT & COMPLIANCE (ZERO-DATA RETENTION) */}
-            {activeTab === 'compliance' && (
+            {/* ============================================================
+             * TAB 4: PRIVACY & ACCOUNT
+             * ============================================================ */}
+            {activeTab === 'privacy' && (
               <div className="space-y-5">
-                <div className="border-b border-surface-border pb-2">
-                  <h3 className="text-sm font-semibold text-text-primary">
-                    Account Usage & Enterprise Compliance
+                <div>
+                  <h3 className="text-base font-semibold tracking-tight text-white">
+                    Privacy & Account
                   </h3>
-                  <p className="mt-0.5 text-text-muted">
-                    Subscription capacity tracking and binding Zero-Data Retention (ZDR) privacy
-                    guarantees for clinical and legal interpreters.
+                  <p className="mt-0.5 text-white/50">
+                    Your conversations stay private and are never saved or used for training.
                   </p>
                 </div>
 
-                {/* Usage Gauge Card */}
-                <div className="rounded-lg border border-surface-border bg-surface-base p-4 space-y-3 font-mono">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-text-primary">
-                      DUALAI PRO INTERPRETER QUOTA
-                    </span>
-                    <span className="rounded border border-accent-emerald/40 bg-accent-emerald/10 px-2 py-0.5 text-[10px] font-bold text-accent-emerald">
-                      ACTIVE LICENSE
-                    </span>
+                {/* Clean Account Link Card */}
+                <div className="glass-grouped-card flex items-center justify-between rounded-2xl p-4">
+                  <div>
+                    <p className="text-xs font-semibold text-white">
+                      {isGatewayAuthenticated && authSession
+                        ? authSession.user.email
+                        : 'Not signed in'}
+                    </p>
+                    <p className="mt-0.5 text-[11px] text-white/50">
+                      {isGatewayAuthenticated
+                        ? `${quotaRemainingHours.toFixed(1)} hours remaining in your current cycle`
+                        : 'Sign in to start your 1-hour free trial and manage plans'}
+                    </p>
                   </div>
-
-                  <div className="grid grid-cols-3 gap-3 text-center">
-                    <div className="rounded border border-surface-border-subtle bg-surface-panel p-2.5">
-                      <div className="text-[10px] text-text-muted">REMAINING</div>
-                      <div className="mt-1 text-base font-bold text-accent-emerald">
-                        {quotaRemainingHours.toFixed(1)}h
-                      </div>
-                    </div>
-                    <div className="rounded border border-surface-border-subtle bg-surface-panel p-2.5">
-                      <div className="text-[10px] text-text-muted">CONSUMED</div>
-                      <div className="mt-1 text-base font-bold text-text-primary">
-                        {hoursUsed.toFixed(1)}h
-                      </div>
-                    </div>
-                    <div className="rounded border border-surface-border-subtle bg-surface-panel p-2.5">
-                      <div className="text-[10px] text-text-muted">MONTHLY CAP</div>
-                      <div className="mt-1 text-base font-bold text-text-secondary">
-                        {quotaTotalHours}h
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[10px] text-text-muted">
-                      <span>Quota Balance</span>
-                      <span>{remainingPercent.toFixed(1)}% Available</span>
-                    </div>
-                    <div className="h-2 w-full overflow-hidden rounded bg-surface-panel border border-surface-border">
-                      <div
-                        className="h-full bg-accent-steel transition-all"
-                        style={{ width: `${remainingPercent}%` }}
-                      />
-                    </div>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      closeSettingsModal()
+                      openAccountModal()
+                    }}
+                    className="glass-cta-start flex items-center space-x-1.5 rounded-full px-4 py-1.5 text-xs font-semibold"
+                  >
+                    <span>{isGatewayAuthenticated ? 'Manage Plan' : 'Sign In'}</span>
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </button>
                 </div>
 
-                {/* Zero-Data Retention Compliance Statement */}
-                <div className="rounded-lg border border-accent-emerald/30 bg-surface-base p-4 space-y-3">
+                {/* Reassuring Privacy Guarantee (Preserves Compliance Clauses Cleanly) */}
+                <div className="glass-grouped-card rounded-2xl border-accent-emerald/25 p-4 space-y-3">
                   <div className="flex items-center space-x-2">
-                    <ShieldCheck className="h-4 w-4 text-accent-emerald" strokeWidth={1.75} />
-                    <h4 className="font-mono text-xs font-bold uppercase tracking-wide text-accent-emerald">
-                      Zero-Data Retention (ZDR) & Confidentiality Policy (HIPAA / GDPR Aligned)
+                    <ShieldCheck className="h-4 w-4 text-accent-emerald" strokeWidth={1.85} />
+                    <h4 className="text-xs font-semibold text-white">
+                      Zero-Data Retention (ZDR) — HIPAA & GDPR Aligned
                     </h4>
                   </div>
 
-                  <p className="leading-relaxed text-text-secondary">
-                    DualAI enforces a strict Zero-Data Retention architecture designed for medical
-                    interpretation (HIPAA PHI protection), courtroom proceedings (attorney-client
-                    privilege), and enterprise regulatory compliance (GDPR Article 25 Privacy by Design):
+                  <p className="leading-relaxed text-white/60">
+                    DualAI is designed for private medical, legal, and business conversations. Your
+                    audio and transcripts are processed live and never recorded.
                   </p>
 
-                  <ul className="space-y-1.5 font-mono text-[11px] text-text-secondary">
+                  <ul className="space-y-2 text-[11px] text-white/65">
                     <li>
-                      1. VOLATILE AUDIO BUFFERS ONLY: Raw 16kHz PCM audio streams and Silero VAD v5
-                      tensors exist strictly in volatile RAM and are overwritten continuously inside
-                      circular ring buffers. Zero audio files are ever written to local disk.
+                      <strong className="text-white/90 font-medium">
+                        VOLATILE AUDIO BUFFERS ONLY:
+                      </strong>{' '}
+                      Audio is processed strictly in temporary memory and never written to disk.
                     </li>
                     <li>
-                      2. EPHEMERAL SESSION MEMORY: Source utterances and translations remain solely
-                      in local application memory for the active session and are immediately purged
-                      on session termination or Buffer Clear (Cmd/Ctrl+Shift+K).
+                      <strong className="text-white/90 font-medium">Private sessions:</strong>{' '}
+                      Transcripts stay only on your screen during the call and clear instantly when
+                      you close the app or clear history.
                     </li>
                     <li>
-                      3. ZERO MODEL TRAINING GUARANTEE: External inference endpoints (Deepgram
-                      Nova-2 and Google Gemini 2.0 Flash Enterprise API) are invoked strictly under
-                      zero-retention, zero-training API agreements; no customer speech or clinical
-                      transcripts are stored or reused for model training.
-                    </li>
-                    <li>
-                      4. LOCAL-ONLY CREDENTIALS & GLOSSARIES: Custom glossaries, HUD coordinates,
-                      and optional API keys persist exclusively on the local workstation.
+                      <strong className="text-white/90 font-medium">
+                        ZERO MODEL TRAINING GUARANTEE:
+                      </strong>{' '}
+                      Your speech and translations are never stored or reused to train AI models.
                     </li>
                   </ul>
                 </div>
@@ -908,13 +891,13 @@ export const SettingsModal: React.FC = () => {
           </div>
         </div>
 
-        {/* Footer Strip */}
-        <div className="flex h-11 shrink-0 items-center justify-between border-t border-surface-border bg-surface-base px-5 font-mono text-[11px] text-text-muted">
-          <span>All configuration changes apply immediately and persist locally.</span>
+        {/* Clean Footer */}
+        <div className="flex h-12 shrink-0 items-center justify-between border-t border-white/[0.07] px-5 text-[11px] text-white/45">
+          <span>Changes are saved automatically.</span>
           <button
             type="button"
             onClick={closeSettingsModal}
-            className="rounded border border-surface-border bg-surface-panel px-4 py-1 text-xs font-semibold text-text-primary hover:bg-surface-active transition"
+            className="glass-control-hover rounded-full border border-white/[0.12] bg-white/[0.08] px-4 py-1.5 text-xs font-medium text-white"
           >
             Done
           </button>
