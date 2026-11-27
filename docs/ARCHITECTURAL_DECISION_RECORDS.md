@@ -569,3 +569,87 @@ We adopted a four-part architectural upgrade spanning the Renderer audio/UI pipe
 ### Consequences
 * **Positive:** Clean per-speaker and per-language paragraph separation without visual clutter; zero-jitter streaming scroll; one-click audio input/output switching directly inside the workspace; immediate Start feedback with zero false error flashes; and self-healing Paddle/Supabase subscription synchronization with clear date-aware messaging across all billing edge cases.
 * **Negative:** Explicit live reconciliation (`?sync=1` or error-triggered `subscriptions.get`) adds one server-side Paddle API roundtrip during manual refresh or conflict recovery; normal boot and background quota reads remain DB-first (<20ms) to avoid unnecessary upstream latency or rate limits.
+
+---
+
+## ADR-023: LISTEN-ONLY SYSTEM AUDIO ARCHITECTURE, SONIOX IDLE HIBERNATION, OS-WIDE CALL MIC MUTE, SELF-VOICE ECHO BLOCKER & DIARIZATION-PRIORITY PARAGRAPH SEGMENTATION
+
+### Status
+Accepted (Peer-Pair Reviewed by Code Reviewer & UX Reviewer per DUALAI-GOV-2026-V1)
+
+### Context
+Production usage and Soniox token billing audits revealed four architectural cost and UX inefficiencies:
+1. **Soniox Real-Time Open-Stream Billing:** Soniox bills real-time STT for the entire open WebSocket stream duration even while paused and sending `keepalive` frames. Keeping upstream sockets open during idle periods, holds, or dual-channel bilateral sessions inflated per-user COGS.
+2. **Oversensitive Peak Gate & Dual-Channel Microphone Exposure:** The legacy `maxAbs >= 45` (-57.2 dBFS) peak gate bypassed Silero VAD v5, streaming room noise and clicks continuously; allowing bilateral microphone capture also risked 2x Soniox billing by transcribing the interpreter's own voice.
+3. **Call Return Echo & Sidetone:** Even with listen-only System Audio loopback, remote clinic speakerphones and softphone sidetone echoed the interpreter's own voice back into the call output, triggering unwanted Soniox translations.
+4. **Mid-Sentence Paragraph Fragmentation:** Enabling `enable_endpoint_detection: true` alongside `enable_speaker_diarization: true` reduced Soniox's speaker context (contrary to Soniox's diarization-priority guidance), splitting single-speaker turns across short breaths.
+
+### Decision
+We transitioned DualAI to a **Listen-Only, Cost-Minimized Interpretation Pipeline**:
+1. **Lazy Upstream Dial & Transparent Idle/Mute Hibernation (`server/src/proxy/sonioxWsProxy.ts`, `server/src/config.ts`):** Defers opening the upstream Soniox WebSocket until the first binary PCM frame arrives, buffers up to 96 frames (~4.6s) during wake-up, closes ONLY the upstream Soniox socket after 12s of silence (`SONIOX_IDLE_HIBERNATE_MS`) or 1.5s after explicit mute pause (`SONIOX_MUTE_HIBERNATE_MS`) while keeping the client WebSocket open, absorbs keepalives during hibernation at \$0 cost, deduplicates glossary terms case-insensitively, and enforces a strict 1-socket concurrency cap (`maxConcurrentSessions`) with early-disconnect guard and 1-time 350ms client reconnect handoff retry on `4003`.
+2. **Listen-Only System Audio & OS-Wide Call Mic Mute (`audioRoutingPolicy.ts`, `AudioIngestionEngine.ts`, `src/main/systemMicMute.ts`):** Disabled Channel A microphone capture/VAD/STT completely across client and UI. Re-purposed the `SPACE` / Mute control to execute native OS-wide microphone mute (macOS `osascript` with volume restore, Windows CoreAudio COM `IAudioEndpointVolume::SetMute` with `[PreserveSig]` across `eConsole` and `eCommunications`, Linux `pactl`/`amixer`, plus synchronous `will-quit` restore) without interrupting DualAI's System Audio translation.
+3. **Hybrid `SmartSpeechGate` & Local-Only Self-Voice Echo Blocker (`smartSpeechGate.ts`, `AudioIngestionEngine.ts`):** Fixed 16kHz downsampling + native 512-sample frames into Silero VAD v5, implemented a 320ms pre-roll ring buffer, 48ms PCM batching (6x less WS framing), 2.2s natural-pause hangover, and a 100% local `AnalyserNode` RMS self-voice monitor (0 mic bytes ever leave the device) that blocks call return echo/sidetone during interpreter speech + 500ms tail.
+4. **Diarization-Priority Soniox Config & Smart Paragraph Segmentation (`sonioxWsProxy.ts`, `sonioxStreamAssembler.ts`):** Set `enable_endpoint_detection: false` per Soniox's official call-diarization guidance, added acoustic timestamp-gap (`start_ms`/`end_ms` >= 2.2s) and wall-clock 2.2s settle commit, preserved 0ms speaker/language interruption splits, added a 75-word sentence-boundary readability cap for nonstop monologues, and introduced zero-PII local development telemetry (`sonioxTelemetryRecorder.ts`, `scripts/analyze_soniox_telemetry.ts`).
+
+### Consequences
+* **Positive:** Minimizes Soniox token spend to active remote speech only, eliminates idle keepalive billing and self-voice echo translation, enables true OS-wide hold mute across Zoom/Teams/Meet, and produces fluid, properly diarized paragraphs.
+* **Negative:** Cloud production deployments (Fly.io) must be redeployed for server-side Lazy Dial, Hibernation, and `enable_endpoint_detection: false` to take effect.
+
+
+---
+
+## ADR-024: Reversible STT Provider Switch (`STT_PROVIDER`) & Deepgram Nova-3 + Gemini Full Feature Parity
+
+**Date:** 2026-11-27  
+**Status:** Accepted  
+**Context:**  
+DualAI's primary unified engine (Soniox) costs ~$0.16/hr, whereas the operator has $200 in free Deepgram introductory credits (~400-775 hours at $0.00 out-of-pocket). The Chief Architect requested switching production and local streaming strictly to Deepgram to consume the $200 free credit while keeping all Soniox code and `SONIOX_API_KEY` completely untouched ($0 Soniox usage while disabled) so Soniox can be reactivated later via a single environment variable change. Previously, Deepgram lacked Lazy Upstream Dial, idle/mute hibernation, `diarize=true`, `language=multi` bilingual Conversation mode, Nova-3 `keyterm` glossary injection, mid-frame speaker interruption splitting, 2.2s acoustic pause detection, 75-word monologue splitting, and bidirectional Conversation-mode Gemini prompting.
+
+**Decision:**  
+1. **Explicit Zero-Cost Provider Switch (`STT_PROVIDER`):** Added `sttProvider: 'auto' | 'soniox' | 'deepgram'` and `resolveActiveSttProvider(config)` in `server/src/config.ts`. Setting `STT_PROVIDER=deepgram` guarantees `/v1/stt` routes exclusively to `handleSttWebSocketProxy` (0 Soniox dials even when `SONIOX_API_KEY` remains stored). Setting `STT_PROVIDER=soniox` restores Soniox instantaneously.
+2. **Deepgram Nova-3 Cost & Quality Parity (`server/src/proxy/deepgramWsProxy.ts`):**
+   - Defaults to `DEEPGRAM_MODEL=nova-3` with `diarize=true`, `smart_format=true`, `punctuate=true`, `interim_results=true`, `language=multi` in two-way Conversation mode (`language=<sourceLang>` in one-way Translate mode), and deduplicated `keyterm` glossary params (`keywords` for `nova-2`).
+   - Implements the exact Lazy Upstream Dial (Wake-on-Audio), 8s Idle Hibernation (safely beating Deepgram's 10s NET-0001 timeout), 1.5s Mute/Pause Hibernation (`Finalize` + `CloseStream`), 5s KeepAlive with hibernated absorption, 96-chunk PCM re-wake buffering, early-disconnect leak guard, fragmented `Buffer[]` concatenation, and strict 1-socket concurrency cap (4003) established in ADR-023.
+3. **Speaker-Aware Paragraph & Interruption Parity (`GatewaySttClient.ts`, `paragraphAccumulator.ts`):**
+   - `splitDeepgramWordsBySpeaker` splits mid-frame Deepgram `words[]` arrays into ordered contiguous speaker runs (`Speaker 1`, `Speaker 2`, etc.) so mid-chunk interruptions split at 0ms.
+   - `ParagraphTurnAccumulator` upgraded to 2,200ms wall-clock AND acoustic timestamp pause detection, zero provisional interim bleed across speakers, 75-word sentence-boundary monologue splitting, and duplicate finalized clause suppression.
+4. **Bidirectional Gemini Translation Parity (`geminiStreamProxy.ts`, `GatewayTranslationEngine.ts`, `TranslationManager.ts`, `SessionContext.tsx`):**
+   - Threads `operatingMode` (`translate` vs `conversation`) into `/v1/translate` so Conversation mode detects spoken language and translates strictly into the opposite language in the active pair, defaults to cost-optimized `gemini-2.5-flash-lite` ($0.10/1M in, $0.40/1M out), trims rolling dialogue history to 4 turns (~70% input token savings), and applies optimized draft debounce (180ms finalized / 850ms interim >= 4 words).
+
+**Consequences:**  
+* **Positive:** $0 Soniox spend while consuming the $200 Deepgram free credit; full behavioral parity across paragraph grouping, speaker interruption splitting, listen-only echo suppression, and idle hibernation; single env var toggle to return to Soniox later.
+* **Negative:** Unlike Soniox's single-API unified pipeline, Deepgram is STT-only and requires `GEMINI_API_KEY` alongside `DEEPGRAM_API_KEY` in `server/.env` and Fly.io secrets for right-pane translation.
+
+
+---
+
+## ADR-025: Sub-Second Atomic Translation Pipeline (Option A), Domain-Aware Deepgram Nova-3 Medical Routing, Single Accurate Mode & Cost Optimization ($15/70h Economics)
+
+### Status
+Accepted (Chief Architect Approved — Peer-Pair Reviewed under DUALAI-GOV-2026-V1)
+
+### Context
+Live production testing of the Deepgram Nova-3 + Gemini 2.5 Flash-Lite migration (ADR-024) exposed four operational and economic challenges that needed architectural resolution to outperform higher-cost unified models ($0.16–$0.18/hr Soniox) while maintaining <= 1.0s responsiveness and strong unit economics on a $15/month (70-hour) user plan:
+1. **3.5-Second Post-Speech Translation Delay:** Locking the app to `sentence_accurate` mode stacked three sequential delays after a speaker's final word: `endpointing=650ms` -> `650ms` client debounce -> `2,200ms` `ParagraphTurnAccumulator` commit timer (+ VAD hangover resets), keeping finished Gemini translations invisible in RAM until T+3,500ms.
+2. **Live Mode Token Multiplier:** Progressive draft re-translation in `sub_second_live` multiplied Gemini calls 2x–3x per turn ($3.10–$9.50 per 70h) and caused visual text flickering, whereas single-pass Accurate mode costs ~$1.40–$2.00 per 70h (~$10.50–$12.35 net margin per $15 user while Deepgram $200 free credits last).
+3. **Deepgram Multilingual Code-Switching & Domain Accuracy:** `language=multi` spans 10 languages (including Portuguese), occasionally producing cross-language slips (`"primeiro"`, `"e"`) or medical term errors when using generic `nova-3`.
+4. **Echo Blocker False Cutoffs & Cross-Paragraph Duplication:** Local mic self-voice echo monitoring clipped system audio after 1–2 words when testing over laptop speakers, and committing unstable `interim` text on speaker switches caused delayed `is_final: true` frames to replay verbatim in the next row.
+
+### Decision
+1. **Decouple Translation Visibility from Paragraph Commit (Option A Sub-Second Atomic Reveal):**
+   - Preserve Deepgram's native `speech_final: true` flag through `GatewaySttClient` (`TranscriptUtterance.speechFinal`) and `ParagraphTurnAccumulator` (`DraftUpdateMeta.isSpeechFinal`).
+   - Tune `resolveEndpointingMs` and Nova-3 `language=multi` endpointing floor to `300ms`, and shrink `SmartSpeechGate` framing batch to `512` samples (`32ms` @ 16kHz).
+   - Dispatch Gemini immediately (`0ms` debounce) on `isSpeechFinal: true` (never on raw interims), keep in-flight tokens silent in RAM, and reveal the complete translated paragraph atomically in `DualPaneWorkspace` on `onDraftComplete` (~0.85s–0.98s post-speech).
+   - Never abort a matching in-flight translation when `onParagraphCommit` fires (`pendingCommitPromotionRef` promotes it cleanly on completion, guaranteeing zero double-calls).
+2. **Server-Side Hot-Path Quota Cache (`server/src/proxy/geminiStreamProxy.ts`):**
+   - Cache `quotaStore.getOrCreateUserQuota(userId)` in memory for 8 seconds (max 2,000 entries, bypassed when `remainingSeconds <= 30`), eliminating 50–120ms of blocking Supabase DB RTT on every `/v1/translate` request.
+3. **Domain-Aware Deepgram Routing & Gemini STT Error Repair (`deepgramWsProxy.ts`, `geminiStreamProxy.ts`):**
+   - Automatically route `domain === 'medical'` to `nova-3-medical` (same Nova-3 base pricing tier, supports `language=multi` streaming) and `general`/`legal`/`technical`/`business` to `nova-3`.
+   - Inject `STT_REPAIR_GUIDANCE` into all Gemini domain system prompts so Gemini 2.5 Flash-Lite silently infers and repairs phonetic slips or brief Portuguese bleed inside EN/ES speech.
+4. **Single-Mode Simplification & Cleanup:**
+   - Lock the client permanently to `sentence_accurate` and remove Live/Accurate speed toggles and Echo/Noise Suppression toggles (`echoBlockerEnabled = false`) from Settings, Header popovers, and SubHeader.
+   - Add punctuation-insensitive cross-paragraph deduplication (`recentCommits` + `stripDuplicateAgainstPrevious`) and clear unstable `currentInterimText` on speaker/language-switch commits in `ParagraphTurnAccumulator`.
+
+### Consequences
+* **Positive:** Post-speech latency drops from **3.5s -> ~0.85s–0.98s** with zero visual flicker, zero duplicate rows, higher clinical accuracy via `nova-3-medical` + Gemini STT repair, and predictable **~$1.40–$2.00 / 70h** Gemini translation cost (~$10.50–$12.35 net margin on $15 plans during Deepgram credit phase; reversible to Soniox via `STT_PROVIDER=soniox` once free credits expire).
+* **Negative:** On rare multi-clause turns where a speaker pauses >300ms mid-paragraph, Gemini may translate once at the first clause and once at the final clause (~1.1x–1.2x calls/turn average). Quota cache introduces up to 8s of grace window on `/v1/translate` when remaining balance is >30s (still bounded by WS metering and 1-session concurrency cap).

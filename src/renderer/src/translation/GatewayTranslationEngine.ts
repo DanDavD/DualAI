@@ -18,6 +18,8 @@ import { getGatewayHttpUrl } from '../services/gatewayAuthService'
 
 export interface TranslateStreamOptions {
   isDraft?: boolean
+  operatingMode?: 'translate' | 'conversation'
+  sourceLangOverride?: string
 }
 
 function isAbortError(err: unknown): boolean {
@@ -28,7 +30,8 @@ function isAbortError(err: unknown): boolean {
 export class GatewayTranslationEngine {
   private accessToken: string
   private finalControllers: Map<string, AbortController> = new Map()
-  private draftControllers: Map<ChannelId, AbortController> = new Map()
+  private draftControllers: Map<ChannelId, { utteranceId: string; controller: AbortController }> =
+    new Map()
   private customGlossary?: Record<string, string>
   private onQuotaExhausted?: (message: string) => void
 
@@ -64,7 +67,10 @@ export class GatewayTranslationEngine {
     if (isDraft) {
       // Live draft previews only cancel an earlier draft on the SAME channel
       this.cancelDraftPreview(utterance.channelId)
-      this.draftControllers.set(utterance.channelId, controller)
+      this.draftControllers.set(utterance.channelId, {
+        utteranceId: utterance.id,
+        controller
+      })
     } else {
       // Committed paragraphs NEVER cancel other committed paragraphs
       const existingSameId = this.finalControllers.get(utterance.id)
@@ -77,12 +83,14 @@ export class GatewayTranslationEngine {
     const startTime = performance.now()
     const translationId = isDraft ? `draft-${utterance.id}` : `trans-${utterance.id}`
 
+    const effectiveSourceLang = options?.sourceLangOverride || utterance.language || 'en'
     const initialResult: TranslationResult = {
       id: translationId,
       utteranceId: utterance.id,
       channelId: utterance.channelId,
+      speakerId: utterance.speakerId,
       speakerLabel: utterance.speakerLabel,
-      sourceLang: utterance.language,
+      sourceLang: effectiveSourceLang,
       targetLang,
       sourceText: utterance.text,
       translatedText: '',
@@ -109,11 +117,12 @@ export class GatewayTranslationEngine {
         signal: controller.signal,
         body: JSON.stringify({
           sourceText: utterance.text,
-          sourceLang: utterance.language,
+          sourceLang: effectiveSourceLang,
           targetLang,
+          operatingMode: options?.operatingMode || 'translate',
           domainId,
           speakerLabel: utterance.speakerLabel,
-          dialogueHistory: dialogueHistory.slice(-15).map((turn) => ({
+          dialogueHistory: dialogueHistory.slice(-4).map((turn) => ({
             speakerLabel: turn.speakerLabel,
             sourceText: turn.sourceText,
             translatedText: turn.translatedText
@@ -241,27 +250,45 @@ export class GatewayTranslationEngine {
         callbacks.onError(err as Error)
       }
     } finally {
-      if (isDraft) {
-        if (this.draftControllers.get(utterance.channelId) === controller) {
-          this.draftControllers.delete(utterance.channelId)
-        }
-      } else if (this.finalControllers.get(utterance.id) === controller) {
+      const activeDraft = this.draftControllers.get(utterance.channelId)
+      if (activeDraft && activeDraft.controller === controller) {
+        this.draftControllers.delete(utterance.channelId)
+      }
+      if (this.finalControllers.get(utterance.id) === controller) {
         this.finalControllers.delete(utterance.id)
       }
     }
   }
 
+  /**
+   * Moves an in-flight draft controller into finalControllers so subsequent drafts on the
+   * same channel cannot abort it after the paragraph has committed.
+   */
+  public promoteDraftToFinal(channelId: ChannelId, utteranceId: string): boolean {
+    const entry = this.draftControllers.get(channelId)
+    if (!entry || entry.utteranceId !== utteranceId || entry.controller.signal.aborted) {
+      return false
+    }
+    this.draftControllers.delete(channelId)
+    const existingSameId = this.finalControllers.get(utteranceId)
+    if (existingSameId && existingSameId !== entry.controller) {
+      existingSameId.abort()
+    }
+    this.finalControllers.set(utteranceId, entry.controller)
+    return true
+  }
+
   public cancelDraftPreview(channelId?: ChannelId): void {
     if (channelId) {
-      const ctrl = this.draftControllers.get(channelId)
-      if (ctrl) {
-        ctrl.abort()
+      const entry = this.draftControllers.get(channelId)
+      if (entry) {
+        entry.controller.abort()
         this.draftControllers.delete(channelId)
       }
       return
     }
-    for (const ctrl of this.draftControllers.values()) {
-      ctrl.abort()
+    for (const entry of this.draftControllers.values()) {
+      entry.controller.abort()
     }
     this.draftControllers.clear()
   }

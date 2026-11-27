@@ -11,7 +11,6 @@ import {
   ArrowDownCircle,
   Filter,
   CheckCircle2,
-  Mic,
   Volume2,
   ArrowRightLeft,
   ArrowRight,
@@ -51,22 +50,10 @@ const EMPTY_STATE_ROUTES: Array<{
   icon: React.ComponentType<{ className?: string; strokeWidth?: number }>
 }> = [
   {
-    id: 'mic',
-    title: 'Microphone',
-    subtitle: 'Your voice directly',
-    icon: Mic
-  },
-  {
     id: 'system',
     title: 'System Audio',
-    subtitle: 'Meetings & videos',
+    subtitle: 'All meetings & calls',
     icon: Volume2
-  },
-  {
-    id: 'bilateral',
-    title: 'Mic + Call',
-    subtitle: 'Both sides live',
-    icon: ArrowRightLeft
   },
   {
     id: 'app',
@@ -85,7 +72,7 @@ export const DualPaneWorkspace: React.FC = () => {
   const {
     isAudioActive,
     isInitializingAudio,
-    isCoughMuted,
+    isSystemAudioMuted,
     audioRoute,
     setAudioRoute,
     operatingMode,
@@ -551,11 +538,11 @@ export const DualPaneWorkspace: React.FC = () => {
                     >
                       <div className="glass-capsule-subtle inline-flex w-fit items-center space-x-2.5 rounded-full px-3.5 py-2 text-xs text-white/75">
                         <AcousticPulse
-                          active={isAudioActive && !isCoughMuted}
+                          active={isAudioActive && !isSystemAudioMuted}
                           tone={
                             isInitializingAudio
                               ? 'amber'
-                              : isCoughMuted
+                              : isSystemAudioMuted
                                 ? 'crimson'
                                 : 'emerald'
                           }
@@ -563,8 +550,8 @@ export const DualPaneWorkspace: React.FC = () => {
                         <span className="font-medium tracking-tight">
                           {isInitializingAudio
                             ? 'Connecting...'
-                            : isCoughMuted
-                              ? 'Muted'
+                            : isSystemAudioMuted
+                              ? 'Call Audio Paused'
                               : 'Listening...'}
                         </span>
                       </div>
@@ -590,11 +577,11 @@ export const DualPaneWorkspace: React.FC = () => {
                   <div className="flex flex-1 w-full flex-col items-center justify-center px-6 pb-24 text-center animate-utterance">
                     <div className="glass-capsule-subtle inline-flex items-center space-x-2.5 rounded-full px-4 py-2 text-xs text-white/80">
                       <AcousticPulse
-                        active={isAudioActive && !isCoughMuted}
+                        active={isAudioActive && !isSystemAudioMuted}
                         tone={
                           isInitializingAudio
                             ? 'amber'
-                            : isCoughMuted
+                            : isSystemAudioMuted
                               ? 'crimson'
                               : 'emerald'
                         }
@@ -602,8 +589,8 @@ export const DualPaneWorkspace: React.FC = () => {
                       <span className="font-medium tracking-tight">
                         {isInitializingAudio
                           ? 'Connecting...'
-                          : isCoughMuted
-                            ? 'Muted'
+                          : isSystemAudioMuted
+                            ? 'Call Audio Paused'
                             : 'Listening...'}
                       </span>
                     </div>
@@ -885,10 +872,14 @@ export const DualPaneWorkspace: React.FC = () => {
                     settings: workspaceDisplaySettings
                   })
 
+                  const hasReadyTranslationB = Boolean(
+                    draftTranslationB && draftTranslationB.translatedText.trim().length > 0
+                  )
+
                   if (isTargetOnlyView) {
                     return (
                       <div className={`px-8 ${rowPaddingClass} bg-surface-panel/25 max-w-5xl mx-auto`}>
-                        {isLiveMode ? (
+                        {hasReadyTranslationB || isLiveMode ? (
                           <TranslationCard
                             translation={draftTranslationB || undefined}
                             utteranceId={
@@ -897,7 +888,7 @@ export const DualPaneWorkspace: React.FC = () => {
                               'draft-channel-b'
                             }
                             isStreaming={draftTranslationB ? draftTranslationB.isStreaming : true}
-                            isDraft={true}
+                            isDraft={!hasReadyTranslationB}
                             textColor={draftTranslationColorB}
                             displaySettings={workspaceDisplaySettings}
                             onToggleFlag={handleToggleFlag}
@@ -931,7 +922,7 @@ export const DualPaneWorkspace: React.FC = () => {
                             onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
                           />
                         )}
-                        {isLiveMode ? (
+                        {hasReadyTranslationB || isLiveMode ? (
                           <TranslationCard
                             translation={draftTranslationB || undefined}
                             utteranceId={
@@ -940,7 +931,7 @@ export const DualPaneWorkspace: React.FC = () => {
                               'draft-channel-b'
                             }
                             isStreaming={draftTranslationB ? draftTranslationB.isStreaming : true}
-                            isDraft={true}
+                            isDraft={!hasReadyTranslationB}
                             textColor={draftTranslationColorB}
                             displaySettings={workspaceDisplaySettings}
                             onToggleFlag={handleToggleFlag}
@@ -987,7 +978,7 @@ export const DualPaneWorkspace: React.FC = () => {
                           className={`px-6 pt-1 pb-3 border-r ${dividerBorderClass}`}
                         />
                         <div style={{ width: `${100 - splitRatio}%` }} className="px-6 pt-1 pb-3">
-                          {isLiveMode ? (
+                          {hasReadyTranslationB || isLiveMode ? (
                             <TranslationCard
                               translation={draftTranslationB || undefined}
                               utteranceId={
@@ -996,7 +987,7 @@ export const DualPaneWorkspace: React.FC = () => {
                                 'draft-channel-b'
                               }
                               isStreaming={draftTranslationB ? draftTranslationB.isStreaming : true}
-                              isDraft={true}
+                              isDraft={!hasReadyTranslationB}
                               textColor={draftTranslationColorB}
                               displaySettings={workspaceDisplaySettings}
                               onToggleFlag={handleToggleFlag}
@@ -1215,8 +1206,8 @@ export const DualPaneWorkspace: React.FC = () => {
 
                   <p className="mx-auto max-w-md text-xs leading-relaxed text-white/50">
                     {operatingMode === 'conversation'
-                      ? `Listening to both ${sourceDisplayName} and ${targetDisplayName}. Choose your audio input below and press Start.`
-                      : `Translating spoken ${sourceDisplayName} into ${targetDisplayName} in real time. Choose your audio input below and press Start.`}
+                      ? `Listening to both ${sourceDisplayName} and ${targetDisplayName}. Choose your call audio source below and press Start.`
+                      : `Translating spoken ${sourceDisplayName} into ${targetDisplayName} in real time. Choose your call audio source below and press Start.`}
                   </p>
                 </div>
 
@@ -1244,13 +1235,13 @@ export const DualPaneWorkspace: React.FC = () => {
                   />
                 </div>
 
-                {/* 3. Horizontal 4-Card Liquid Glass Bento Audio Selector */}
+                {/* 3. Listen-Only Call Audio Selector */}
                 <div
                   role="radiogroup"
-                  aria-label="Choose where the sound comes from"
-                  className="grid w-full grid-cols-2 gap-3 lg:grid-cols-4"
+                  aria-label="Choose your call audio source"
+                  className="grid w-full max-w-md grid-cols-2 gap-3"
                 >
-                  {EMPTY_STATE_ROUTES.map((option) => {
+                  {EMPTY_STATE_ROUTES.map((option, idx) => {
                     const Icon = option.icon
                     const isSelected = audioRoute === option.id
                     return (
@@ -1260,7 +1251,22 @@ export const DualPaneWorkspace: React.FC = () => {
                         role="radio"
                         aria-checked={isSelected}
                         onClick={() => setAudioRoute(option.id)}
-                        className={`glass-control-hover group relative flex flex-col items-start justify-between rounded-[22px] border p-4 text-left min-h-[112px] ${
+                        onKeyDown={(e) => {
+                          if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+                            e.preventDefault()
+                            const next = EMPTY_STATE_ROUTES[(idx + 1) % EMPTY_STATE_ROUTES.length]
+                            setAudioRoute(next.id)
+                            const siblings = e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')
+                            siblings?.[(idx + 1) % EMPTY_STATE_ROUTES.length]?.focus()
+                          } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+                            e.preventDefault()
+                            const prevIdx = (idx - 1 + EMPTY_STATE_ROUTES.length) % EMPTY_STATE_ROUTES.length
+                            setAudioRoute(EMPTY_STATE_ROUTES[prevIdx].id)
+                            const siblings = e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')
+                            siblings?.[prevIdx]?.focus()
+                          }
+                        }}
+                        className={`glass-control-hover group relative flex flex-col items-start justify-between rounded-[22px] border p-4 text-left min-h-[112px] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-steel/70 ${
                           isSelected
                             ? 'border-accent-steel/60 bg-accent-steel/14 text-white shadow-[inset_0_1px_0.5px_rgba(255,255,255,0.2),0_12px_28px_-10px_rgba(10,132,255,0.35)]'
                             : 'glass-grouped-card text-white/75 hover:bg-white/[0.08] hover:text-white'
@@ -1303,7 +1309,7 @@ export const DualPaneWorkspace: React.FC = () => {
                     <kbd className="rounded-md border border-white/[0.1] bg-white/[0.05] px-1.5 py-0.5 font-mono text-[9px] text-white/60">
                       SPACE
                     </kbd>
-                    <span>Mute</span>
+                    <span>Mute Mic</span>
                   </span>
                   <span className="flex items-center space-x-1.5">
                     <kbd className="rounded-md border border-white/[0.1] bg-white/[0.05] px-1.5 py-0.5 font-mono text-[9px] text-white/60">

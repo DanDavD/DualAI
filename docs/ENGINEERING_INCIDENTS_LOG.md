@@ -684,3 +684,79 @@ Synchronize the drifted production row in Supabase, add automatic live Paddle-to
 * `npm run typecheck`, `npm run build`, `npm run build:gateway`, `scripts/test_paddle_fulfillment_provisioning.ts` (9/9 PASS), `scripts/test_zero_trust_security.ts` (9/9 PASS), and `npm run security:gate` (PASS, 0 secrets) all passed with 0 errors.
 * Live production health verified at `https://dualai-cloud-gateway.fly.dev/v1/health` (`HTTP 200 OK`).
 
+
+---
+
+## INCIDENT 027: SONIOX IDLE BILLING, CALL RETURN ECHO TRANSLATION, PARAGRAPH FRAGMENTATION & PEER-PAIR AUDIT REMEDIATION
+
+* **Date:** 2026-11-27
+* **Component:** `server/src/proxy/sonioxWsProxy.ts`, `src/renderer/src/audio/smartSpeechGate.ts`, `src/renderer/src/audio/AudioIngestionEngine.ts`, `src/renderer/src/audio/stt/sonioxStreamAssembler.ts`, `src/main/systemMicMute.ts`, `src/renderer/src/context/SessionContext.tsx`, `src/renderer/src/components/`
+* **Severity:** High (API Unit Economics, Call Echo Noise, Paragraph Readability & Cross-Platform Audio Hardening)
+
+### 1. Situation
+During live medical/legal call interpretation:
+1. Soniox real-time streams remained open indefinitely via `keepalive` during pauses and holds, accruing open-stream billing while a static `-57.2 dBFS` (`maxAbs >= 45`) peak gate streamed ambient noise instead of leveraging Silero VAD v5.
+2. Even after disabling microphone capture, the interpreter's own voice echoed back through remote clinic speakerphones/softphone sidetone into System Audio loopback and was translated by Soniox.
+3. Single-speaker turns fragmented into short choppy cards (e.g., `"desde el día 14."` / `"De noviembre."` / `"a la oficina y."`) due to `enable_endpoint_detection: true` competing with speaker diarization and premature `finalize` triggers during short breaths.
+4. Peer-Pair Code Review and UX Review audits under `DUALAI-GOV-2026-V1` identified critical defects in the initial patch: `startSelfVoiceEchoMonitor` raced `isRunning = true` on startup; Windows CoreAudio COM interfaces lacked `[PreserveSig]`; early WS disconnect during `await getOrCreateUserQuota` could permanently lock the 1-socket concurrency slot; `DualPaneWorkspace.tsx` still bound live stage status to `isCoughMuted` instead of `isSystemAudioMuted`; and `SettingsModal.tsx` could mismatch stale `localStorage` loopback device IDs.
+
+### 2. Task
+Eliminate idle and self-voice Soniox token waste, preserve OS-wide call hold muting, perfect diarization-driven paragraph segmentation (2.2s pause threshold + 0ms speaker interruption split + 75-word monologue cap), and resolve 100% of Critical, Major, and Minor findings from the Code Reviewer and UX Reviewer audits.
+
+### 3. Action
+* **Gateway Hibernation & Reliability (`sonioxWsProxy.ts`, `config.ts`, `sonioxTelemetryRecorder.ts`):** Implemented Lazy Upstream Dial, 12s idle / 1.5s mute hibernation with keepalive absorption, strict 1-socket cap, `enable_endpoint_detection: false`, fragmented `Buffer[]` handling, early-disconnect guard before `await getOrCreateUserQuota`, and zero-PII development telemetry.
+* **Client Audio & Self-Voice Echo Blocker (`smartSpeechGate.ts`, `AudioIngestionEngine.ts`, `systemMicMute.ts`, `GatewaySttClient.ts`, `SessionContext.tsx`):** Built `SmartSpeechGate` (Silero VAD + 320ms pre-roll + 48ms batching + 2.2s hangover + non-chopping echo suppression); fixed `startSelfVoiceEchoMonitor` to launch after `isRunning = true` with a generation counter and proper `dispose()` cleanup; added `[PreserveSig]` and COM RCW release + serialized call queue in `systemMicMute.ts`; added 1-time 350ms `4003` retry on intentional mid-session reconnects; fixed React 18 StrictMode ref handling on `toggleCoughMute` and telemetry cleanup on unmount/quota exhaustion.
+* **Paragraph Segmentation (`sonioxStreamAssembler.ts`):** Added Soniox acoustic `start_ms`/`end_ms` >= 2.2s pause detection, robust settle timer re-arming after dropped provisional frames, immediate in-loop 75-word sentence-boundary splits, safe punctuation spacing (protecting decimals/quotes), and accurate `suppressed` duplicate replay handling.
+* **UI/UX Accessibility & Parity (`DualPaneWorkspace.tsx`, `Header.tsx`, `AudioSourcePopover.tsx`, `AudioRouteSelector.tsx`, `FloatingTransportPill.tsx`, `SettingsModal.tsx`, `settings.ts`):** Switched live stage badges to `isSystemAudioMuted`, auto-sanitized stale `localStorage` loopback device IDs, unified crimson active styling and plain-English tooltips, restored `focus-visible` rings and keyboard arrow/Escape navigation across menus/radiogroups/tabs, and removed dead mic/RNNoise UI controls.
+
+### 4. Result
+* `npm run typecheck`, `npm run build:gateway`, `npm run build`, `scripts/test_soniox_unified_engine.ts` (5/5 PASS), `scripts/test_token_cost_optimization.ts` (5/5 PASS), `scripts/test_zero_trust_security.ts` (9/9 PASS), and `npm run security:gate` (PASS, 0 secrets) all succeeded with 0 errors.
+* All Peer-Pair Code Reviewer and UX Reviewer Critical, Major, and Minor findings resolved prior to Chief Architect delivery.
+
+
+---
+
+### INCIDENT 028: Deepgram Nova-3 Multilingual & Hibernation Edge Cases Caught in Peer Review
+
+* **Date:** 2026-11-27
+* **Severity:** High (Caught Pre-Merge by Code Reviewer)
+* **Situation:** While migrating the active real-time STT path to Deepgram Nova-3 + Gemini via `STT_PROVIDER=deepgram` (with Soniox preserved untouched), peer code review identified 6 subtle production defects in multilingual diarization and hibernation: (1) Conversation mode collapsing to `ES -> ES` when Deepgram detected `targetLang`, (2) upstream WS hibernation resetting Deepgram acoustic timestamps to `0.0s` and poisoning `lastWordEndMs`, (3) omitted `word.language` falling back to `'en'` plus opening-word cognates (`"No"`, `"Doctor"`) triggering false language switches, (4) Deepgram's 10s `NET-0001` idle timeout racing against a 12s hibernation / 10s keepalive interval, (5) `nova-2` rejecting `language=multi` with HTTP 400, and (6) missing `try/catch/finally` around `getOrCreateUserQuota` during WS upgrade.
+* **Task:** Eliminate all 6 defects and lock them down with deterministic regression tests before approving Deepgram for live interpreting.
+* **Action:**
+  1. Added `resolveTranslationPairForUtterance()` in `src/renderer/src/audio/audioRoutingPolicy.ts` and threaded `sourceLangOverride` through `TranslationManager` and `GatewayTranslationEngine` so Conversation mode always transmits two distinct languages (`ES -> EN` or `EN -> ES`).
+  2. Upgraded `ParagraphTurnAccumulator` with `-1` timing sentinels (preserving `0ms` words) and backwards clock-reset detection across hibernation re-wakes.
+  3. Upgraded `splitDeepgramWordsBySpeaker` to use majority-vote language detection (with `alternative.languages` fallback) and omit un-tagged languages in Conversation mode so active speaker language is inherited cleanly.
+  4. Lowered default `deepgramIdleHibernateMs` to `8000ms` and `GatewaySttClient` keepalive to `5000ms` (beating Deepgram's 10s `NET-0001` timeout while reducing idle spend 33%).
+  5. Restricted `language=multi` strictly to `nova-3` models and wrapped `getOrCreateUserQuota` in `try/catch/finally`.
+* **Result:** All 6 defects resolved; `test_deepgram_pipeline.ts` (5/5), `test_soniox_unified_engine.ts` (5/5), `test_token_cost_optimization.ts` (5/5), `test_zero_trust_security.ts` (9/9), `typecheck`, `build`, and `security:gate` all pass 100%.
+
+
+---
+
+### INCIDENT 029: Self-Voice Echo Cutoff, Cross-Paragraph Duplication & Gemini `thinkingConfig` HTTP 400 on Live Deepgram Migration
+
+* **Date:** 2026-11-27
+* **Severity:** High (Live Production Testing)
+* **Situation:** During live testing of the Deepgram Nova-3 + Gemini 2.5 Flash-Lite pipeline, four runtime issues surfaced sequentially: (1) `AudioIngestionEngine`'s default-on Self-Voice Echo Blocker detected laptop speaker playback via the built-in mic within 60ms and dropped all System Audio after 1–2 words; (2) `ParagraphTurnAccumulator` committed unfinalized `interim` text on speaker switches and pause commits without checking recently committed paragraphs, causing delayed Deepgram `is_final: true` frames to duplicate sentences across consecutive rows; (3) Deepgram `language=multi` misclassified occasional Spanish/English medical phrases into Portuguese (`"primeiro"`, `"e"`); and (4) passing `thinkingConfig: { thinkingBudget: 0 }` to `gemini-2.5-flash-lite` triggered upstream HTTP 400 errors.
+* **Task:** Eliminate all four runtime issues without re-enabling Soniox or inflating API costs.
+* **Action:**
+  1. Permanently disabled `echoBlockerEnabled` (`false`) and `noiseSuppression` (`false`), and removed the Echo Blocker UI switches from `SettingsModal`, `AudioSourcePopover`, and `AudioRouteSelector`.
+  2. Added punctuation-insensitive cross-paragraph and intra-paragraph deduplication (`recentCommits` + `stripDuplicateAgainstPrevious`) in `ParagraphTurnAccumulator` (covering both `pushFinalSegment` and `pushInterim`) and cleared unstable `currentInterimText` prior to speaker/language-switch commits.
+  3. Added domain-aware `resolveDeepgramModelForDomain` (`nova-3-medical` for `medical`, `nova-3` for all other topics) and added `STT_REPAIR_GUIDANCE` to `geminiStreamProxy.ts`.
+  4. Removed `thinkingConfig` from `geminiStreamProxy.ts` (Flash-Lite defaults to zero thinking natively).
+* **Result:** Audio capture stabilized across full multi-sentence turns, zero cross-row duplicates occurred in live speech or regression tests (`test_deepgram_pipeline.ts` 5/5 PASS), and Gemini HTTP 400 errors were eliminated.
+
+---
+
+### INCIDENT 030: 3.5-Second Post-Speech Translation Latency in Single Accurate Mode
+
+* **Date:** 2026-11-27
+* **Severity:** High (UX / Real-Time Interpretability SLA)
+* **Situation:** After locking DualAI to `sentence_accurate` mode (eliminating Live mode's 2x–3x Gemini cost multiplier), live measurement showed a 3.5-second delay from the speaker's final word until the complete translation appeared on screen. Peer-pair latency auditing traced the exact 3,500ms budget: `48ms` PCM batch + `650ms` Deepgram endpointing + `120ms` ASR/RTT (`T+820ms`) + `650ms` artificial debounce (`T+1,470ms`) + `80ms` Supabase quota RTT + `600ms` Gemini (`T+2,150ms`), followed by the completed translation sitting hidden in `draftResultRef` until `ParagraphTurnAccumulator`'s `2,200ms` commit timer + VAD tail fired (`T+3,500ms`), with `DualPaneWorkspace` hard-gated on `isLiveMode` and `GatewaySttClient` discarding Deepgram's `speech_final` signal.
+* **Task:** Reduce post-speech latency from 3.5s to <= 1.0s (Option A: atomic complete reveal with zero flickering partial text) while keeping paragraph grouping intact and Gemini cost near ~1 call per turn.
+* **Action:**
+  1. Propagated Deepgram `speech_final` through `src/types/stt.ts`, `GatewaySttClient.ts`, and `ParagraphTurnAccumulator.ts` (`DraftUpdateMeta.isSpeechFinal`).
+  2. Lowered Deepgram endpointing to `300ms` (`audioRoutingPolicy.ts`, `deepgramWsProxy.ts`) and `SmartSpeechGate` PCM batching to `512` samples (`32ms`).
+  3. Updated `SessionContext.tsx` to fire Gemini at `0ms` debounce on `isSpeechFinal: true` (never on raw interims), keep tokens silent while streaming, reveal the complete translation atomically via `setDraftTranslationB` on `onDraftComplete`, and promote matching in-flight translations on commit via `pendingCommitPromotionRef` without aborting.
+  4. Updated `DualPaneWorkspace.tsx` to render completed `draftTranslationB` atomically across Dual, Stacked, and Target-Only views, and added an 8-second bounded in-memory quota cache in `geminiStreamProxy.ts` (saving 50–120ms Supabase RTT per call).
+* **Result:** End-to-end post-speech latency budget dropped from `3,500ms` to `~880ms–960ms` (<= 1.0s target achieved); `npm run typecheck`, `test_deepgram_pipeline.ts` (5/5), `test_token_cost_optimization.ts` (5/5), `test_soniox_unified_engine.ts` (5/5), `test_zero_trust_security.ts` (9/9), and `npm run security:gate` all passed 100%.

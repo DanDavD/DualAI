@@ -7,14 +7,26 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+export type SttProviderPreference = 'auto' | 'soniox' | 'deepgram'
+
 export interface GatewayConfig {
   nodeEnv: 'development' | 'production' | 'test'
   port: number
   host: string
   allowedOrigins: string[]
+  sttProvider: SttProviderPreference
   sonioxApiKey: string | null
   sonioxModel: string
+  sonioxWsUrl: string
+  sonioxIdleHibernateMs: number
+  sonioxMuteHibernateMs: number
+  sonioxFinalizeDrainMs: number
   deepgramApiKey: string | null
+  deepgramModel: string
+  deepgramWsUrl: string
+  deepgramIdleHibernateMs: number
+  deepgramMuteHibernateMs: number
+  deepgramFinalizeDrainMs: number
   geminiApiKey: string | null
   geminiModel: string
   supabaseUrl: string | null
@@ -63,6 +75,25 @@ function normalizeSecret(val?: string): string | null {
   return trimmed
 }
 
+function normalizeSttProvider(val?: string): SttProviderPreference {
+  const cleaned = val?.trim().toLowerCase()
+  if (cleaned === 'deepgram' || cleaned === 'soniox') {
+    return cleaned
+  }
+  return 'auto'
+}
+
+/**
+ * Resolves the active real-time STT engine without requiring the operator to delete
+ * stored provider credentials. Setting STT_PROVIDER=deepgram strictly disables Soniox
+ * ($0 Soniox usage) while keeping SONIOX_API_KEY intact for instant reactivation later.
+ */
+export function resolveActiveSttProvider(config: GatewayConfig): 'soniox' | 'deepgram' {
+  if (config.sttProvider === 'deepgram') return 'deepgram'
+  if (config.sttProvider === 'soniox') return 'soniox'
+  return config.sonioxApiKey ? 'soniox' : 'deepgram'
+}
+
 export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayConfig {
   const serverEnvPath = path.resolve(process.cwd(), 'server', '.env')
   loadLocalEnvFile(serverEnvPath)
@@ -87,11 +118,41 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
     port: Number.isFinite(port) && port > 0 ? port : 8787,
     host,
     allowedOrigins,
+    sttProvider: normalizeSttProvider(process.env.STT_PROVIDER),
     sonioxApiKey: normalizeSecret(process.env.SONIOX_API_KEY),
     sonioxModel: process.env.SONIOX_MODEL?.trim() || 'stt-rt-v6',
+    sonioxWsUrl:
+      process.env.SONIOX_WS_URL?.trim() || 'wss://stt-rt.soniox.com/transcribe-websocket',
+    sonioxIdleHibernateMs: Math.max(
+      2000,
+      Number(process.env.SONIOX_IDLE_HIBERNATE_MS || 12000) || 12000
+    ),
+    sonioxMuteHibernateMs: Math.max(
+      300,
+      Number(process.env.SONIOX_MUTE_HIBERNATE_MS || 1500) || 1500
+    ),
+    sonioxFinalizeDrainMs: Math.max(
+      200,
+      Number(process.env.SONIOX_FINALIZE_DRAIN_MS || 900) || 900
+    ),
     deepgramApiKey: normalizeSecret(process.env.DEEPGRAM_API_KEY),
+    deepgramModel: process.env.DEEPGRAM_MODEL?.trim() || 'nova-3',
+    deepgramWsUrl:
+      process.env.DEEPGRAM_WS_URL?.trim() || 'wss://api.deepgram.com/v1/listen',
+    deepgramIdleHibernateMs: Math.max(
+      2000,
+      Number(process.env.DEEPGRAM_IDLE_HIBERNATE_MS || 8000) || 8000
+    ),
+    deepgramMuteHibernateMs: Math.max(
+      300,
+      Number(process.env.DEEPGRAM_MUTE_HIBERNATE_MS || 1500) || 1500
+    ),
+    deepgramFinalizeDrainMs: Math.max(
+      200,
+      Number(process.env.DEEPGRAM_FINALIZE_DRAIN_MS || 900) || 900
+    ),
     geminiApiKey: normalizeSecret(process.env.GEMINI_API_KEY),
-    geminiModel: process.env.GEMINI_MODEL?.trim() || 'gemini-3.5-flash-lite',
+    geminiModel: process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash-lite',
     supabaseUrl: process.env.SUPABASE_URL?.trim() || null,
     supabaseServiceRoleKey: normalizeSecret(process.env.SUPABASE_SERVICE_ROLE_KEY),
     msStoreTenantId: process.env.MS_STORE_TENANT_ID?.trim() || null,

@@ -12,7 +12,7 @@
 import http, { IncomingMessage, ServerResponse } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
-import { GatewayConfig, loadGatewayConfig } from './config.js'
+import { GatewayConfig, loadGatewayConfig, resolveActiveSttProvider } from './config.js'
 import { AuthVerifier } from './security/authVerifier.js'
 import { GatewayRateLimiter } from './security/rateLimiter.js'
 import {
@@ -219,13 +219,20 @@ export async function createGatewayServer(
 
     // 1. Public Health & Plan Catalog (ZERO secrets ever exposed)
     if (req.method === 'GET' && pathname === '/v1/health') {
+      const activeStt = resolveActiveSttProvider(config)
       sendJson(res, 200, {
         status: 'ok',
         mode: config.nodeEnv,
-        activeEngine: config.sonioxApiKey ? 'soniox-unified' : 'deepgram-gemini',
+        sttProviderMode: config.sttProvider,
+        activeEngine: activeStt === 'soniox' ? 'soniox-unified' : 'deepgram-gemini',
         sonioxConfigured: Boolean(config.sonioxApiKey),
-        sttConfigured: Boolean(config.sonioxApiKey || config.deepgramApiKey),
-        translationConfigured: Boolean(config.sonioxApiKey || config.geminiApiKey),
+        deepgramConfigured: Boolean(config.deepgramApiKey),
+        deepgramModel: config.deepgramModel,
+        geminiConfigured: Boolean(config.geminiApiKey),
+        sttConfigured:
+          activeStt === 'soniox' ? Boolean(config.sonioxApiKey) : Boolean(config.deepgramApiKey),
+        translationConfigured:
+          activeStt === 'soniox' ? Boolean(config.sonioxApiKey) : Boolean(config.geminiApiKey),
         supabaseAuthConfigured: Boolean(config.supabaseUrl && config.supabaseServiceRoleKey),
         msStoreConfigured: Boolean(
           config.msStoreTenantId && config.msStoreClientId && config.msStoreClientSecret
@@ -830,7 +837,8 @@ export async function createGatewayServer(
     }
 
     wss.handleUpgrade(req, socket, head, (ws) => {
-      if (config.sonioxApiKey) {
+      const activeStt = resolveActiveSttProvider(config)
+      if (activeStt === 'soniox') {
         void handleSonioxWebSocketProxy({
           clientSocket: ws,
           req,

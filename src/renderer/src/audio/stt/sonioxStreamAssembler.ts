@@ -48,6 +48,7 @@ export interface SonioxAssemblerConfig {
   domainId: DomainId
   confidenceThreshold: number
   sameLanguageSettleMs?: number
+  maxMonologueWords?: number
 }
 
 export interface SonioxAssemblerCallbacks {
@@ -63,6 +64,7 @@ interface InternalTurnState {
   targetLanguage: string
   startedAtMs: number
   committedAtMs: number | null
+  lastTokenEndMs: number
   awaitingClauseSpaceOrig: boolean
   awaitingClauseSpaceTrans: boolean
   finalOriginalText: string
@@ -74,10 +76,12 @@ interface InternalTurnState {
   confidenceCount: number
 }
 
-const DEFAULT_SAME_LANGUAGE_SETTLE_MS = 2000
+const DEFAULT_SAME_LANGUAGE_SETTLE_MS = 2200
+const DEFAULT_MAX_MONOLOGUE_WORDS = 75
 const RECENT_COMMIT_WINDOW_MS = 10000
 const MAX_RECENT_COMMITTED_TURNS = 12
 const HAS_WORD_CHAR_REGEX = /[A-Za-zÀ-ÖØ-öø-ÿ\p{L}\p{N}]/u
+const SENTENCE_END_REGEX = /[.!?。？！]["”'»)]*$/
 
 export function normalizeBaseLang(lang?: string): string | undefined {
   if (!lang) return undefined
@@ -100,15 +104,16 @@ function normalizeSpeaker(speaker?: string | number): string | undefined {
 
 /**
  * Appends finalized text cleanly while preventing boundary spacing glitches after <end>
- * and suppressing exact repeated clause re-emissions (>= 12 chars).
+ * or sentence punctuation, avoiding spaces before digits/closing quotes, and suppressing
+ * exact repeated clause re-emissions (>= 12 chars).
  */
 function appendFinalSegmentSafely(
   existing: string,
   incoming: string,
   insertSpaceIfBoundary: boolean
-): string {
-  if (!incoming) return existing
-  if (!existing) return incoming
+): { text: string; suppressed: boolean; insertedSpace: boolean } {
+  if (!incoming) return { text: existing, suppressed: false, insertedSpace: false }
+  if (!existing) return { text: incoming, suppressed: false, insertedSpace: false }
 
   const cleanIncoming = incoming.trim()
   const cleanExisting = existing.trim()
@@ -118,20 +123,21 @@ function appendFinalSegmentSafely(
     const normExisting = cleanExisting.toLowerCase()
     const normIncoming = cleanIncoming.toLowerCase()
     if (normExisting.endsWith(normIncoming)) {
-      return existing
+      return { text: existing, suppressed: true, insertedSpace: false }
     }
   }
 
-  if (
-    insertSpaceIfBoundary &&
+  const needsSentenceSpace =
+    (insertSpaceIfBoundary || /[.!?。？！]$/.test(existing)) &&
     !/\s$/.test(existing) &&
     !/^\s/.test(incoming) &&
-    !/^[,.;:!?]/.test(incoming)
-  ) {
-    return `${existing} ${incoming}`
+    !/^[,.;:!?0-9"'”’»)\]]/.test(incoming)
+
+  if (needsSentenceSpace) {
+    return { text: `${existing} ${incoming}`, suppressed: false, insertedSpace: true }
   }
 
-  return `${existing}${incoming}`
+  return { text: `${existing}${incoming}`, suppressed: false, insertedSpace: false }
 }
 
 export class SonioxStreamAssembler {
@@ -147,7 +153,8 @@ export class SonioxStreamAssembler {
       ...config,
       sourceLang: normalizeBaseLang(config.sourceLang) || 'en',
       targetLang: normalizeBaseLang(config.targetLang) || 'es',
-      sameLanguageSettleMs: config.sameLanguageSettleMs ?? DEFAULT_SAME_LANGUAGE_SETTLE_MS
+      sameLanguageSettleMs: config.sameLanguageSettleMs ?? DEFAULT_SAME_LANGUAGE_SETTLE_MS,
+      maxMonologueWords: config.maxMonologueWords ?? DEFAULT_MAX_MONOLOGUE_WORDS
     }
     this.callbacks = callbacks
   }
@@ -174,6 +181,7 @@ export class SonioxStreamAssembler {
     let sawHardFinalize = false
 
     const updatedCommittedTurns = new Set<InternalTurnState>()
+    const committedInterimTranslations = new Map<InternalTurnState, string>()
 
     for (const raw of rawTokens) {
       if (!raw || typeof raw.text !== 'string' || raw.text.length === 0) continue
@@ -205,11 +213,12 @@ export class SonioxStreamAssembler {
         if (targetTurn) {
           if (targetTurn === this.activeTurn) {
             if (isFinal) {
-              targetTurn.finalTranslatedText = appendFinalSegmentSafely(
+              const appended = appendFinalSegmentSafely(
                 targetTurn.finalTranslatedText,
                 raw.text,
                 targetTurn.awaitingClauseSpaceTrans
               )
+              targetTurn.finalTranslatedText = appended.text
               targetTurn.awaitingClauseSpaceTrans = false
               targetTurn.interimTranslatedText = ''
             } else {
@@ -218,15 +227,19 @@ export class SonioxStreamAssembler {
           } else {
             // Reconcile trailing finalized translation tokens onto the exact interrupted speaker's turn
             if (isFinal) {
-              targetTurn.finalTranslatedText = appendFinalSegmentSafely(
+              const appended = appendFinalSegmentSafely(
                 targetTurn.finalTranslatedText,
                 raw.text,
                 targetTurn.awaitingClauseSpaceTrans
               )
+              targetTurn.finalTranslatedText = appended.text
               targetTurn.awaitingClauseSpaceTrans = false
               targetTurn.interimTranslatedText = ''
             } else if (!cleanJoinedText(targetTurn.finalTranslatedText)) {
-              targetTurn.interimTranslatedText = raw.text
+              const prevInterim = committedInterimTranslations.get(targetTurn) || ''
+              const nextInterim = prevInterim + raw.text
+              committedInterimTranslations.set(targetTurn, nextInterim)
+              targetTurn.interimTranslatedText = nextInterim
             }
             updatedCommittedTurns.add(targetTurn)
           }
@@ -240,13 +253,29 @@ export class SonioxStreamAssembler {
       const effectiveLang =
         tokenLang || this.activeTurn?.sourceLanguage || this.config.sourceLang
 
-      // SUPREME LAW: Split immediately (0ms wait) whenever a DIFFERENT VOICE (speaker)
-      // OR a DIFFERENT LANGUAGE produces a finalized word — never combine speakers in one paragraph!
+      // SUPREME LAW: Split immediately (0ms wait) whenever:
+      // 1. A DIFFERENT diarized speaker produces a finalized word (interruption), OR
+      // 2. A DIFFERENT language produces a finalized word, OR
+      // 3. The SAME speaker paused acoustically >= sameLanguageSettleMs (e.g. 2.2s) per Soniox timestamps.
+      const settleMs = Math.max(
+        250,
+        this.config.sameLanguageSettleMs ?? DEFAULT_SAME_LANGUAGE_SETTLE_MS
+      )
+      const isLongAcousticPause =
+        isFinal &&
+        Boolean(this.activeTurn) &&
+        cleanJoinedText(this.activeTurn!.finalOriginalText).length > 0 &&
+        HAS_WORD_CHAR_REGEX.test(raw.text) &&
+        typeof raw.start_ms === 'number' &&
+        this.activeTurn!.lastTokenEndMs > 0 &&
+        raw.start_ms - this.activeTurn!.lastTokenEndMs >= settleMs
+
       if (
         isFinal &&
         this.activeTurn &&
         (this.isGenuineSpeakerChange(this.activeTurn, tokenSpeaker, raw.text) ||
-          this.isGenuineLanguageSwitch(this.activeTurn, tokenLang, raw.text))
+          this.isGenuineLanguageSwitch(this.activeTurn, tokenLang, raw.text) ||
+          isLongAcousticPause)
       ) {
         this.commitActiveTurn()
       }
@@ -267,51 +296,71 @@ export class SonioxStreamAssembler {
       }
 
       if (isFinal) {
-        // New finalized speech cancels any pending 2s settle timer so the paragraph keeps coalescing smoothly
+        // New finalized speech resets any pending silence settle timer so the paragraph coalesces smoothly
         this.clearSettleTimer()
 
-        this.activeTurn.finalOriginalText = appendFinalSegmentSafely(
+        if (typeof raw.end_ms === 'number' && raw.end_ms > this.activeTurn.lastTokenEndMs) {
+          this.activeTurn.lastTokenEndMs = raw.end_ms
+        }
+
+        const appended = appendFinalSegmentSafely(
           this.activeTurn.finalOriginalText,
           raw.text,
           this.activeTurn.awaitingClauseSpaceOrig
         )
-        const insertedBoundarySpace = this.activeTurn.awaitingClauseSpaceOrig
+        this.activeTurn.finalOriginalText = appended.text
+        const insertedBoundarySpace = appended.insertedSpace || this.activeTurn.awaitingClauseSpaceOrig
         this.activeTurn.awaitingClauseSpaceOrig = false
         this.activeTurn.interimOriginalText = ''
 
-        const conf = typeof raw.confidence === 'number' ? raw.confidence : 0.94
-        const roundedConf = Math.round(conf * 100) / 100
-        this.activeTurn.confidenceSum += roundedConf
-        this.activeTurn.confidenceCount += 1
+        if (!appended.suppressed) {
+          const conf = typeof raw.confidence === 'number' ? raw.confidence : 0.94
+          const roundedConf = Math.round(conf * 100) / 100
+          this.activeTurn.confidenceSum += roundedConf
+          this.activeTurn.confidenceCount += 1
 
-        // Merge Soniox BPE sub-word tokens cleanly into whole words
-        const startsNewWord =
-          insertedBoundarySpace ||
-          /^\s/.test(raw.text) ||
-          this.activeTurn.finalOriginalTokens.length === 0
-        const piece = raw.text.trim()
-        if (piece) {
-          if (startsNewWord) {
-            this.activeTurn.finalOriginalTokens.push({
-              id: `${this.activeTurn.id}-tok-${this.activeTurn.finalOriginalTokens.length}`,
-              text: piece,
-              confidence: roundedConf,
-              isLowConfidence: roundedConf < this.config.confidenceThreshold,
-              startTimeMs: raw.start_ms ?? 0,
-              endTimeMs: raw.end_ms ?? 0,
-              isPunctuated: true,
-              speakerId: this.activeTurn.speakerId
-            })
-          } else {
-            const prev =
-              this.activeTurn.finalOriginalTokens[this.activeTurn.finalOriginalTokens.length - 1]
-            prev.text += piece
-            prev.confidence = Math.min(prev.confidence, roundedConf)
-            prev.isLowConfidence = prev.confidence < this.config.confidenceThreshold
-            if (raw.end_ms) {
-              prev.endTimeMs = raw.end_ms
+          // Merge Soniox BPE sub-word tokens cleanly into whole words
+          const startsNewWord =
+            insertedBoundarySpace ||
+            /^\s/.test(raw.text) ||
+            this.activeTurn.finalOriginalTokens.length === 0
+          const piece = raw.text.trim()
+          if (piece) {
+            if (startsNewWord) {
+              this.activeTurn.finalOriginalTokens.push({
+                id: `${this.activeTurn.id}-tok-${this.activeTurn.finalOriginalTokens.length}`,
+                text: piece,
+                confidence: roundedConf,
+                isLowConfidence: roundedConf < this.config.confidenceThreshold,
+                startTimeMs: raw.start_ms ?? 0,
+                endTimeMs: raw.end_ms ?? 0,
+                isPunctuated: true,
+                speakerId: this.activeTurn.speakerId
+              })
+            } else {
+              const prev =
+                this.activeTurn.finalOriginalTokens[this.activeTurn.finalOriginalTokens.length - 1]
+              prev.text += piece
+              prev.confidence = Math.min(prev.confidence, roundedConf)
+              prev.isLowConfidence = prev.confidence < this.config.confidenceThreshold
+              if (raw.end_ms) {
+                prev.endTimeMs = raw.end_ms
+              }
             }
           }
+        }
+
+        // Prevent infinite walls of text during nonstop monologues: once >= maxMonologueWords (75),
+        // split immediately and cleanly at the sentence-ending punctuation (. ? !) so trailing
+        // tokens in the same batch start cleanly on the next paragraph and never leak across speakers.
+        const maxWords = this.config.maxMonologueWords ?? DEFAULT_MAX_MONOLOGUE_WORDS
+        const currentClean = cleanJoinedText(this.activeTurn.finalOriginalText)
+        if (
+          maxWords > 0 &&
+          SENTENCE_END_REGEX.test(currentClean) &&
+          currentClean.split(/\s+/).length >= maxWords
+        ) {
+          this.commitActiveTurn()
         }
       } else {
         // Provisional speech: keep a different interrupting speaker's unfinalized words
@@ -355,15 +404,18 @@ export class SonioxStreamAssembler {
           sawSoftEnd || sawHardFinalize ? '' : frameInterimTranslation
       }
 
-      // Hard finalize (<fin> after confirmed 2.2s audio pause) commits immediately!
+      // Hard finalize (<fin> after confirmed 2.2s audio silence pause) commits cleanly
       if (sawHardFinalize) {
         this.commitActiveTurn()
         return
       }
 
-      // Soft endpoint (<end>): keep accumulating in the same paragraph for 2,000ms of silence
-      // so rapid "sí, sí, sí" or brief pauses never splinter into 4 separate rows!
-      if (sawSoftEnd && cleanJoinedText(this.activeTurn.finalOriginalText).length > 0) {
+      // Silence-threshold settle commit (default 2,200ms):
+      // Arms whenever finalized text is present and no provisional speech is currently streaming
+      // (including after a dropped transient provisional frame when endpoint detection is OFF).
+      const hasFinalizedText = cleanJoinedText(this.activeTurn.finalOriginalText).length > 0
+      const hasLiveInterimText = cleanJoinedText(this.activeTurn.interimOriginalText).length > 0
+      if (hasFinalizedText && (sawSoftEnd || (!hasLiveInterimText && !this.settleTimer))) {
         this.scheduleSameLanguageSettleCommit()
       }
 
@@ -512,6 +564,7 @@ export class SonioxStreamAssembler {
       targetLanguage: this.resolveTargetLanguage(sourceLanguage),
       startedAtMs: Date.now(),
       committedAtMs: null,
+      lastTokenEndMs: 0,
       awaitingClauseSpaceOrig: false,
       awaitingClauseSpaceTrans: false,
       finalOriginalText: '',

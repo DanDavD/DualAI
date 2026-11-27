@@ -20,6 +20,7 @@ out
 .env.*.local
 server/.env
 server/dist
+server/.telemetry
 
 # OS Files
 .DS_Store
