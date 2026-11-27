@@ -484,6 +484,7 @@ async function run(): Promise<void> {
     utteranceIdPrefix: 'dg-cognate',
     confidenceThreshold: 0.75
   })
+  assert.equal(cognateSegs.length, 1, 'Opening cognate must NOT split Spanish sentence into two segments')
   assert.equal(cognateSegs[0].language, 'es', 'Majority vote must classify cognate-leading Spanish sentence as es')
   assert.equal(cognateSegs[0].tokens[0].startTimeMs, 0, '0ms word start timestamp must be preserved')
 
@@ -558,7 +559,62 @@ async function run(): Promise<void> {
   sfAcc.pushFinalSegment(endClause)
   assert.deepEqual(speechFinalFlags, [false, true], 'ParagraphTurnAccumulator must propagate speechFinal accurately')
   sfAcc.reset()
-  console.log('  Mid-frame speaker split + 2.2s acoustic pause + clock reset + majority lang + cross-turn dedup + speechFinal: VERIFIED')
+
+  // 4g. Mid-frame bilingual language switch with SAME Deepgram speaker number (speaker: 0 EN -> speaker: 0 ES)
+  const sameSpeakerBilingual = splitDeepgramWordsBySpeaker({
+    words: [
+      { word: 'how', punctuated_word: 'How', start: 0.1, end: 0.2, confidence: 0.96, speaker: 0, language: 'en' },
+      { word: 'bad', punctuated_word: 'bad', start: 0.2, end: 0.4, confidence: 0.96, speaker: 0, language: 'en' },
+      { word: 'is', punctuated_word: 'is', start: 0.4, end: 0.5, confidence: 0.96, speaker: 0, language: 'en' },
+      { word: 'it?', punctuated_word: 'it?', start: 0.5, end: 0.7, confidence: 0.96, speaker: 0, language: 'en' },
+      { word: 'me', punctuated_word: 'Me', start: 0.8, end: 0.9, confidence: 0.95, speaker: 0, language: 'es' },
+      { word: 'duele', punctuated_word: 'duele', start: 0.9, end: 1.1, confidence: 0.96, speaker: 0, language: 'es' },
+      { word: 'mucho.', punctuated_word: 'mucho.', start: 1.1, end: 1.4, confidence: 0.97, speaker: 0, language: 'es' }
+    ],
+    fallbackTranscript: 'How bad is it? Me duele mucho.',
+    fallbackConfidence: 0.96,
+    channelId: 'channel_b',
+    utteranceIdPrefix: 'dg-same-spk-bilingual',
+    confidenceThreshold: 0.75
+  })
+  assert.equal(sameSpeakerBilingual.length, 2, 'Mid-frame EN->ES switch with same speaker must split into 2 segments')
+  assert.equal(sameSpeakerBilingual[0].language, 'en')
+  assert.equal(sameSpeakerBilingual[0].text, 'How bad is it?')
+  assert.equal(sameSpeakerBilingual[1].language, 'es')
+  assert.equal(sameSpeakerBilingual[1].text, 'Me duele mucho.')
+
+  // 4h. Interim-only Speaker A interrupted by Speaker B in another language -> commits A with distinct turnId & starts fresh stack for B
+  const interruptCommits: TranscriptUtterance[] = []
+  const interruptDrafts: TranscriptUtterance[] = []
+  const intAcc = new ParagraphTurnAccumulator(
+    {
+      onDraftUpdate: (d) => interruptDrafts.push(d),
+      onParagraphCommit: (c) => interruptCommits.push(c)
+    },
+    2200,
+    75
+  )
+  const spkAInterim = makeUtterance('Are you taking any medication', '1', 1000, 2200, false)
+  spkAInterim.language = 'en'
+  intAcc.pushInterim(spkAInterim)
+  const spkAId = interruptDrafts[interruptDrafts.length - 1].id
+
+  const spkBFinal = makeUtterance('Sí, tomo ibuprofeno cada ocho horas.', '2', 2300, 4100, true)
+  spkBFinal.language = 'es'
+  intAcc.pushFinalSegment(spkBFinal)
+  assert.equal(interruptCommits.length, 1, 'Interim-only Speaker A must commit immediately on Speaker B interruption')
+  assert.equal(interruptCommits[0].id, spkAId)
+  assert.equal(interruptCommits[0].text, 'Are you taking any medication')
+  const spkBId = interruptDrafts[interruptDrafts.length - 1].id
+  assert.notEqual(spkBId, spkAId, 'Speaker B must get a fresh turnId so Mini View opens a new stack below Speaker A')
+  // Different-language provisional interim must not bleed into Speaker B's Spanish box
+  const bleedBefore = interruptDrafts.length
+  const bleedInterim = makeUtterance('Okay thank you', '2', 4200, 4600, false)
+  bleedInterim.language = 'en'
+  intAcc.pushInterim(bleedInterim)
+  assert.equal(interruptDrafts.length, bleedBefore, 'Different-language provisional interim must never bleed into active speaker box')
+  intAcc.reset()
+  console.log('  Mid-frame speaker/lang split + 2.2s pause + clock reset + cross-turn dedup + speechFinal + interim-interruption: VERIFIED')
   console.log('PASS: Test 4 satisfied.\n')
 
   // TEST 5: Bidirectional Conversation Target Resolution + Gemini Prompt & Governance Audit

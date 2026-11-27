@@ -90,27 +90,75 @@ export function splitDeepgramWordsBySpeaker(params: {
 
   interface MutableRun {
     speakerNum?: number
+    language?: string
+    langCounts: Map<string, number>
     words: RelayedWord[]
   }
 
+  const SENTENCE_END_WORD_REGEX = /[.!?。？！]["”'»)]*$/
+  const normalizeWordLang = (lang?: string): string | undefined => {
+    if (typeof lang !== 'string' || !lang.trim()) return undefined
+    return lang.trim().toLowerCase().split(/[-_]/)[0] || undefined
+  }
+  const recordRunLang = (run: MutableRun, lang?: string): void => {
+    if (!lang) return
+    const nextCount = (run.langCounts.get(lang) || 0) + 1
+    run.langCounts.set(lang, nextCount)
+    const currentBest = run.language ? run.langCounts.get(run.language) || 0 : 0
+    if (!run.language || nextCount >= currentBest) {
+      run.language = lang
+    }
+  }
+
   const runs: MutableRun[] = []
-  for (const w of words) {
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]
     const textPiece = (w.punctuated_word || w.word || '').trim()
     if (!textPiece) continue
     const speakerNum = typeof w.speaker === 'number' && Number.isFinite(w.speaker) ? w.speaker : undefined
+    const wordLang = normalizeWordLang(w.language)
     const lastRun = runs[runs.length - 1]
     if (!lastRun) {
-      runs.push({ speakerNum, words: [w] })
-    } else if (
+      const created: MutableRun = { speakerNum, langCounts: new Map(), words: [w] }
+      recordRunLang(created, wordLang)
+      runs.push(created)
+      continue
+    }
+
+    const isDifferentSpeaker =
       speakerNum !== undefined &&
       lastRun.speakerNum !== undefined &&
       speakerNum !== lastRun.speakerNum
+
+    let isMidFrameLanguageSwitch = false
+    const dominantLangCount = lastRun.language ? lastRun.langCounts.get(lastRun.language) || 0 : 0
+    if (
+      !isDifferentSpeaker &&
+      dominantLangCount >= 2 &&
+      wordLang &&
+      lastRun.language &&
+      wordLang !== lastRun.language
     ) {
-      runs.push({ speakerNum, words: [w] })
+      const prevWord = lastRun.words[lastRun.words.length - 1]
+      const prevText = (prevWord?.punctuated_word || prevWord?.word || '').trim()
+      const prevEndedSentence = SENTENCE_END_WORD_REGEX.test(prevText)
+      const nextWordLang = i + 1 < words.length ? normalizeWordLang(words[i + 1].language) : undefined
+      // Split on language switch at sentence boundary OR >= 2 consecutive words in new language
+      // (requires >= 2 words of prior dominant language so opening cognates like "No," never false-split)
+      if (prevEndedSentence || nextWordLang === wordLang) {
+        isMidFrameLanguageSwitch = true
+      }
+    }
+
+    if (isDifferentSpeaker || isMidFrameLanguageSwitch) {
+      const created: MutableRun = { speakerNum, langCounts: new Map(), words: [w] }
+      recordRunLang(created, wordLang)
+      runs.push(created)
     } else {
       if (lastRun.speakerNum === undefined && speakerNum !== undefined) {
         lastRun.speakerNum = speakerNum
       }
+      recordRunLang(lastRun, wordLang)
       lastRun.words.push(w)
     }
   }

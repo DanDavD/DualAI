@@ -406,7 +406,6 @@ export const DualPaneWorkspace: React.FC = () => {
       ? 'stacked'
       : workspaceDisplaySettings.viewMode
   const isDualView = viewMode === 'dual'
-  const isTargetOnlyView = viewMode === 'target_only'
   const isStackedView = viewMode === 'stacked'
   const rowPaddingClass = lineMetrics.rowPaddingClass
   const dividerBorderClass = workspaceDisplaySettings.highContrast
@@ -491,16 +490,6 @@ export const DualPaneWorkspace: React.FC = () => {
                 {renderFlagFilterPill()}
               </div>
             </>
-          ) : isTargetOnlyView ? (
-            <div className="flex h-full w-full items-center justify-between px-6">
-              <div className="flex items-center space-x-2 min-w-0">
-                <span className="h-1.5 w-1.5 rounded-full bg-accent-emerald shrink-0" />
-                <span className="text-[11px] font-medium text-white/50 tracking-wide truncate">
-                  Translation
-                </span>
-              </div>
-              {renderFlagFilterPill()}
-            </div>
           ) : (
             <div className="flex h-full w-full items-center justify-between px-5 sm:px-6">
               <div className="flex items-center space-x-2 min-w-0">
@@ -595,9 +584,7 @@ export const DualPaneWorkspace: React.FC = () => {
                       </span>
                     </div>
                     <p className="mt-3 max-w-sm text-xs leading-relaxed text-white/38">
-                      {isTargetOnlyView
-                        ? 'Translation ready — live text will stream here as soon as speech begins.'
-                        : 'Original speech and translations will stack here separated by speaker.'}
+                      Original speech and translations will stack here separated by speaker.
                     </p>
                   </div>
                 )
@@ -605,26 +592,16 @@ export const DualPaneWorkspace: React.FC = () => {
 
               {/* Flowing, Boxless Paired Paragraph Rows */}
               {visibleItems.map((item) => {
-                if (isTargetOnlyView) {
-                  return (
-                    <div
-                      key={item.id}
-                      className={`animate-utterance [content-visibility:auto] [contain-intrinsic-size:auto_72px] px-6 sm:px-8 ${rowPaddingClass} hover:bg-white/[0.025] transition-colors max-w-5xl mx-auto rounded-2xl`}
-                    >
-                      <TranslationCard
-                        translation={item.translation}
-                        utteranceId={item.id}
-                        isStreaming={item.isRowStreaming}
-                        isDraft={false}
-                        isFlagged={item.isFlagged}
-                        textColor={item.translationColor}
-                        displaySettings={workspaceDisplaySettings}
-                        onToggleFlag={handleToggleFlag}
-                        onAddToGlossary={handleAddToGlossary}
-                      />
-                    </div>
-                  )
-                }
+                const rowSrcIso = (item.utterance.language || sourceLang).split(/[-_]/)[0].toUpperCase()
+                const rowTgtIso = (
+                  item.translation?.targetLang ||
+                  (operatingMode === 'conversation' && rowSrcIso === targetLang.split(/[-_]/)[0].toUpperCase()
+                    ? sourceLang
+                    : targetLang)
+                )
+                  .split(/[-_]/)[0]
+                  .toUpperCase()
+                const directionBadge = `${rowSrcIso} -> ${rowTgtIso}`
 
                 if (isStackedView) {
                   return (
@@ -632,6 +609,12 @@ export const DualPaneWorkspace: React.FC = () => {
                       key={item.id}
                       className={`animate-utterance [content-visibility:auto] [contain-intrinsic-size:auto_96px] px-5 sm:px-6 ${rowPaddingClass} border-b border-white/[0.05] hover:bg-white/[0.025] transition-colors space-y-1 max-w-4xl mx-auto`}
                     >
+                      <div
+                        className="text-[10px] font-mono font-semibold tracking-wider uppercase opacity-65 select-none"
+                        style={{ color: item.translationColor }}
+                      >
+                        {directionBadge}
+                      </div>
                       <UtteranceCard
                         utterance={item.utterance}
                         isInterim={false}
@@ -659,14 +642,20 @@ export const DualPaneWorkspace: React.FC = () => {
                 return (
                   <div
                     key={item.id}
-                    className="animate-utterance [content-visibility:auto] [contain-intrinsic-size:auto_112px] border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors"
+                    className="animate-utterance [content-visibility:auto] [contain-intrinsic-size:auto_88px] border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors"
                   >
-                    {/* Step 1: Original Speech (Left Pane) */}
-                    <div className="flex">
+                    {/* Top-Aligned Side-by-Side Row (Zero vertical dead space in Right Pane) */}
+                    <div className="flex items-start">
                       <div
                         style={{ width: `${splitRatio}%` }}
-                        className={`px-6 pt-3 pb-1 border-r ${dividerBorderClass}`}
+                        className={`px-6 ${rowPaddingClass} border-r ${dividerBorderClass}`}
                       >
+                        <div
+                          className="text-[10px] font-mono font-semibold tracking-wider uppercase opacity-55 mb-1 select-none"
+                          style={{ color: item.originalColor }}
+                        >
+                          {directionBadge}
+                        </div>
                         <UtteranceCard
                           utterance={item.utterance}
                           isInterim={false}
@@ -676,19 +665,16 @@ export const DualPaneWorkspace: React.FC = () => {
                           onUpdateSpeakerLabel={handleUpdateSpeakerLabel}
                         />
                       </div>
-                      <div style={{ width: `${100 - splitRatio}%` }} className="px-6 pt-3 pb-1" />
-                    </div>
-
-                    {/* Step 2: Translation Placed One Step Below (Right Pane — Linear Timeline Flow) */}
-                    <div className="flex">
-                      <div
-                        style={{ width: `${splitRatio}%` }}
-                        className={`px-6 pt-1 pb-3 border-r ${dividerBorderClass}`}
-                      />
                       <div
                         style={{ width: `${100 - splitRatio}%` }}
-                        className="px-6 pt-1 pb-3"
+                        className={`px-6 ${rowPaddingClass}`}
                       >
+                        <div
+                          className="text-[10px] font-mono font-semibold tracking-wider uppercase opacity-70 mb-1 select-none"
+                          style={{ color: item.translationColor }}
+                        >
+                          {directionBadge}
+                        </div>
                         <TranslationCard
                           translation={item.translation}
                           utteranceId={item.id}
@@ -721,39 +707,6 @@ export const DualPaneWorkspace: React.FC = () => {
                     operatingMode,
                     settings: workspaceDisplaySettings
                   })
-
-                  if (isTargetOnlyView) {
-                    return (
-                      <div className={`px-8 ${rowPaddingClass} bg-surface-panel/25 max-w-5xl mx-auto`}>
-                        {isLiveMode ? (
-                          <TranslationCard
-                            translation={draftTranslationA || undefined}
-                            utteranceId={
-                              draftTranslationA?.utteranceId ||
-                              interimTranscriptA?.id ||
-                              'draft-channel-a'
-                            }
-                            isStreaming={draftTranslationA ? draftTranslationA.isStreaming : true}
-                            isDraft={true}
-                            textColor={draftTranslationColorA}
-                            displaySettings={workspaceDisplaySettings}
-                            onToggleFlag={handleToggleFlag}
-                            onAddToGlossary={handleAddToGlossary}
-                          />
-                        ) : (
-                          <TranslationCard
-                            utteranceId={interimTranscriptA?.id || 'accurate-channel-a'}
-                            isWaitingForPause={true}
-                            isDraft={true}
-                            textColor={draftTranslationColorA}
-                            displaySettings={workspaceDisplaySettings}
-                            onToggleFlag={handleToggleFlag}
-                            onAddToGlossary={handleAddToGlossary}
-                          />
-                        )}
-                      </div>
-                    )
-                  }
 
                   if (isStackedView) {
                     return (
@@ -875,43 +828,33 @@ export const DualPaneWorkspace: React.FC = () => {
                   const hasReadyTranslationB = Boolean(
                     draftTranslationB && draftTranslationB.translatedText.trim().length > 0
                   )
-
-                  if (isTargetOnlyView) {
-                    return (
-                      <div className={`px-8 ${rowPaddingClass} bg-surface-panel/25 max-w-5xl mx-auto`}>
-                        {hasReadyTranslationB || isLiveMode ? (
-                          <TranslationCard
-                            translation={draftTranslationB || undefined}
-                            utteranceId={
-                              draftTranslationB?.utteranceId ||
-                              interimTranscriptB?.id ||
-                              'draft-channel-b'
-                            }
-                            isStreaming={draftTranslationB ? draftTranslationB.isStreaming : true}
-                            isDraft={!hasReadyTranslationB}
-                            textColor={draftTranslationColorB}
-                            displaySettings={workspaceDisplaySettings}
-                            onToggleFlag={handleToggleFlag}
-                            onAddToGlossary={handleAddToGlossary}
-                          />
-                        ) : (
-                          <TranslationCard
-                            utteranceId={interimTranscriptB?.id || 'accurate-channel-b'}
-                            isWaitingForPause={true}
-                            isDraft={true}
-                            textColor={draftTranslationColorB}
-                            displaySettings={workspaceDisplaySettings}
-                            onToggleFlag={handleToggleFlag}
-                            onAddToGlossary={handleAddToGlossary}
-                          />
-                        )}
-                      </div>
-                    )
-                  }
+                  const draftSrcIsoB = (
+                    interimTranscriptB?.language ||
+                    draftTranslationB?.sourceLang ||
+                    sourceLang
+                  )
+                    .split(/[-_]/)[0]
+                    .toUpperCase()
+                  const draftTgtIsoB = (
+                    draftTranslationB?.targetLang ||
+                    (operatingMode === 'conversation' &&
+                    draftSrcIsoB === targetLang.split(/[-_]/)[0].toUpperCase()
+                      ? sourceLang
+                      : targetLang)
+                  )
+                    .split(/[-_]/)[0]
+                    .toUpperCase()
+                  const draftDirectionBadgeB = `${draftSrcIsoB} -> ${draftTgtIsoB}`
 
                   if (isStackedView) {
                     return (
-                      <div className={`px-6 ${rowPaddingClass} bg-surface-panel/25 space-y-1 max-w-4xl mx-auto`}>
+                      <div className={`px-5 sm:px-6 ${rowPaddingClass} bg-surface-panel/25 space-y-1 max-w-4xl mx-auto`}>
+                        <div
+                          className="text-[10px] font-mono font-semibold tracking-wider uppercase opacity-65 select-none"
+                          style={{ color: draftTranslationColorB }}
+                        >
+                          {draftDirectionBadgeB}
+                        </div>
                         {interimTranscriptB && (
                           <UtteranceCard
                             utterance={interimTranscriptB}
@@ -954,11 +897,17 @@ export const DualPaneWorkspace: React.FC = () => {
 
                   return (
                     <div className="bg-surface-panel/20">
-                      <div className="flex">
+                      <div className="flex items-start">
                         <div
                           style={{ width: `${splitRatio}%` }}
-                          className={`px-6 pt-3 pb-1 border-r ${dividerBorderClass}`}
+                          className={`px-6 ${rowPaddingClass} border-r ${dividerBorderClass}`}
                         >
+                          <div
+                            className="text-[10px] font-mono font-semibold tracking-wider uppercase opacity-55 mb-1 select-none"
+                            style={{ color: draftOriginalColorB }}
+                          >
+                            {draftDirectionBadgeB}
+                          </div>
                           {interimTranscriptB && (
                             <UtteranceCard
                               utterance={interimTranscriptB}
@@ -969,15 +918,16 @@ export const DualPaneWorkspace: React.FC = () => {
                             />
                           )}
                         </div>
-                        <div style={{ width: `${100 - splitRatio}%` }} className="px-6 pt-3 pb-1" />
-                      </div>
-
-                      <div className="flex">
                         <div
-                          style={{ width: `${splitRatio}%` }}
-                          className={`px-6 pt-1 pb-3 border-r ${dividerBorderClass}`}
-                        />
-                        <div style={{ width: `${100 - splitRatio}%` }} className="px-6 pt-1 pb-3">
+                          style={{ width: `${100 - splitRatio}%` }}
+                          className={`px-6 ${rowPaddingClass}`}
+                        >
+                          <div
+                            className="text-[10px] font-mono font-semibold tracking-wider uppercase opacity-70 mb-1 select-none"
+                            style={{ color: draftTranslationColorB }}
+                          >
+                            {draftDirectionBadgeB}
+                          </div>
                           {hasReadyTranslationB || isLiveMode ? (
                             <TranslationCard
                               translation={draftTranslationB || undefined}
@@ -1010,6 +960,8 @@ export const DualPaneWorkspace: React.FC = () => {
                   )
                 })()}
 
+              {/* Bottom clearance so floating transport pill and shortcut hints never cover the last paragraph */}
+              <div className="h-28 shrink-0" aria-hidden="true" />
               {/* End of live conversation feed */}
             </div>
           ) : (

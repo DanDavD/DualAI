@@ -88,12 +88,6 @@ export const VIEW_MODE_OPTIONS: Array<{
     description: 'Source speech on the left, live translation on the right'
   },
   {
-    id: 'target_only',
-    label: 'Translation Focus',
-    shortLabel: 'Target',
-    description: 'Full-width target translation feed with maximum reading room'
-  },
-  {
     id: 'stacked',
     label: 'Compact Stacked',
     shortLabel: 'Stacked',
@@ -222,7 +216,7 @@ export function sanitizeWorkspaceDisplaySettings(
 
   const validFonts: WorkspaceFontFamily[] = ['inter', 'geist_mono', 'system_sans', 'high_legibility']
   const validSpacings: WorkspaceLineSpacing[] = ['compact', 'standard', 'relaxed']
-  const validViews: WorkspaceViewMode[] = ['dual', 'target_only', 'stacked']
+  const validViews: WorkspaceViewMode[] = ['dual', 'stacked']
 
   return {
     fontFamily: validFonts.includes(raw.fontFamily as WorkspaceFontFamily)
@@ -281,12 +275,7 @@ export function mergeWorkspaceTypographyIntoHud(
   currentHud: HudSettings,
   workspace: WorkspaceDisplaySettings
 ): HudSettings {
-  if (!workspace.syncTypographyToHud) {
-    return currentHud
-  }
-
-  // Scale HUD font size cleanly within its 14px-48px range relative to workspace font size (+6px stage boost)
-  const syncedHudSize = Math.max(14, Math.min(48, workspace.fontSizePx + 6))
+  const syncedHudSize = Math.max(13, Math.min(48, workspace.fontSizePx))
 
   return {
     ...currentHud,
@@ -295,6 +284,9 @@ export function mergeWorkspaceTypographyIntoHud(
     lineSpacing: workspace.lineSpacing,
     highContrast: workspace.highContrast,
     showSpeakerLabels: workspace.showSpeakerLabels,
-    showTimestamps: workspace.showTimestamps
+    showTimestamps: workspace.showTimestamps,
+    languageAColor: workspace.languageAColor,
+    languageBColor: workspace.languageBColor,
+    textColor: workspace.languageBColor
   }
 }

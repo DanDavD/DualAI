@@ -17,7 +17,7 @@ export type WorkspaceFontFamily = 'inter' | 'geist_mono' | 'system_sans' | 'high
 
 export type WorkspaceLineSpacing = 'compact' | 'standard' | 'relaxed'
 
-export type WorkspaceViewMode = 'dual' | 'target_only' | 'stacked'
+export type WorkspaceViewMode = 'dual' | 'stacked'
 
 export interface WorkspaceDisplaySettings {
   fontFamily: WorkspaceFontFamily
@@ -68,6 +68,8 @@ export interface HudSettings {
   showSpeakerLabels?: boolean
   showTimestamps?: boolean
   textColor?: string
+  languageAColor?: string
+  languageBColor?: string
 }
 
 export interface GlossaryEntry {

@@ -87,6 +87,8 @@ export interface TranscriptPayload {
   speakerLabel: string
   sourceText: string
   translatedText: string
+  originalColor?: string
+  translationColor?: string
   timestampMs: number
   isInterim: boolean
 }

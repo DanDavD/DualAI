@@ -18,6 +18,14 @@ import { TranscriptToken, TranscriptUtterance } from '../../../types/stt'
 export const DEFAULT_PAUSE_COMMIT_MS = 2200
 export const DEFAULT_MAX_MONOLOGUE_WORDS = 75
 const SENTENCE_END_REGEX = /[.!?。？！]["”'»)]*$/
+const DANGLING_FUNCTION_WORD_REGEX =
+  /(?:^|\s)(?:la|el|los|las|un|una|unos|unas|de|del|al|en|con|por|para|que|y|o|ni|the|a|an|to|of|in|for|with|and|or|that)$/i
+
+function endsWithDanglingFunctionWord(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed || SENTENCE_END_REGEX.test(trimmed)) return false
+  return DANGLING_FUNCTION_WORD_REGEX.test(trimmed)
+}
 
 export interface DraftUpdateMeta {
   isClauseFinalized: boolean
@@ -219,7 +227,13 @@ export class ParagraphTurnAccumulator {
         Boolean(utterance.speakerId) &&
         Boolean(existing.speakerId) &&
         utterance.speakerId !== existing.speakerId
-      if (isDifferentProvisionalSpeaker) {
+      const incomingBaseLang = utterance.language?.trim().toLowerCase().split(/[-_]/)[0]
+      const existingBaseLang = existing.language?.trim().toLowerCase().split(/[-_]/)[0]
+      const isDifferentProvisionalLanguage =
+        Boolean(incomingBaseLang) &&
+        Boolean(existingBaseLang) &&
+        incomingBaseLang !== existingBaseLang
+      if (isDifferentProvisionalSpeaker || isDifferentProvisionalLanguage) {
         return
       }
     }
@@ -307,10 +321,12 @@ export class ParagraphTurnAccumulator {
       return
     }
 
-    this.resetCommitTimer(buf)
+    const isDangling = endsWithDanglingFunctionWord(currentFullText)
+    this.resetCommitTimer(buf, isDangling ? this.pauseCommitMs + 600 : this.pauseCommitMs)
     this.callbacks.onDraftUpdate(this.buildSnapshot(buf, false), {
       isClauseFinalized: true,
-      isSpeechFinal: Boolean(utterance.speechFinal)
+      // Do not trigger premature atomic translation when sentence ends mid-article ("entienda la")
+      isSpeechFinal: Boolean(utterance.speechFinal) && !isDangling
     })
   }
 
@@ -428,6 +444,32 @@ export class ParagraphTurnAccumulator {
         existing.currentInterimText = ''
         existing.currentInterimTokens = []
         this.commitChannel(utterance.channelId)
+      } else if (
+        isFinal &&
+        existing.finalizedSegments.length === 0 &&
+        existing.currentInterimText.trim().length > 0 &&
+        (isDifferentSpeaker || isDifferentLanguage)
+      ) {
+        // Speaker A only had provisional interim text when Speaker B interrupted in another
+        // voice/language: commit Speaker A immediately if distinct so it is never lost and
+        // Speaker B opens a fresh stack with a new turnId (never overwriting Speaker A).
+        const normExistingInterim = normalizeForDedup(existing.currentInterimText)
+        const normIncomingFinal = normalizeForDedup(utterance.text)
+        const isSameUtteranceRevision =
+          Boolean(normExistingInterim) &&
+          Boolean(normIncomingFinal) &&
+          (` ${normIncomingFinal} `.includes(` ${normExistingInterim} `) ||
+            ` ${normExistingInterim} `.includes(` ${normIncomingFinal} `))
+        if (!isSameUtteranceRevision) {
+          this.commitChannel(utterance.channelId)
+        } else {
+          if (incomingBaseLang) existing.language = incomingBaseLang
+          if (utterance.speakerId) {
+            existing.speakerId = utterance.speakerId
+            existing.speakerLabel = utterance.speakerLabel
+          }
+          return existing
+        }
       } else {
         // Reset acoustic clock baseline cleanly after an upstream hibernation re-wake
         if (isClockReset) {
@@ -467,13 +509,13 @@ export class ParagraphTurnAccumulator {
     return created
   }
 
-  private resetCommitTimer(buf: ChannelTurnBuffer): void {
+  private resetCommitTimer(buf: ChannelTurnBuffer, delayMs: number = this.pauseCommitMs): void {
     if (buf.commitTimer) {
       clearTimeout(buf.commitTimer)
     }
     buf.commitTimer = setTimeout(() => {
       this.commitChannel(buf.channelId)
-    }, this.pauseCommitMs)
+    }, delayMs)
   }
 
   private buildSnapshot(buf: ChannelTurnBuffer, isFinal: boolean): TranscriptUtterance {

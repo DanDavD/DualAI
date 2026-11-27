@@ -653,3 +653,30 @@ Live production testing of the Deepgram Nova-3 + Gemini 2.5 Flash-Lite migration
 ### Consequences
 * **Positive:** Post-speech latency drops from **3.5s -> ~0.85s–0.98s** with zero visual flicker, zero duplicate rows, higher clinical accuracy via `nova-3-medical` + Gemini STT repair, and predictable **~$1.40–$2.00 / 70h** Gemini translation cost (~$10.50–$12.35 net margin on $15 plans during Deepgram credit phase; reversible to Soniox via `STT_PROVIDER=soniox` once free credits expire).
 * **Negative:** On rare multi-clause turns where a speaker pauses >300ms mid-paragraph, Gemini may translate once at the first clause and once at the final clause (~1.1x–1.2x calls/turn average). Quota cache introduces up to 8s of grace window on `/v1/translate` when remaining balance is >30s (still bounded by WS metering and 1-session concurrency cap).
+
+
+---
+
+## ADR-026: Zero-Freeze Rapid Bilingual Interruption Pipeline & Compact Stacked Mini View Parity
+
+### Status
+Accepted (Peer-Pair Reviewed under DUALAI-GOV-2026-V1)
+
+### Context
+To achieve fluid simultaneous interpreting when Speaker A (e.g., English) is interrupted mid-sentence by Speaker B (e.g., Spanish) and to guarantee that no transcript row ever freezes on `"Translating..."`, a full concurrency audit uncovered 6 failure modes:
+1. Mid-frame language switches (`EN -> ES`) with identical Deepgram `speaker` indices merged into a single run.
+2. Provisional interims from a different language bled into the active speaker's paragraph box and reset the 2.2s commit timer.
+3. Interim-only Speaker A turns (`finalizedSegments.length === 0`) were wiped and their `turnId` reused when Speaker B interrupted, overwriting Speaker A's stack in Mini View.
+4. `GatewayTranslationEngine` lacked fetch and SSE inactivity timeouts, allowing hung network streams to freeze rows indefinitely.
+5. `TranslationManager.onError` did not pass `utteranceId`, leaving failed committed rows pinned in `streamingTranslations`.
+6. `TranslationCard` and `TeleprompterHud` rendered `"Translating..."` unconditionally when `translatedText` was empty, even after a terminal error.
+
+### Decision
+1. **Mid-Frame Bilingual Splitting (`GatewaySttClient.ts`):** Split contiguous runs on language changes when `lastRun.words.length >= 2` and either sentence punctuation or >= 2 consecutive words in the new language appear (preserving opening cognates like `"No,"` and `"Doctor,"`).
+2. **Interim Interruption Isolation (`paragraphAccumulator.ts`):** Block cross-language provisional interims in `pushInterim` and commit distinct interim-only Speaker A turns immediately on interruption in `ensureBuffer` so Speaker B always opens a fresh `turnId` stack.
+3. **Zero-Freeze Translation Watchdogs & Terminal Error Cleanup (`GatewayTranslationEngine.ts`, `TranslationManager.ts`, `SessionContext.tsx`, `TranslationCard.tsx`, `TeleprompterHud.tsx`):** Enforce `12s` fetch and `10s` SSE inactivity timeouts, treat empty responses as errors, clean up `streamingTranslations[utteranceId]` on error, emit terminal `isInterim: false` updates to Mini View, and display `"Translation unavailable"` instead of an infinite `"Translating..."`.
+4. **Two-Layout Workspace & Compact Stacked Mini View Parity:** Remove `Translation Focus` (`target_only`), keep only `Dual-Pane 50/50` and `Compact Stacked`, upgrade `TeleprompterHud` to render Original above Translation in live synced workspace typography/colors, and add a 1-click Trash clear button.
+
+### Consequences
+* **Positive:** Instant parallel handling of bilingual interruptions across both Main Workspace and Mini View; zero frozen `"Translating..."` rows under network stalls or upstream errors; 1:1 visual and typography parity between Compact Stacked and Mini View.
+* **Negative:** Requests exceeding 12s to connect or 10s without SSE tokens abort cleanly with `"Translation unavailable"` rather than waiting indefinitely.

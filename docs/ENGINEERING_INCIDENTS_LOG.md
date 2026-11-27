@@ -760,3 +760,19 @@ Eliminate idle and self-voice Soniox token waste, preserve OS-wide call hold mut
   3. Updated `SessionContext.tsx` to fire Gemini at `0ms` debounce on `isSpeechFinal: true` (never on raw interims), keep tokens silent while streaming, reveal the complete translation atomically via `setDraftTranslationB` on `onDraftComplete`, and promote matching in-flight translations on commit via `pendingCommitPromotionRef` without aborting.
   4. Updated `DualPaneWorkspace.tsx` to render completed `draftTranslationB` atomically across Dual, Stacked, and Target-Only views, and added an 8-second bounded in-memory quota cache in `geminiStreamProxy.ts` (saving 50–120ms Supabase RTT per call).
 * **Result:** End-to-end post-speech latency budget dropped from `3,500ms` to `~880ms–960ms` (<= 1.0s target achieved); `npm run typecheck`, `test_deepgram_pipeline.ts` (5/5), `test_token_cost_optimization.ts` (5/5), `test_soniox_unified_engine.ts` (5/5), `test_zero_trust_security.ts` (9/9), and `npm run security:gate` all passed 100%.
+
+
+---
+
+### INCIDENT 031: Rapid Bilingual Interruption Edge Cases & Infinite `Translating...` Freeze Prevention
+
+* **Date:** 2026-11-27
+* **Severity:** High (Concurrency & Live Interruption Fluidity)
+* **Situation:** Full-pipeline concurrency auditing identified 6 edge cases where rapid bilingual interruptions (`EN <-> ES`) or upstream network stalls could fuse two speakers into one row, overwrite Speaker A's Mini View stack, or leave a row permanently frozen on `"Translating..."`.
+* **Task:** Eliminate all 6 failure modes so rapid interruptions always flush Speaker A cleanly while opening a fresh parallel stack for Speaker B, with zero possibility of frozen UI state.
+* **Action:**
+  1. Upgraded `splitDeepgramWordsBySpeaker` in `GatewaySttClient.ts` to split same-speaker mid-frame language switches (`lastRun.words.length >= 2` at sentence boundary or >= 2 consecutive words in new language) while preserving opening cognates.
+  2. Added `isDifferentProvisionalLanguage` bleed protection in `ParagraphTurnAccumulator.pushInterim` and immediate interim-only commit on distinct speaker/language interruption in `ensureBuffer` so Speaker B always receives a new `turnId`.
+  3. Added `FETCH_TIMEOUT_MS` (12s), `SSE_INACTIVITY_TIMEOUT_MS` (10s), and empty-stream error detection in `GatewayTranslationEngine.ts`.
+  4. Threaded `utteranceId` through `TranslationManager.onError`, cleared `streamingTranslations[utteranceId]` and emitted terminal `isInterim: false` Mini View updates on errors in `SessionContext.tsx`, and updated `TranslationCard.tsx` and `TeleprompterHud.tsx` to exit `"Translating..."` on terminal failure.
+* **Result:** All 6 failure modes resolved and locked with regression tests 4g–4h in `test_deepgram_pipeline.ts`; `typecheck`, `test_deepgram_pipeline` (5/5), `test_token_cost_optimization` (5/5), `test_soniox_unified_engine` (5/5), `test_zero_trust_security` (9/9), `electron-vite build`, and `security:gate` all passed 100%.

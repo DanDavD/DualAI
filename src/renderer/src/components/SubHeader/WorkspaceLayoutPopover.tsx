@@ -1,10 +1,10 @@
 /**
  * DUALAI - Dedicated Workspace Layout Selector Menu (Apple Liquid Glass)
- * Switches seamlessly between Dual-Pane 50/50, Translation Focus, and Compact Stacked layouts.
+ * Switches seamlessly between Dual-Pane 50/50 and Compact Stacked layouts.
  */
 
 import React, { useState, useRef, useEffect } from 'react'
-import { Columns2, Maximize2, Rows2, Check } from 'lucide-react'
+import { Columns2, Rows2, Check } from 'lucide-react'
 import { WorkspaceViewMode } from '../../../../types/settings'
 import { useSession } from '../../context/SessionContext'
 import { VIEW_MODE_OPTIONS } from '../../utils/typographyPreferences'
@@ -15,7 +15,6 @@ const VIEW_ICONS: Record<
   React.ComponentType<{ className?: string; strokeWidth?: number }>
 > = {
   dual: Columns2,
-  target_only: Maximize2,
   stacked: Rows2
 }
 

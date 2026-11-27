@@ -22,6 +22,9 @@ export interface TranslateStreamOptions {
   sourceLangOverride?: string
 }
 
+const FETCH_TIMEOUT_MS = 12_000
+const SSE_INACTIVITY_TIMEOUT_MS = 10_000
+
 function isAbortError(err: unknown): boolean {
   if (!(err instanceof Error)) return false
   return err.name === 'AbortError' || err.message.toLowerCase().includes('aborted')
@@ -107,7 +110,18 @@ export class GatewayTranslationEngine {
 
     callbacks.onStart(initialResult)
 
+    let timedOut = false
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+    const armTimeout = (ms: number): void => {
+      if (timeoutId) clearTimeout(timeoutId)
+      timeoutId = setTimeout(() => {
+        timedOut = true
+        controller.abort()
+      }, ms)
+    }
+
     try {
+      armTimeout(FETCH_TIMEOUT_MS)
       const response = await fetch(`${getGatewayHttpUrl()}/v1/translate`, {
         method: 'POST',
         headers: {
@@ -131,6 +145,9 @@ export class GatewayTranslationEngine {
         })
       })
 
+      if (timedOut) {
+        throw new Error('Translation request timed out.')
+      }
       if (controller.signal.aborted) {
         return
       }
@@ -156,6 +173,7 @@ export class GatewayTranslationEngine {
       const streamTokens: TranslationToken[] = []
 
       while (true) {
+        armTimeout(SSE_INACTIVITY_TIMEOUT_MS)
         const { done, value } = await reader.read()
         if (done || controller.signal.aborted) break
 
@@ -205,11 +223,17 @@ export class GatewayTranslationEngine {
         }
       }
 
+      if (timedOut) {
+        throw new Error('Translation request timed out.')
+      }
       if (controller.signal.aborted) {
         return
       }
 
       const trimmedFinalText = accumulatedText.trim()
+      if (!trimmedFinalText) {
+        throw new Error('Empty translation response from upstream service.')
+      }
       const finalWordTokens: TranslationToken[] = trimmedFinalText
         ? trimmedFinalText.split(/\s+/).map((word, idx) => ({
             id: `${translationId}-word-${idx}`,
@@ -246,10 +270,16 @@ export class GatewayTranslationEngine {
         timestampMs: Date.now()
       })
     } catch (err) {
-      if (!controller.signal.aborted && !isAbortError(err)) {
+      if (timedOut) {
+        callbacks.onError(new Error('Translation request timed out.'))
+      } else if (!controller.signal.aborted && !isAbortError(err)) {
         callbacks.onError(err as Error)
       }
     } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId)
+        timeoutId = null
+      }
       const activeDraft = this.draftControllers.get(utterance.channelId)
       if (activeDraft && activeDraft.controller === controller) {
         this.draftControllers.delete(utterance.channelId)

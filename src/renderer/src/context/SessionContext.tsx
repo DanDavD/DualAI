@@ -65,6 +65,7 @@ import { glossaryEntriesToMap } from '../utils/glossaryParser'
 import {
   STORAGE_KEY_WORKSPACE_DISPLAY,
   mergeWorkspaceTypographyIntoHud,
+  resolveTurnPaneColors,
   sanitizeWorkspaceDisplaySettings
 } from '../utils/typographyPreferences'
 import {
@@ -516,6 +517,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const routingDecisionRef = useRef(routingDecision)
   const isHudOpenRef = useRef(isHudOpen)
   const hudSettingsRef = useRef(hudSettings)
+  const workspaceDisplaySettingsRef = useRef(workspaceDisplaySettings)
+  const streamingTranslationsRef = useRef(streamingTranslations)
   const isAudioActiveRef = useRef(isAudioActive)
   const isCoughMutedRef = useRef(isCoughMuted)
   const speechGatesRef = useRef<Record<ChannelId, SmartSpeechGate>>({
@@ -548,7 +551,45 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   routingDecisionRef.current = routingDecision
   isHudOpenRef.current = isHudOpen
   hudSettingsRef.current = hudSettings
+  workspaceDisplaySettingsRef.current = workspaceDisplaySettings
+  streamingTranslationsRef.current = streamingTranslations
   isAudioActiveRef.current = isAudioActive
+
+  const emitHudTurn = useCallback(
+    (params: {
+      id: string
+      speakerId: string
+      speakerLabel: string
+      sourceText: string
+      translatedText: string
+      spokenLang?: string
+      translatedLang?: string
+      timestampMs: number
+      isInterim: boolean
+    }) => {
+      if (!isHudOpenRef.current || !window.electronAPI?.sendHudTranscript) return
+      const { originalColor, translationColor } = resolveTurnPaneColors({
+        spokenLang: params.spokenLang,
+        translatedLang: params.translatedLang,
+        sourceLang: sourceLangRef.current,
+        targetLang: targetLangRef.current,
+        operatingMode: operatingModeRef.current,
+        settings: workspaceDisplaySettingsRef.current
+      })
+      window.electronAPI.sendHudTranscript({
+        id: params.id,
+        speakerId: params.speakerId,
+        speakerLabel: params.speakerLabel,
+        sourceText: params.sourceText,
+        translatedText: params.translatedText,
+        originalColor,
+        translationColor,
+        timestampMs: params.timestampMs,
+        isInterim: params.isInterim
+      })
+    },
+    []
+  )
 
   const clearDraftTimers = useCallback((channelId?: ChannelId) => {
     const channels: ChannelId[] = channelId ? [channelId] : ['channel_a', 'channel_b']
@@ -615,17 +656,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
                   : result
             }
           })
-          if (isHudOpenRef.current && window.electronAPI?.sendHudTranscript) {
-            window.electronAPI.sendHudTranscript({
-              id: result.utteranceId,
-              speakerId: result.channelId,
-              speakerLabel: result.speakerLabel,
-              sourceText: result.sourceText,
-              translatedText: result.translatedText,
-              timestampMs: result.timestampMs,
-              isInterim: true
-            })
-          }
+          emitHudTurn({
+            id: result.utteranceId,
+            speakerId: result.channelId,
+            speakerLabel: result.speakerLabel,
+            sourceText: result.sourceText,
+            translatedText: result.translatedText,
+            spokenLang: result.sourceLang,
+            translatedLang: result.targetLang,
+            timestampMs: result.timestampMs,
+            isInterim: true
+          })
         },
         onTranslationToken: (utteranceId, _token, accumulatedText) => {
           setStreamingTranslations((prev) => {
@@ -635,17 +676,6 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
               ...current,
               translatedText: accumulatedText,
               isStreaming: true
-            }
-            if (isHudOpenRef.current && window.electronAPI?.sendHudTranscript) {
-              window.electronAPI.sendHudTranscript({
-                id: updated.utteranceId,
-                speakerId: updated.channelId,
-                speakerLabel: updated.speakerLabel,
-                sourceText: updated.sourceText,
-                translatedText: accumulatedText,
-                timestampMs: updated.timestampMs,
-                isInterim: true
-              })
             }
             return {
               ...prev,
@@ -664,17 +694,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
             const filtered = prev.filter((t) => t.utteranceId !== result.utteranceId)
             return [...filtered.slice(-999), result]
           })
-          if (isHudOpenRef.current && window.electronAPI?.sendHudTranscript) {
-            window.electronAPI.sendHudTranscript({
-              id: result.utteranceId,
-              speakerId: result.channelId,
-              speakerLabel: result.speakerLabel,
-              sourceText: result.sourceText,
-              translatedText: result.translatedText,
-              timestampMs: result.timestampMs,
-              isInterim: false
-            })
-          }
+          emitHudTurn({
+            id: result.utteranceId,
+            speakerId: result.channelId,
+            speakerLabel: result.speakerLabel,
+            sourceText: result.sourceText,
+            translatedText: result.translatedText,
+            spokenLang: result.sourceLang,
+            translatedLang: result.targetLang,
+            timestampMs: result.timestampMs,
+            isInterim: false
+          })
         },
         onDraftStart: (result) => {
           // Option A: Keep in-flight tokens silent in RAM (zero partial-word flicker on screen)
@@ -736,17 +766,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
               domainId: domainIdRef.current,
               timestampMs: Date.now()
             })
-            if (isHudOpenRef.current && window.electronAPI?.sendHudTranscript) {
-              window.electronAPI.sendHudTranscript({
-                id: committed.id,
-                speakerId: committed.speakerId || committed.channelId,
-                speakerLabel: committed.speakerLabel,
-                sourceText: committed.text,
-                translatedText: promoted.translatedText,
-                timestampMs: committed.timestampMs,
-                isInterim: false
-              })
-            }
+            emitHudTurn({
+              id: committed.id,
+              speakerId: committed.speakerId || committed.channelId,
+              speakerLabel: committed.speakerLabel,
+              sourceText: committed.text,
+              translatedText: promoted.translatedText,
+              spokenLang: pSrc,
+              translatedLang: pTgt,
+              timestampMs: committed.timestampMs,
+              isInterim: false
+            })
             return
           }
 
@@ -760,17 +790,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
             } else {
               setDraftTranslationB(finalizedDraft)
             }
-            if (isHudOpenRef.current && window.electronAPI?.sendHudTranscript) {
-              window.electronAPI.sendHudTranscript({
-                id: finalizedDraft.utteranceId,
-                speakerId: finalizedDraft.speakerId || finalizedDraft.channelId,
-                speakerLabel: finalizedDraft.speakerLabel,
-                sourceText: finalizedDraft.sourceText,
-                translatedText: finalizedDraft.translatedText,
-                timestampMs: finalizedDraft.timestampMs,
-                isInterim: false
-              })
-            }
+            emitHudTurn({
+              id: finalizedDraft.utteranceId,
+              speakerId: finalizedDraft.speakerId || finalizedDraft.channelId,
+              speakerLabel: finalizedDraft.speakerLabel,
+              sourceText: finalizedDraft.sourceText,
+              translatedText: finalizedDraft.translatedText,
+              spokenLang: finalizedDraft.sourceLang,
+              translatedLang: finalizedDraft.targetLang,
+              timestampMs: finalizedDraft.timestampMs,
+              isInterim: false
+            })
           }
         },
         onDraftError: (utteranceId, err) => {
@@ -781,6 +811,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
               const next = { ...prev }
               delete next[pendingCommit.committed.id]
               return next
+            })
+            emitHudTurn({
+              id: pendingCommit.committed.id,
+              speakerId: pendingCommit.committed.speakerId || pendingCommit.committed.channelId,
+              speakerLabel: pendingCommit.committed.speakerLabel,
+              sourceText: pendingCommit.committed.text,
+              translatedText: '',
+              spokenLang: pendingCommit.sourceLang,
+              translatedLang: pendingCommit.targetLang,
+              timestampMs: pendingCommit.committed.timestampMs,
+              isInterim: false
             })
             setPipelineErrorMessage(err.message)
           }
@@ -795,8 +836,30 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setEndToEndLatencyMs(telemetry.endToEndLatencyMs)
           setTranslationProvider(telemetry.provider)
         },
-        onError: (err) => {
+        onError: (err, utteranceId) => {
           console.warn('[DUALAI-SESSION] Translation Error:', err)
+          if (utteranceId) {
+            const failed = streamingTranslationsRef.current[utteranceId]
+            setStreamingTranslations((prev) => {
+              if (!(utteranceId in prev)) return prev
+              const next = { ...prev }
+              delete next[utteranceId]
+              return next
+            })
+            if (failed) {
+              emitHudTurn({
+                id: failed.utteranceId,
+                speakerId: failed.speakerId || failed.channelId,
+                speakerLabel: failed.speakerLabel,
+                sourceText: failed.sourceText,
+                translatedText: '',
+                spokenLang: failed.sourceLang,
+                translatedLang: failed.targetLang,
+                timestampMs: failed.timestampMs,
+                isInterim: false
+              })
+            }
+          }
           setPipelineErrorMessage(err.message)
         },
         onQuotaExhausted: (message) => {
@@ -891,6 +954,23 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           } else {
             setInterimTranscriptB(draft)
           }
+
+          // Compact Stacked Mini View parity: stream live original text immediately on top
+          const cachedDraft = draftResultRef.current[draft.channelId]
+          const readyTranslatedText =
+            cachedDraft && cachedDraft.utteranceId === draft.id && cachedDraft.isComplete
+              ? cachedDraft.translatedText
+              : ''
+          emitHudTurn({
+            id: draft.id,
+            speakerId: draft.speakerId || draft.channelId,
+            speakerLabel: draft.speakerLabel,
+            sourceText: draft.text,
+            translatedText: readyTranslatedText,
+            spokenLang: draft.language,
+            timestampMs: draft.timestampMs,
+            isInterim: true
+          })
 
           // Option A sub-second trigger: never fire Gemini on unstable raw interims.
           // Fire IMMEDIATELY (0ms debounce) on Deepgram speech_final: true so the complete
@@ -1006,17 +1086,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
               domainId: domainIdRef.current,
               timestampMs: Date.now()
             })
-            if (isHudOpenRef.current && window.electronAPI?.sendHudTranscript) {
-              window.electronAPI.sendHudTranscript({
-                id: committed.id,
-                speakerId: committed.speakerId || committed.channelId,
-                speakerLabel: committed.speakerLabel,
-                sourceText: committed.text,
-                translatedText: promoted.translatedText,
-                timestampMs: committed.timestampMs,
-                isInterim: false
-              })
-            }
+            emitHudTurn({
+              id: committed.id,
+              speakerId: committed.speakerId || committed.channelId,
+              speakerLabel: committed.speakerLabel,
+              sourceText: committed.text,
+              translatedText: promoted.translatedText,
+              spokenLang: pair.sourceLang,
+              translatedLang: target,
+              timestampMs: committed.timestampMs,
+              isInterim: false
+            })
             return
           }
 
@@ -1112,21 +1192,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setTranslationLatencyMs(translation.timeToFirstTokenMs)
           setEndToEndLatencyMs(translation.endToEndLatencyMs)
 
-          if (
-            latencyModeRef.current === 'sub_second_live' &&
-            isHudOpenRef.current &&
-            window.electronAPI?.sendHudTranscript
-          ) {
-            window.electronAPI.sendHudTranscript({
-              id: utterance.id,
-              speakerId: utterance.speakerId || utterance.channelId,
-              speakerLabel: utterance.speakerLabel,
-              sourceText: utterance.text,
-              translatedText: translation.translatedText,
-              timestampMs: utterance.timestampMs,
-              isInterim: true
-            })
-          }
+          emitHudTurn({
+            id: utterance.id,
+            speakerId: utterance.speakerId || utterance.channelId,
+            speakerLabel: utterance.speakerLabel,
+            sourceText: utterance.text,
+            translatedText: translation.translatedText,
+            spokenLang: utterance.language,
+            translatedLang: translation.targetLang,
+            timestampMs: utterance.timestampMs,
+            isInterim: true
+          })
         },
         onUnifiedCommit: ({ utterance, translation }) => {
           if (utterance.channelId === 'channel_a') {
@@ -1143,17 +1219,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           })
           setTranslationProvider('soniox-unified')
 
-          if (isHudOpenRef.current && window.electronAPI?.sendHudTranscript) {
-            window.electronAPI.sendHudTranscript({
-              id: utterance.id,
-              speakerId: utterance.speakerId || utterance.channelId,
-              speakerLabel: utterance.speakerLabel,
-              sourceText: utterance.text,
-              translatedText: translation.translatedText,
-              timestampMs: utterance.timestampMs,
-              isInterim: false
-            })
-          }
+          emitHudTurn({
+            id: utterance.id,
+            speakerId: utterance.speakerId || utterance.channelId,
+            speakerLabel: utterance.speakerLabel,
+            sourceText: utterance.text,
+            translatedText: translation.translatedText,
+            spokenLang: utterance.language,
+            translatedLang: translation.targetLang,
+            timestampMs: utterance.timestampMs,
+            isInterim: false
+          })
         },
         onUnifiedCommitUpdate: ({ utterance, translation }) => {
           // Seamlessly append trailing finalized translation tokens arriving ms after <end> or speaker switch
@@ -1164,17 +1240,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
             next[idx] = translation
             return next
           })
-          if (isHudOpenRef.current && window.electronAPI?.sendHudTranscript) {
-            window.electronAPI.sendHudTranscript({
-              id: utterance.id,
-              speakerId: utterance.speakerId || utterance.channelId,
-              speakerLabel: utterance.speakerLabel,
-              sourceText: utterance.text,
-              translatedText: translation.translatedText,
-              timestampMs: utterance.timestampMs,
-              isInterim: false
-            })
-          }
+          emitHudTurn({
+            id: utterance.id,
+            speakerId: utterance.speakerId || utterance.channelId,
+            speakerLabel: utterance.speakerLabel,
+            sourceText: utterance.text,
+            translatedText: translation.translatedText,
+            spokenLang: utterance.language,
+            translatedLang: translation.targetLang,
+            timestampMs: utterance.timestampMs,
+            isInterim: false
+          })
         },
         onConnectionChange: (channelId, state) => {
           if (channelId === 'channel_a') {
@@ -1755,10 +1831,15 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   // Day 10: Floating Teleprompter HUD Controls
   const openHud = useCallback(async () => {
+    const syncedHud = mergeWorkspaceTypographyIntoHud(
+      hudSettingsRef.current,
+      workspaceDisplaySettingsRef.current
+    )
+    setHudSettings(syncedHud)
     if (window.electronAPI?.openHud) {
-      await window.electronAPI.openHud(hudSettingsRef.current.bounds)
-      window.electronAPI.sendHudConfig?.(hudSettingsRef.current)
-      await window.electronAPI.setHudClickThrough?.(hudSettingsRef.current.isClickThrough)
+      await window.electronAPI.openHud(syncedHud.bounds)
+      window.electronAPI.sendHudConfig?.(syncedHud)
+      await window.electronAPI.setHudClickThrough?.(syncedHud.isClickThrough)
       setIsHudOpen(true)
     } else {
       setIsHudOpen(true)
@@ -1807,13 +1888,12 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           // Ignore storage quota errors
         }
 
-        if (next.syncTypographyToHud) {
-          setHudSettings((prevHud) => {
-            const syncedHud = mergeWorkspaceTypographyIntoHud(prevHud, next)
-            window.electronAPI?.sendHudConfig?.(syncedHud)
-            return syncedHud
-          })
-        }
+        // Always sync Compact Stacked / Dual Pane typography and language colors into Mini View
+        setHudSettings((prevHud) => {
+          const syncedHud = mergeWorkspaceTypographyIntoHud(prevHud, next)
+          window.electronAPI?.sendHudConfig?.(syncedHud)
+          return syncedHud
+        })
         return next
       })
     },
