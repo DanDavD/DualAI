@@ -525,15 +525,21 @@ export async function createGatewayServer(
       return
     }
 
-    // GET /v1/account/quota
+    // GET /v1/account/quota (supports ?sync=1 for explicit live Paddle reconciliation)
     if (req.method === 'GET' && pathname === '/v1/account/quota') {
       try {
+        const forceSync = parsedUrl.searchParams.get('sync') === '1'
         const [quota, subscription] = await Promise.all([
           quotaStore.getOrCreateUserQuota(user.userId),
-          paddleFulfillment.getActiveSubscriptionForUser({
-            userId: user.userId,
-            email: user.email
-          })
+          forceSync
+            ? paddleFulfillment.reconcileActiveSubscriptionForUser({
+                userId: user.userId,
+                email: user.email
+              })
+            : paddleFulfillment.getActiveSubscriptionForUser({
+                userId: user.userId,
+                email: user.email
+              })
         ])
         sendJson(res, 200, {
           user: {

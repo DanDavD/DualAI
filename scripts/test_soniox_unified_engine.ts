@@ -70,8 +70,8 @@ async function run(): Promise<void> {
   console.log('  Strict Hints + Two-Way (EN<->ES) & One-Way (EN->DE) + 2000ms Endpointing: VERIFIED')
   console.log('PASS: Test 1 satisfied.\n')
 
-  // TEST 2: Rapid "Sí, sí, sí" + 3 Same-Language Speakers + <end> Bursts + Genuine Language Switch
-  console.log('[TEST 2] Stress-testing rapid "Sí, sí, sí" + speaker jitter + <end> bursts + ES<->EN switch...')
+  // TEST 2: Strict Multi-Speaker Interruption Separation (Speaker 1 -> Speaker 2 -> Speaker 3)
+  console.log('[TEST 2] Testing strict per-speaker & per-language separation during rapid interruptions...')
   const drafts: UnifiedTurnSnapshot[] = []
   const commits: UnifiedTurnSnapshot[] = []
   const updates: UnifiedTurnSnapshot[] = []
@@ -93,62 +93,98 @@ async function run(): Promise<void> {
     }
   )
 
-  // Rapid same-language bursts across Speaker 1, Speaker 2, Speaker 3, noisy 'pt' tag, regional 'es-MX', and 3 <end> markers
+  // Speaker 1 (Doctor, English) speaks across a brief <end> pause -> stays in 1 cohesive paragraph
   assembler.ingestTokens([
-    { text: 'Sí,', is_final: true, speaker: '1', language: 'es-MX', translation_status: 'original', confidence: 0.96 },
+    { text: 'Your next appointment will be in 2 weeks.', is_final: true, speaker: '1', language: 'en-US', translation_status: 'original', confidence: 0.97 },
     { text: '<end>', is_final: true }
   ])
   assembler.ingestTokens([
-    { text: 'sí,', is_final: true, speaker: '2', language: 'pt', translation_status: 'original', confidence: 0.94 },
-    { text: ' sí.', is_final: true, speaker: '1', language: 'es', translation_status: 'original', confidence: 0.95 },
-    { text: 'Yes, yes, yes.', is_final: true, speaker: '1', language: 'en', source_language: 'es', translation_status: 'translation' },
-    { text: '<end>', is_final: true }
+    { text: 'And your sugar level should be lower.', is_final: true, speaker: '1', language: 'en', translation_status: 'original', confidence: 0.96 },
+    { text: 'Su próxima cita será en 2 semanas.', is_final: true, speaker: '1', language: 'es', source_language: 'en', translation_status: 'translation' }
   ])
-  assembler.ingestTokens([
-    { text: 'Mi hijo tiene fiebre desde anoche.', is_final: true, speaker: '3', language: 'es', translation_status: 'original', confidence: 0.97 },
-    { text: 'My son has had a fever since last night.', is_final: true, speaker: '3', language: 'en', source_language: 'es', translation_status: 'translation' },
-    { text: '<end>', is_final: true }
-  ])
+  // Same speaker across brief pause must NOT prematurely split
+  assert.equal(commits.length, 0, 'Same speaker continuing after brief pause must stay in 1 paragraph')
 
-  // MUST NOT have prematurely split into 3 or 4 rows! All same-language speech stays in 1 live paragraph!
-  assert.equal(commits.length, 0, 'Rapid "Sí, sí, sí" + speaker jitter + <end> bursts must produce 0 premature commits')
-  assert.ok(drafts.length >= 3)
+  // Provisional words from interrupting Speaker 2 must NOT bleed into Speaker 1 draft
+  assembler.ingestTokens([
+    { text: 'Entonces la enfermera', is_final: false, speaker: '2', language: 'es-MX', translation_status: 'original' }
+  ])
   assert.equal(
     drafts[drafts.length - 1].utterance.text,
-    'Sí, sí, sí. Mi hijo tiene fiebre desde anoche.'
+    'Your next appointment will be in 2 weeks. And your sugar level should be lower.',
+    'Interrupting speaker provisional tokens must never bleed into active speaker draft'
   )
-  assert.equal(drafts[drafts.length - 1].utterance.language, 'es')
-  assert.equal(drafts[drafts.length - 1].translation.targetLang, 'en')
 
-  // Speaker 4 (Doctor speaking English, regional 'en-US') starts -> MUST immediately commit 1 unified Spanish paragraph!
+  // Speaker 2 (Patient, Spanish) finalizes interruption -> MUST immediately commit Speaker 1 and start Speaker 2!
   assembler.ingestTokens([
-    { text: 'Let us check his temperature now.', is_final: true, speaker: '4', language: 'en-US', translation_status: 'original', confidence: 0.98 },
-    { text: '<fin>', is_final: true }
+    { text: 'Entonces, ¿la enfermera va a venir?', is_final: true, speaker: '2', language: 'es-MX', translation_status: 'original', confidence: 0.95 },
+    // Trailing finalized translation for interrupted Speaker 1 arrives AFTER Speaker 2 started!
+    { text: ' Y su nivel de azúcar debería estar más bajo.', is_final: true, speaker: '1', language: 'es', source_language: 'en', translation_status: 'translation' },
+    { text: 'So, is the nurse going to come?', is_final: true, speaker: '2', language: 'en', source_language: 'es', translation_status: 'translation' }
   ])
 
-  // Trailing finalized Spanish translation for English turn arrives 150ms AFTER <fin>
+  assert.equal(commits.length, 1, 'Speaker 2 interrupting Speaker 1 must immediately commit Speaker 1')
+  assert.equal(commits[0].utterance.speakerId, '1')
+  assert.equal(commits[0].utterance.language, 'en')
+  assert.equal(
+    commits[0].utterance.text,
+    'Your next appointment will be in 2 weeks. And your sugar level should be lower.'
+  )
+  // Verify Speaker 1 trailing translation reconciled onto Speaker 1 (NOT Speaker 2!)
+  assert.equal(updates.length, 1, 'Trailing translation for Speaker 1 must reconcile onto Speaker 1 row')
+  assert.equal(updates[0].utterance.id, commits[0].utterance.id)
+  assert.equal(
+    updates[0].translation.translatedText,
+    'Su próxima cita será en 2 semanas. Y su nivel de azúcar debería estar más bajo.'
+  )
+
+  // Speaker 3 (Family member, ALSO speaking Spanish!) interrupts Speaker 2 -> MUST split even within SAME language!
   assembler.ingestTokens([
-    { text: 'Revisemos su temperatura ahora.', is_final: true, speaker: '4', language: 'es', source_language: 'en', translation_status: 'translation' }
+    { text: 'Los dos lo vamos a hacer, no te preocupes.', is_final: true, speaker: '3', language: 'es', translation_status: 'original', confidence: 0.96 },
+    { text: 'Both of us are going to do it, do not worry.', is_final: true, speaker: '3', language: 'en', source_language: 'es', translation_status: 'translation' },
+    { text: '<fin>', is_final: true }
   ])
 
   assembler.reset()
 
-  assert.equal(commits.length, 2, 'Must produce exactly 2 clean paragraphs: 1 unified Spanish + 1 unified English')
-  assert.equal(commits[0].utterance.language, 'es')
-  assert.equal(commits[0].translation.targetLang, 'en')
-  assert.equal(commits[0].utterance.text, 'Sí, sí, sí. Mi hijo tiene fiebre desde anoche.')
-  assert.equal(
-    commits[0].translation.translatedText,
-    'Yes, yes, yes. My son has had a fever since last night.'
-  )
+  assert.equal(commits.length, 3, 'Must produce exactly 3 cleanly separated speaker paragraphs (Speaker 1, Speaker 2, Speaker 3)')
+  assert.equal(commits[1].utterance.speakerId, '2')
+  assert.equal(commits[1].utterance.text, 'Entonces, ¿la enfermera va a venir?')
+  assert.equal(commits[1].translation.translatedText, 'So, is the nurse going to come?')
 
-  assert.equal(commits[1].utterance.language, 'en')
-  assert.equal(commits[1].translation.targetLang, 'es')
-  assert.equal(commits[1].utterance.text, 'Let us check his temperature now.')
-  assert.equal(updates.length, 1, 'Trailing translation after <fin> must reconcile onto English paragraph')
-  assert.equal(updates[0].utterance.id, commits[1].utterance.id)
-  assert.equal(updates[0].translation.translatedText, 'Revisemos su temperatura ahora.')
-  console.log('  3 ES speakers + "Sí, sí, sí" + <end> bursts -> 1 unified ES paragraph + instant EN switch: VERIFIED')
+  assert.equal(commits[2].utterance.speakerId, '3')
+  assert.equal(commits[2].utterance.text, 'Los dos lo vamos a hacer, no te preocupes.')
+  assert.equal(commits[2].translation.translatedText, 'Both of us are going to do it, do not worry.')
+
+  // Also verify Translate (one-way) mode strictly separates speakers & languages too!
+  const oneWayCommits: UnifiedTurnSnapshot[] = []
+  const oneWayAsm = new SonioxStreamAssembler(
+    {
+      channelId: 'channel_b',
+      sourceLang: 'en',
+      targetLang: 'es',
+      operatingMode: 'translate',
+      domainId: 'medical',
+      confidenceThreshold: 0.75,
+      sameLanguageSettleMs: 2000
+    },
+    {
+      onUnifiedDraft: () => {},
+      onUnifiedCommit: (snap) => oneWayCommits.push(snap),
+      onUnifiedCommitUpdate: () => {}
+    }
+  )
+  oneWayAsm.ingestTokens([
+    { text: 'Take this twice a day.', is_final: true, speaker: '1', language: 'en', translation_status: 'original' },
+    { text: 'Tome esto dos veces al día.', is_final: true, speaker: '1', language: 'es', source_language: 'en', translation_status: 'translation' },
+    { text: '¿Con comida?', is_final: true, speaker: '2', language: 'es', translation_status: 'original' },
+    { text: '<fin>', is_final: true }
+  ])
+  oneWayAsm.reset()
+  assert.equal(oneWayCommits.length, 2, 'One-way translate mode must also separate Speaker 1 and Speaker 2 cleanly')
+  assert.equal(oneWayCommits[0].utterance.text, 'Take this twice a day.')
+  assert.equal(oneWayCommits[1].utterance.text, '¿Con comida?')
+  console.log('  Speaker 1 -> Speaker 2 (EN->ES) -> Speaker 3 (ES->ES) + One-Way separation + trailing translation routing: VERIFIED')
   console.log('PASS: Test 2 satisfied.\n')
 
   // TEST 3: Real Async Settle Timer + Pause Anti-Triplication + Exact Re-Emission Suppression

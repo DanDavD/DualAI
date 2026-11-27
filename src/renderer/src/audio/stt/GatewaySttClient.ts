@@ -261,6 +261,11 @@ export class GatewaySttClient {
       }
 
       if (data.type === 'dualai_error') {
+        if (data.code === 'SERVER_RESTARTING') {
+          // Graceful server rolling restart (HTTP/WS 1001): reconnect silently without flashing an error banner
+          this.updateState('reconnecting', 'Reconnecting...')
+          return
+        }
         if (data.code === 'QUOTA_EXHAUSTED') {
           this.callbacks.onQuotaExhausted?.(
             data.message || 'Interpretation quota exhausted. Upgrade your plan to continue.'

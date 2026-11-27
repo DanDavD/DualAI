@@ -515,13 +515,15 @@ export async function revokeServerSession(accessToken: string | null): Promise<v
 }
 
 export async function fetchAuthoritativeQuota(
-  accessToken: string
+  accessToken: string,
+  options?: { syncBilling?: boolean }
 ): Promise<{
   quota: AccountQuota
   subscription: AccountSubscriptionSummary | null
   plans: BillingPlan[]
 }> {
-  const response = await fetch(`${GATEWAY_BASE_URL}/v1/account/quota`, {
+  const query = options?.syncBilling ? '?sync=1' : ''
+  const response = await fetch(`${GATEWAY_BASE_URL}/v1/account/quota${query}`, {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${accessToken}`
@@ -545,58 +547,93 @@ export async function fetchAuthoritativeQuota(
   }
 }
 
+export interface SubscriptionActionResult {
+  ok: boolean
+  subscription?: AccountSubscriptionSummary
+  alreadyScheduled?: boolean
+  alreadyActive?: boolean
+  message?: string
+  error?: string
+}
+
 export async function cancelUserSubscription(
   accessToken: string
-): Promise<{ ok: boolean; subscription?: AccountSubscriptionSummary; error?: string }> {
-  const response = await fetch(`${GATEWAY_BASE_URL}/v1/billing/subscription/cancel`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`
+): Promise<SubscriptionActionResult> {
+  try {
+    const response = await fetch(`${GATEWAY_BASE_URL}/v1/billing/subscription/cancel`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`
+      }
+    })
+
+    const data = (await response.json().catch(() => ({}))) as SubscriptionActionResult
+
+    if (!response.ok || !data.ok) {
+      return {
+        ok: false,
+        subscription: data.subscription,
+        error:
+          data.error ||
+          (response.status === 401
+            ? 'Your session expired. Please sign in again.'
+            : 'Unable to cancel your subscription right now. Please try again.')
+      }
     }
-  })
 
-  const data = (await response.json().catch(() => ({}))) as {
-    ok?: boolean
-    subscription?: AccountSubscriptionSummary
-    error?: string
-  }
-
-  if (!response.ok || !data.ok) {
+    return {
+      ok: true,
+      subscription: data.subscription,
+      alreadyScheduled: data.alreadyScheduled,
+      message: data.message
+    }
+  } catch {
     return {
       ok: false,
-      error: data.error || `Unable to cancel subscription (${response.status}).`
+      error: 'Unable to reach the billing service. Check your internet connection and try again.'
     }
   }
-
-  return { ok: true, subscription: data.subscription }
 }
 
 export async function undoCancelUserSubscription(
   accessToken: string
-): Promise<{ ok: boolean; subscription?: AccountSubscriptionSummary; error?: string }> {
-  const response = await fetch(`${GATEWAY_BASE_URL}/v1/billing/subscription/undo-cancel`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`
+): Promise<SubscriptionActionResult> {
+  try {
+    const response = await fetch(`${GATEWAY_BASE_URL}/v1/billing/subscription/undo-cancel`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`
+      }
+    })
+
+    const data = (await response.json().catch(() => ({}))) as SubscriptionActionResult
+
+    if (!response.ok || !data.ok) {
+      return {
+        ok: false,
+        subscription: data.subscription,
+        error:
+          data.error ||
+          (response.status === 401
+            ? 'Your session expired. Please sign in again.'
+            : 'Unable to keep your subscription right now. Please try again.')
+      }
     }
-  })
 
-  const data = (await response.json().catch(() => ({}))) as {
-    ok?: boolean
-    subscription?: AccountSubscriptionSummary
-    error?: string
-  }
-
-  if (!response.ok || !data.ok) {
+    return {
+      ok: true,
+      subscription: data.subscription,
+      alreadyActive: data.alreadyActive,
+      message: data.message
+    }
+  } catch {
     return {
       ok: false,
-      error: data.error || `Unable to keep subscription (${response.status}).`
+      error: 'Unable to reach the billing service. Check your internet connection and try again.'
     }
   }
-
-  return { ok: true, subscription: data.subscription }
 }
 
 export async function createBillingCheckoutSession(params: {
@@ -604,26 +641,37 @@ export async function createBillingCheckoutSession(params: {
   planId: PlanId
   provider: CheckoutProvider
 }): Promise<CheckoutSessionResult> {
-  const response = await fetch(`${GATEWAY_BASE_URL}/v1/billing/checkout-session`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${params.accessToken}`
-    },
-    body: JSON.stringify({
-      planId: params.planId,
-      provider: params.provider
+  try {
+    const response = await fetch(`${GATEWAY_BASE_URL}/v1/billing/checkout-session`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${params.accessToken}`
+      },
+      body: JSON.stringify({
+        planId: params.planId,
+        provider: params.provider
+      })
     })
-  })
 
-  const data = (await response.json().catch(() => ({}))) as CheckoutSessionResult
-  if (!response.ok || !data.ok) {
+    const data = (await response.json().catch(() => ({}))) as CheckoutSessionResult
+    if (!response.ok || !data.ok) {
+      return {
+        ok: false,
+        error:
+          data.error ||
+          (response.status === 401
+            ? 'Your session expired. Please sign in again.'
+            : 'Unable to start checkout right now. Please try again.')
+      }
+    }
+    return data
+  } catch {
     return {
       ok: false,
-      error: data.error || `Unable to create checkout session (${response.status}).`
+      error: 'Unable to reach the billing service. Check your internet connection and try again.'
     }
   }
-  return data
 }
 
 export async function verifyMicrosoftStorePurchase(params: {
@@ -663,26 +711,37 @@ export async function verifyMicrosoftStorePurchase(params: {
 export async function requestCustomerPortalSession(
   accessToken: string
 ): Promise<{ ok: boolean; portalUrl?: string; error?: string }> {
-  const response = await fetch(`${GATEWAY_BASE_URL}/v1/billing/customer-portal`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`
+  try {
+    const response = await fetch(`${GATEWAY_BASE_URL}/v1/billing/customer-portal`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`
+      }
+    })
+
+    const data = (await response.json().catch(() => ({}))) as {
+      ok?: boolean
+      portalUrl?: string
+      error?: string
     }
-  })
 
-  const data = (await response.json().catch(() => ({}))) as {
-    ok?: boolean
-    portalUrl?: string
-    error?: string
-  }
+    if (!response.ok || !data.ok || !data.portalUrl) {
+      return {
+        ok: false,
+        error:
+          data.error ||
+          (response.status === 401
+            ? 'Your session expired. Please sign in again.'
+            : 'Unable to open Manage Billing right now. Please try again.')
+      }
+    }
 
-  if (!response.ok || !data.ok || !data.portalUrl) {
+    return { ok: true, portalUrl: data.portalUrl }
+  } catch {
     return {
       ok: false,
-      error: data.error || `Unable to open customer portal (${response.status}).`
+      error: 'Unable to reach the billing service. Check your internet connection and try again.'
     }
   }
-
-  return { ok: true, portalUrl: data.portalUrl }
 }

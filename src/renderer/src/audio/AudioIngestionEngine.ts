@@ -55,9 +55,12 @@ export class AudioIngestionEngine {
   // VAD Engine
   private vadEngine: SileroVadEngine | null = null
 
-  // Cough Mute & Calibration Monitor State
+  // Cough Mute, System Audio Mute & Output Sink State
   private isCoughMuted: boolean = false
+  private isSystemAudioMuted: boolean = false
   private activeGainA: number = 1.0
+  private activeGainB: number = 1.0
+  private outputDeviceId: string = 'default'
   private isMonitorLoopbackActive: boolean = false
   private monitorGainNode: GainNode | null = null
 
@@ -92,6 +95,8 @@ export class AudioIngestionEngine {
     if (this.audioContext.state === 'suspended') {
       await this.audioContext.resume()
     }
+
+    await this.applyOutputSinkId(this.audioContext, this.outputDeviceId)
 
     if (!this.workletLoaded) {
       const blob = new Blob([PCM_PROCESSOR_CODE], { type: 'application/javascript' })
@@ -196,6 +201,7 @@ export class AudioIngestionEngine {
     gainB: number
     deviceIdA?: string
     deviceIdB?: string
+    outputDeviceId?: string
     captureChannelA?: boolean
     captureChannelB?: boolean
   }): Promise<void> {
@@ -206,6 +212,10 @@ export class AudioIngestionEngine {
 
     try {
       this.activeGainA = options.gainA
+      this.activeGainB = options.gainB
+      if (options.outputDeviceId) {
+        this.outputDeviceId = options.outputDeviceId
+      }
       const ctx = await this.ensureAudioContext()
 
       // Initialize Silero VAD v5 ONNX Engine
@@ -314,26 +324,37 @@ export class AudioIngestionEngine {
       if (this.streamChannelB) {
         this.sourceNodeB = ctx.createMediaStreamSource(this.streamChannelB)
         this.gainNodeB = ctx.createGain()
-        this.gainNodeB.gain.value = options.gainB
+        this.gainNodeB.gain.value = this.isSystemAudioMuted ? 0.0 : options.gainB
 
         this.workletNodeB = new AudioWorkletNode(ctx, 'pcm-processor', {
           processorOptions: { channelId: 'channel_b' }
         })
 
+        if (this.isSystemAudioMuted) {
+          this.workletNodeB.port.postMessage({ type: 'set-mute', muted: true })
+        }
+
         this.workletNodeB.port.onmessage = (event) => {
           const { channelId, pcmData, rmsDb, peakDb, isClipping, timestampMs } = event.data
           const samples = new Int16Array(pcmData)
-          this.bufferChannelB.write(samples)
+
+          if (!this.isSystemAudioMuted) {
+            this.bufferChannelB.write(samples)
+          }
 
           this.callbacks.onLevelMetric({
             channelId,
-            rmsDb,
-            peakDb,
-            isClipping,
+            rmsDb: this.isSystemAudioMuted ? -60 : rmsDb,
+            peakDb: this.isSystemAudioMuted ? -60 : peakDb,
+            isClipping: this.isSystemAudioMuted ? false : isClipping,
             timestampMs
           })
 
           this.callbacks.onPcmChunk(channelId, samples)
+
+          if (this.isSystemAudioMuted) {
+            return
+          }
 
           // Feed into 30ms (480-sample) accumulator for Silero VAD
           for (let i = 0; i < samples.length; i++) {
@@ -366,6 +387,8 @@ export class AudioIngestionEngine {
     const clampedGain = Math.max(0.0, Math.min(2.0, gainMultiplier))
     if (channelId === 'channel_a') {
       this.activeGainA = clampedGain
+    } else {
+      this.activeGainB = clampedGain
     }
     if (!this.audioContext) return
 
@@ -375,7 +398,94 @@ export class AudioIngestionEngine {
         this.gainNodeA.gain.setTargetAtTime(clampedGain, now, 0.03)
       }
     } else if (channelId === 'channel_b' && this.gainNodeB) {
-      this.gainNodeB.gain.setTargetAtTime(clampedGain, now, 0.03)
+      if (!this.isSystemAudioMuted) {
+        this.gainNodeB.gain.setTargetAtTime(clampedGain, now, 0.03)
+      }
+    }
+  }
+
+  /**
+   * Instantaneous mute toggle for Channel B (System / Headphones incoming audio capture).
+   */
+  public setSystemAudioMuted(muted: boolean): void {
+    this.isSystemAudioMuted = muted
+
+    if (this.workletNodeB) {
+      this.workletNodeB.port.postMessage({ type: 'set-mute', muted })
+    }
+
+    if (this.audioContext && this.gainNodeB) {
+      const now = this.audioContext.currentTime
+      this.gainNodeB.gain.cancelScheduledValues(now)
+      this.gainNodeB.gain.setValueAtTime(muted ? 0.0 : this.activeGainB, now)
+    }
+
+    if (muted) {
+      this.vadAccumulatorIndexB = 0
+      this.bufferChannelB.clear()
+    }
+  }
+
+  /**
+   * Hot-swap the active microphone input stream seamlessly mid-session with zero WebSocket drop.
+   */
+  public async switchInputDevice(
+    deviceId: string,
+    options: { noiseSuppression: boolean; echoCancellation: boolean }
+  ): Promise<void> {
+    if (!this.isRunning || !this.audioContext || !this.gainNodeA) return
+
+    const audioConstraints: MediaTrackConstraints = {
+      channelCount: 1,
+      sampleRate: 16000,
+      echoCancellation: options.echoCancellation,
+      noiseSuppression: options.noiseSuppression,
+      autoGainControl: false
+    }
+    if (deviceId && deviceId !== 'default') {
+      audioConstraints.deviceId = { exact: deviceId }
+    }
+
+    const nextStream = await navigator.mediaDevices.getUserMedia({
+      audio: audioConstraints,
+      video: false
+    })
+
+    const nextSource = this.audioContext.createMediaStreamSource(nextStream)
+
+    if (this.sourceNodeA) {
+      try {
+        this.sourceNodeA.disconnect()
+      } catch {
+        // Ignore already disconnected
+      }
+    }
+    if (this.streamChannelA) {
+      this.streamChannelA.getTracks().forEach((track) => track.stop())
+    }
+
+    this.streamChannelA = nextStream
+    this.sourceNodeA = nextSource
+    this.sourceNodeA.connect(this.gainNodeA)
+  }
+
+  private async applyOutputSinkId(ctx: AudioContext, deviceId: string): Promise<void> {
+    const sinkable = ctx as AudioContext & { setSinkId?: (id: string) => Promise<void> }
+    if (typeof sinkable.setSinkId !== 'function') return
+    try {
+      await sinkable.setSinkId(!deviceId || deviceId === 'default' ? '' : deviceId)
+    } catch (err) {
+      console.warn('[DUALAI-AUDIO] Unable to switch audio output sink:', err)
+    }
+  }
+
+  /**
+   * Switch the active audio output sink (headphones / speakers) immediately.
+   */
+  public async setOutputDevice(deviceId: string): Promise<void> {
+    this.outputDeviceId = deviceId || 'default'
+    if (this.audioContext && this.audioContext.state !== 'closed') {
+      await this.applyOutputSinkId(this.audioContext, this.outputDeviceId)
     }
   }
 

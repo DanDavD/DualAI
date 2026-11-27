@@ -970,6 +970,105 @@ export class PaddleFulfillmentService {
   // Part 3: Customer Portal Session Minting
   // ==========================================================================
 
+  private formatHumanDate(iso?: string | null): string | null {
+    if (!iso) return null
+    const date = new Date(iso)
+    if (Number.isNaN(date.getTime())) return null
+    return date.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      timeZone: 'UTC'
+    })
+  }
+
+  private extractPaddleErrorCode(err: unknown): string {
+    if (err instanceof ApiError && typeof err.code === 'string') {
+      return err.code
+    }
+    if (err && typeof err === 'object' && typeof (err as { code?: unknown }).code === 'string') {
+      return (err as { code: string }).code
+    }
+    return ''
+  }
+
+  /**
+   * Maps every known Paddle Billing API error code and network failure to a calm,
+   * consumer-friendly message enriched with authoritative dates from the DB/Paddle.
+   */
+  private mapPaddleBillingError(
+    err: unknown,
+    operation: 'cancel' | 'undo_cancel' | 'checkout' | 'portal',
+    synced?: AccountSubscriptionSummary | null
+  ): string {
+    const code = this.extractPaddleErrorCode(err)
+
+    if (code === 'subscription_locked_pending_changes') {
+      const dateStr = this.formatHumanDate(synced?.scheduledChangeAt)
+      if (synced?.scheduledChangeAction === 'cancel') {
+        return dateStr
+          ? `Your subscription is already scheduled to end on ${dateStr}. You keep full access and all remaining hours until then.`
+          : 'Your subscription is already scheduled to end at the close of your current billing period.'
+      }
+      if (synced?.scheduledChangeAction === 'pause') {
+        return dateStr
+          ? `Your subscription is scheduled to pause on ${dateStr}. Review or change this in Manage Billing.`
+          : 'Your subscription is already scheduled to pause. Review or change this in Manage Billing.'
+      }
+      if (synced?.scheduledChangeAction === 'resume') {
+        return dateStr
+          ? `Your subscription is scheduled to resume on ${dateStr}. Review or change this in Manage Billing.`
+          : 'Your subscription is scheduled to resume. Review or change this in Manage Billing.'
+      }
+      return 'Your subscription already has a pending change scheduled. Please review it in Manage Billing.'
+    }
+
+    if (code === 'subscription_locked_renewal') {
+      return 'Your subscription is currently renewing. Please try again in a few minutes.'
+    }
+
+    if (code === 'subscription_locked_processing') {
+      return 'A billing update is currently being processed. Please try again in a moment.'
+    }
+
+    if (
+      code === 'subscription_not_active' ||
+      code === 'subscription_is_canceled' ||
+      code === 'subscription_update_when_canceled' ||
+      code === 'subscription_cannot_be_canceled'
+    ) {
+      if (synced?.status === 'canceled') {
+        return 'This subscription has already ended.'
+      }
+      if (synced?.status === 'past_due') {
+        return 'Your subscription has a past-due payment. Please update your payment method in Manage Billing.'
+      }
+      if (synced?.status === 'paused') {
+        return 'Your subscription is currently paused. You can resume or manage it in Manage Billing.'
+      }
+      return 'This subscription is not currently active.'
+    }
+
+    if (code === 'subscription_payment_declined' || code === 'transaction_payment_failed') {
+      return 'Your payment method could not be charged. Please update your card in Manage Billing.'
+    }
+
+    if (code === 'too_many_requests' || code === 'rate_limit_exceeded') {
+      return 'The billing service is temporarily busy. Please try again in a moment.'
+    }
+
+    if (operation === 'cancel') {
+      return 'Unable to cancel your subscription right now. Please try again or use Manage Billing.'
+    }
+    if (operation === 'undo_cancel') {
+      return 'Unable to keep your subscription right now. Please try again or use Manage Billing.'
+    }
+    if (operation === 'portal') {
+      return 'Unable to open Manage Billing right now. Please try again in a moment.'
+    }
+    return 'Unable to start checkout right now. Please try again in a moment.'
+  }
+
   /**
    * Mints an authenticated Paddle Customer Portal session URL.
    * Client-supplied customer IDs are never trusted: customer ID is resolved server-side.
@@ -981,7 +1080,7 @@ export class PaddleFulfillmentService {
     if (!this.paddleClient) {
       return {
         ok: false,
-        error: 'Paddle API key is not configured on Gateway.'
+        error: 'Billing portal is temporarily unavailable.'
       }
     }
 
@@ -989,7 +1088,8 @@ export class PaddleFulfillmentService {
     if (!resolved || !resolved.customerId) {
       return {
         ok: false,
-        error: 'No active Paddle subscription or customer record found for this account.'
+        error:
+          'No billing history yet. Once you choose a paid plan, your invoices and payment settings will appear here.'
       }
     }
 
@@ -1004,7 +1104,7 @@ export class PaddleFulfillmentService {
       if (!portalUrl) {
         return {
           ok: false,
-          error: 'Paddle did not return a customer portal overview URL.'
+          error: 'Unable to open Manage Billing right now. Please try again in a moment.'
         }
       }
 
@@ -1013,10 +1113,9 @@ export class PaddleFulfillmentService {
         portalUrl
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Paddle customer portal session failed.'
       return {
         ok: false,
-        error: msg
+        error: this.mapPaddleBillingError(err, 'portal')
       }
     }
   }
@@ -1211,36 +1310,133 @@ export class PaddleFulfillmentService {
   }
 
   /**
+   * Reconciles a single subscription directly from the live Paddle API into
+   * Supabase and in-memory mirrors so stale DB rows self-heal automatically.
+   */
+  private async syncSubscriptionFromPaddle(
+    subscriptionId: string,
+    userId: string,
+    fallbackCustomerId: string
+  ): Promise<AccountSubscriptionSummary | null> {
+    if (!this.paddleClient) return null
+    try {
+      const live = (await this.paddleClient.subscriptions.get(subscriptionId)) as any
+      if (!live?.id) return null
+
+      const firstItem = Array.isArray(live.items) ? live.items[0] : undefined
+      const priceId = firstItem?.price?.id || ''
+      const productId = firstItem?.price?.productId || firstItem?.price?.product_id || ''
+      const nextStatus = String(live.status || 'active').toLowerCase()
+      const scheduledChange = live.scheduledChange || live.scheduled_change || null
+      const scheduledAction = scheduledChange?.action || null
+      const scheduledAt = scheduledChange?.effectiveAt || scheduledChange?.effective_at || null
+      const nextBilledAt = live.nextBilledAt || live.next_billed_at || null
+      const resolvedCustomerId = live.customerId || live.customer_id || fallbackCustomerId
+      const eventTimestamp = live.updatedAt || live.updated_at || new Date().toISOString()
+
+      await this.upsertSubscriptionMirror({
+        subscriptionId: live.id,
+        customerId: resolvedCustomerId,
+        userId,
+        status: nextStatus,
+        priceId,
+        productId,
+        scheduledChangeAction: scheduledAction,
+        scheduledChangeAt: scheduledAt,
+        paddleCreatedAt:
+          live.createdAt || live.created_at
+            ? new Date(live.createdAt || live.created_at).toISOString()
+            : null,
+        lastEventAt: eventTimestamp
+      })
+
+      if (nextStatus === 'canceled') {
+        await this.quotaStore.syncSubscriptionMetadata({
+          userId,
+          subscriptionStatus: 'canceled'
+        })
+      }
+
+      return this.toSubscriptionSummary({
+        subscriptionId: live.id,
+        status: nextStatus,
+        priceId,
+        productId,
+        scheduledChangeAction: scheduledAction,
+        scheduledChangeAt: scheduledAt,
+        nextBilledAt
+      })
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Explicitly reconciles the user's active subscription against live Paddle API
+   * (used on explicit Account Refresh or post-portal return) so any delayed or
+   * missed webhook self-heals into Supabase immediately.
+   */
+  public async reconcileActiveSubscriptionForUser(user: {
+    userId: string
+    email?: string
+  }): Promise<AccountSubscriptionSummary | null> {
+    const current = await this.getActiveSubscriptionForUser(user)
+    if (!current || !this.paddleClient) {
+      return current
+    }
+    const resolvedCustomer = await this.resolveCustomerIdForUser(user)
+    const synced = await this.syncSubscriptionFromPaddle(
+      current.subscriptionId,
+      user.userId,
+      resolvedCustomer?.customerId || ''
+    )
+    return synced || current
+  }
+
+  /**
    * Cancels the authenticated user's own subscription via Paddle API with strict
    * server-side ownership verification and safe `next_billing_period` default.
    */
   public async cancelSubscriptionForUser(user: {
     userId: string
     email?: string
-  }): Promise<{ ok: boolean; subscription?: AccountSubscriptionSummary; error?: string }> {
+  }): Promise<{
+    ok: boolean
+    subscription?: AccountSubscriptionSummary
+    alreadyScheduled?: boolean
+    message?: string
+    error?: string
+  }> {
     if (!this.paddleClient) {
-      return { ok: false, error: 'Paddle API client is not configured on Gateway.' }
+      return { ok: false, error: 'Billing service is temporarily unavailable.' }
     }
 
     const activeSub = await this.getActiveSubscriptionForUser(user)
     if (!activeSub || activeSub.status === 'canceled') {
-      return { ok: false, error: 'No active subscription found for your account.' }
+      return {
+        ok: false,
+        subscription: activeSub || undefined,
+        error: 'No active subscription found for your account.'
+      }
     }
     if (activeSub.scheduledChangeAction === 'cancel') {
-      return { ok: true, subscription: activeSub }
+      const endDate = this.formatHumanDate(activeSub.scheduledChangeAt)
+      return {
+        ok: true,
+        alreadyScheduled: true,
+        subscription: activeSub,
+        message: endDate
+          ? `Your subscription is already scheduled to end on ${endDate}. You keep full access and all remaining hours until then.`
+          : 'Your subscription is already scheduled to end at the close of your current billing period.'
+      }
     }
 
     const resolvedCustomer = await this.resolveCustomerIdForUser(user)
     if (!resolvedCustomer?.customerId) {
-      return { ok: false, error: 'Unable to verify Paddle customer ownership.' }
+      return { ok: false, error: 'Unable to verify your billing profile. Please try again.' }
     }
 
     const effectiveFrom = activeSub.status === 'paused' ? 'immediately' : 'next_billing_period'
-
-    const CANCEL_ERRORS: Record<string, string> = {
-      subscription_locked_renewal: 'Your subscription is about to renew. Try again shortly.',
-      subscription_locked_pending_changes: 'This subscription already has a scheduled change.'
-    }
 
     try {
       const updated = (await this.paddleClient.subscriptions.cancel(activeSub.subscriptionId, {
@@ -1251,8 +1447,9 @@ export class PaddleFulfillmentService {
       const priceId = firstItem?.price?.id || ''
       const productId = firstItem?.price?.productId || firstItem?.price?.product_id || ''
       const nextStatus = String(updated?.status || activeSub.status).toLowerCase()
-      const scheduledAction = updated?.scheduledChange?.action || null
-      const scheduledAt = updated?.scheduledChange?.effectiveAt || null
+      const scheduledChange = updated?.scheduledChange || updated?.scheduled_change || null
+      const scheduledAction = scheduledChange?.action || null
+      const scheduledAt = scheduledChange?.effectiveAt || scheduledChange?.effective_at || null
       const nowIso = new Date().toISOString()
 
       await this.upsertSubscriptionMirror({
@@ -1274,28 +1471,67 @@ export class PaddleFulfillmentService {
         })
       }
 
+      const summary = this.toSubscriptionSummary({
+        subscriptionId: activeSub.subscriptionId,
+        status: nextStatus,
+        priceId,
+        productId,
+        scheduledChangeAction: scheduledAction,
+        scheduledChangeAt: scheduledAt,
+        nextBilledAt: updated?.nextBilledAt || updated?.next_billed_at || null
+      })
+
+      const endDate = this.formatHumanDate(summary.scheduledChangeAt)
       return {
         ok: true,
-        subscription: this.toSubscriptionSummary({
-          subscriptionId: activeSub.subscriptionId,
-          status: nextStatus,
-          priceId,
-          productId,
-          scheduledChangeAction: scheduledAction,
-          scheduledChangeAt: scheduledAt,
-          nextBilledAt: updated?.nextBilledAt || null
-        })
+        alreadyScheduled: false,
+        subscription: summary,
+        message:
+          nextStatus === 'canceled'
+            ? 'Your subscription has been canceled.'
+            : endDate
+              ? `Your subscription is scheduled to end on ${endDate}. You keep full access and all remaining hours until then.`
+              : 'Your subscription is scheduled to cancel at the end of your current billing period. You keep access and remaining hours until then.'
       }
     } catch (err) {
-      if (err instanceof ApiError) {
-        return {
-          ok: false,
-          error: CANCEL_ERRORS[err.code] || err.message || 'Could not cancel subscription.'
+      const apiCode = this.extractPaddleErrorCode(err)
+
+      // Self-heal stale mirror if Paddle reports pending changes or state mismatch
+      if (
+        apiCode === 'subscription_locked_pending_changes' ||
+        apiCode === 'subscription_not_active' ||
+        apiCode === 'subscription_is_canceled' ||
+        apiCode === 'subscription_update_when_canceled' ||
+        apiCode === 'subscription_cannot_be_canceled'
+      ) {
+        const synced = await this.syncSubscriptionFromPaddle(
+          activeSub.subscriptionId,
+          user.userId,
+          resolvedCustomer.customerId
+        )
+        if (synced) {
+          if (synced.scheduledChangeAction === 'cancel') {
+            const endDate = this.formatHumanDate(synced.scheduledChangeAt)
+            return {
+              ok: true,
+              alreadyScheduled: true,
+              subscription: synced,
+              message: endDate
+                ? `Your subscription is already scheduled to end on ${endDate}. You keep full access and all remaining hours until then.`
+                : 'Your subscription is already scheduled to end at the close of your current billing period.'
+            }
+          }
+          return {
+            ok: false,
+            subscription: synced,
+            error: this.mapPaddleBillingError(err, 'cancel', synced)
+          }
         }
       }
+
       return {
         ok: false,
-        error: err instanceof Error ? err.message : 'Could not cancel subscription.'
+        error: this.mapPaddleBillingError(err, 'cancel')
       }
     }
   }
@@ -1306,19 +1542,29 @@ export class PaddleFulfillmentService {
   public async undoCancelSubscriptionForUser(user: {
     userId: string
     email?: string
-  }): Promise<{ ok: boolean; subscription?: AccountSubscriptionSummary; error?: string }> {
+  }): Promise<{
+    ok: boolean
+    subscription?: AccountSubscriptionSummary
+    alreadyActive?: boolean
+    message?: string
+    error?: string
+  }> {
     if (!this.paddleClient) {
-      return { ok: false, error: 'Paddle API client is not configured on Gateway.' }
+      return { ok: false, error: 'Billing service is temporarily unavailable.' }
     }
 
     const activeSub = await this.getActiveSubscriptionForUser(user)
     if (!activeSub || activeSub.status === 'canceled') {
-      return { ok: false, error: 'No active subscription found for your account.' }
+      return {
+        ok: false,
+        subscription: activeSub || undefined,
+        error: 'No active subscription found for your account.'
+      }
     }
 
     const resolvedCustomer = await this.resolveCustomerIdForUser(user)
     if (!resolvedCustomer?.customerId) {
-      return { ok: false, error: 'Unable to verify Paddle customer ownership.' }
+      return { ok: false, error: 'Unable to verify your billing profile. Please try again.' }
     }
 
     try {
@@ -1330,6 +1576,7 @@ export class PaddleFulfillmentService {
       const priceId = firstItem?.price?.id || ''
       const productId = firstItem?.price?.productId || firstItem?.price?.product_id || ''
       const nextStatus = String(updated?.status || activeSub.status).toLowerCase()
+      const nextBilledAt = updated?.nextBilledAt || updated?.next_billed_at || null
       const nowIso = new Date().toISOString()
 
       await this.upsertSubscriptionMirror({
@@ -1344,25 +1591,43 @@ export class PaddleFulfillmentService {
         lastEventAt: nowIso
       })
 
+      const summary = this.toSubscriptionSummary({
+        subscriptionId: activeSub.subscriptionId,
+        status: nextStatus,
+        priceId,
+        productId,
+        scheduledChangeAction: null,
+        scheduledChangeAt: null,
+        nextBilledAt
+      })
+      const renewDate = this.formatHumanDate(nextBilledAt)
+
       return {
         ok: true,
-        subscription: this.toSubscriptionSummary({
-          subscriptionId: activeSub.subscriptionId,
-          status: nextStatus,
-          priceId,
-          productId,
-          scheduledChangeAction: null,
-          scheduledChangeAt: null,
-          nextBilledAt: updated?.nextBilledAt || null
-        })
+        alreadyActive: false,
+        subscription: summary,
+        message: renewDate
+          ? `Cancellation undone. Your subscription remains active and renews on ${renewDate}.`
+          : 'Cancellation undone. Your subscription will continue as normal.'
       }
     } catch (err) {
-      if (err instanceof ApiError) {
-        return { ok: false, error: err.message || 'Could not undo cancellation.' }
+      const synced = await this.syncSubscriptionFromPaddle(
+        activeSub.subscriptionId,
+        user.userId,
+        resolvedCustomer.customerId
+      )
+      if (synced && synced.scheduledChangeAction === null && synced.status !== 'canceled') {
+        return {
+          ok: true,
+          alreadyActive: true,
+          subscription: synced,
+          message: 'Your subscription is already active and will continue as normal.'
+        }
       }
       return {
         ok: false,
-        error: err instanceof Error ? err.message : 'Could not undo cancellation.'
+        subscription: synced || undefined,
+        error: this.mapPaddleBillingError(err, 'undo_cancel', synced)
       }
     }
   }
@@ -1376,16 +1641,28 @@ export class PaddleFulfillmentService {
     user: { userId: string; email?: string }
   ): Promise<{ ok: boolean; checkoutUrl?: string; error?: string }> {
     if (!this.paddleClient) {
-      return { ok: false, error: 'Paddle API client is not configured on Gateway.' }
+      return { ok: false, error: 'Billing service is temporarily unavailable.' }
     }
 
     const plan = PLAN_CATALOG[planId as PlanId]
     if (!plan || !plan.paddlePriceId) {
-      return { ok: false, error: 'Invalid plan or missing Paddle Price ID.' }
+      return { ok: false, error: 'Selected plan is unavailable. Please choose another plan.' }
     }
 
-    // Prevent accidental double subscription on the exact same active plan
-    const existingSub = await this.getActiveSubscriptionForUser(user)
+    // Prevent accidental double subscription on the exact same active plan.
+    // Reconcile against live Paddle before blocking so a user who canceled in
+    // the Customer Portal is never wrongly blocked by a stale DB mirror.
+    let existingSub = await this.getActiveSubscriptionForUser(user)
+    if (
+      existingSub &&
+      hasPaidAccess(existingSub.status) &&
+      existingSub.planId === plan.id &&
+      existingSub.scheduledChangeAction !== 'cancel'
+    ) {
+      const reconciled = await this.reconcileActiveSubscriptionForUser(user)
+      if (reconciled) existingSub = reconciled
+    }
+
     if (
       existingSub &&
       hasPaidAccess(existingSub.status) &&
@@ -1416,13 +1693,15 @@ export class PaddleFulfillmentService {
         ? `${base}${base.includes('?') ? '&' : '?'}_ptxn=${encodeURIComponent(transaction.id)}`
         : transaction.checkout?.url
       if (!checkoutUrl) {
-        return { ok: false, error: 'Paddle did not return a checkout URL for this transaction.' }
+        return {
+          ok: false,
+          error: 'Unable to start checkout right now. Please try again in a moment.'
+        }
       }
 
       return { ok: true, checkoutUrl }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Paddle transaction creation failed.'
-      return { ok: false, error: msg }
+      return { ok: false, error: this.mapPaddleBillingError(err, 'checkout') }
     }
   }
 }

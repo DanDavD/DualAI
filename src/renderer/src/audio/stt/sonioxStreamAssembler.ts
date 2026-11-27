@@ -1,19 +1,21 @@
 /**
- * DUALAI - Soniox Unified Real-Time Paragraph & Anti-Duplication Stream Assembler
+ * DUALAI - Soniox Unified Real-Time Speaker-Separated Paragraph Stream Assembler
  * Processes single-pipeline Soniox tokens containing original speech, simultaneous
- * translation, language identification, and endpoint markers (<end>, <fin>).
+ * translation, 15-speaker diarization, language identification, and endpoint markers (<end>, <fin>).
  *
- * CORE PRODUCTION INVARIANTS:
- * 1. NEVER splits turns on speaker-ID jitter within the SAME language (rapid "sí, sí, sí"
- *    or 3 speakers of the same language coalesce cleanly into ONE coherent paragraph).
- * 2. Coalesces rapid same-language <end> bursts across a 2,000ms silence settle window
- *    so full paragraphs accumulate completely before committing.
- * 3. Splits immediately (0ms wait) ONLY on a genuine finalized LANGUAGE switch (e.g., es <-> en)
- *    or when <fin> signals confirmed audio silence.
- * 4. NEVER commits unfinalized (is_final: false) tokens and suppresses boundary duplicate
- *    re-emissions—guaranteeing zero repeated or triplicated paragraphs.
- * 5. Constrains detected languages strictly to the active source/target pair using base
- *    2-letter ISO normalization (e.g., "es-MX" -> "es", "en-US" -> "en").
+ * SUPREME TURN-SEPARATION INVARIANTS:
+ * 1. NEVER mixes two different speakers (voices) into the same paragraph. The instant a
+ *    different speaker ID produces a finalized word (e.g., Speaker 2 interrupts Speaker 1),
+ *    Speaker 1's paragraph commits immediately (0ms wait) and Speaker 2 starts a new paragraph.
+ * 2. NEVER mixes two different languages into the same paragraph (in both Conversation and
+ *    Translate modes). A finalized language switch commits immediately and opens a new row.
+ * 3. Keeps continuous speech from the SAME speaker & language coalesced across brief pauses
+ *    (up to `sameLanguageSettleMs`, default 2,000ms) so one speaker's thought stays cohesive.
+ * 4. Routes trailing finalized translation tokens back to the exact committed speaker turn
+ *    (matching speakerId + sourceLanguage) so interrupted speakers still receive their full
+ *    right-pane translation without bleeding into the next speaker's row.
+ * 5. NEVER commits unfinalized (is_final: false) tokens, keeps provisional tokens scoped to the
+ *    active speaker, and suppresses duplicate clause re-emissions.
  */
 
 import { ChannelId } from '../../../../types/audio'
@@ -73,7 +75,9 @@ interface InternalTurnState {
 }
 
 const DEFAULT_SAME_LANGUAGE_SETTLE_MS = 2000
-const RECENT_COMMIT_WINDOW_MS = 6000
+const RECENT_COMMIT_WINDOW_MS = 10000
+const MAX_RECENT_COMMITTED_TURNS = 12
+const HAS_WORD_CHAR_REGEX = /[A-Za-zÀ-ÖØ-öø-ÿ\p{L}\p{N}]/u
 
 export function normalizeBaseLang(lang?: string): string | undefined {
   if (!lang) return undefined
@@ -196,7 +200,7 @@ export class SonioxStreamAssembler {
 
       if (isTranslation) {
         sawTranslationActivity = true
-        const targetTurn = this.resolveTranslationTargetTurn(tokenSourceLang)
+        const targetTurn = this.resolveTranslationTargetTurn(tokenSpeaker, tokenSourceLang)
 
         if (targetTurn) {
           if (targetTurn === this.activeTurn) {
@@ -212,7 +216,7 @@ export class SonioxStreamAssembler {
               frameInterimTranslation += raw.text
             }
           } else {
-            // Reconcile trailing finalized translation tokens onto recently committed turn
+            // Reconcile trailing finalized translation tokens onto the exact interrupted speaker's turn
             if (isFinal) {
               targetTurn.finalTranslatedText = appendFinalSegmentSafely(
                 targetTurn.finalTranslatedText,
@@ -236,11 +240,13 @@ export class SonioxStreamAssembler {
       const effectiveLang =
         tokenLang || this.activeTurn?.sourceLanguage || this.config.sourceLang
 
-      // Split ONLY on a genuine finalized LANGUAGE switch (NEVER on speaker jitter within the same language!)
+      // SUPREME LAW: Split immediately (0ms wait) whenever a DIFFERENT VOICE (speaker)
+      // OR a DIFFERENT LANGUAGE produces a finalized word — never combine speakers in one paragraph!
       if (
         isFinal &&
         this.activeTurn &&
-        this.isGenuineLanguageSwitch(this.activeTurn, tokenLang, raw.text)
+        (this.isGenuineSpeakerChange(this.activeTurn, tokenSpeaker, raw.text) ||
+          this.isGenuineLanguageSwitch(this.activeTurn, tokenLang, raw.text))
       ) {
         this.commitActiveTurn()
       }
@@ -248,14 +254,15 @@ export class SonioxStreamAssembler {
       if (!this.activeTurn) {
         this.activeTurn = this.createTurn(effectiveSpeaker, effectiveLang)
       } else {
-        if (isFinal && tokenSpeaker) {
-          this.activeTurn.speakerId = tokenSpeaker
-        }
-        // Before any finalized text is locked in, immediately adopt the detected language
-        // (even on provisional words) so live draft colors match the spoken language on frame 1.
-        if (tokenLang && !cleanJoinedText(this.activeTurn.finalOriginalText)) {
-          this.activeTurn.sourceLanguage = tokenLang
-          this.activeTurn.targetLanguage = this.resolveTargetLanguage(tokenLang)
+        // Before any finalized text is locked in on a fresh turn, adopt the first confirmed speaker & language
+        if (!cleanJoinedText(this.activeTurn.finalOriginalText)) {
+          if (tokenSpeaker) {
+            this.activeTurn.speakerId = tokenSpeaker
+          }
+          if (tokenLang) {
+            this.activeTurn.sourceLanguage = tokenLang
+            this.activeTurn.targetLanguage = this.resolveTargetLanguage(tokenLang)
+          }
         }
       }
 
@@ -307,11 +314,26 @@ export class SonioxStreamAssembler {
           }
         }
       } else {
-        // New provisional speech also extends any active 2s settle countdown
-        if (raw.text.trim().length > 0) {
-          this.clearSettleTimer()
+        // Provisional speech: keep a different interrupting speaker's unfinalized words
+        // from visually bleeding into the current speaker's paragraph before finalization.
+        const isDifferentProvisionalSpeaker =
+          Boolean(tokenSpeaker) &&
+          Boolean(this.activeTurn.speakerId) &&
+          tokenSpeaker !== this.activeTurn.speakerId &&
+          cleanJoinedText(this.activeTurn.finalOriginalText).length > 0
+
+        const isDifferentProvisionalLanguage =
+          Boolean(tokenLang) &&
+          Boolean(this.activeTurn.sourceLanguage) &&
+          tokenLang !== this.activeTurn.sourceLanguage &&
+          cleanJoinedText(this.activeTurn.finalOriginalText).length > 0
+
+        if (!isDifferentProvisionalSpeaker && !isDifferentProvisionalLanguage) {
+          if (raw.text.trim().length > 0) {
+            this.clearSettleTimer()
+          }
+          frameInterimOriginal += raw.text
         }
-        frameInterimOriginal += raw.text
       }
     }
 
@@ -364,15 +386,12 @@ export class SonioxStreamAssembler {
 
   /**
    * Maps any raw language tag (e.g. "es-MX", "en-US") strictly into the active language pair.
-   * Ignores noisy 3rd-language detections on short interjections or accents.
+   * Preserves both sourceLang and targetLang tags in both Conversation and Translate modes
+   * so speakers speaking different languages never collapse into a single paragraph.
    */
   private constrainToActiveLanguagePair(rawLang?: string): string | undefined {
     const base = normalizeBaseLang(rawLang)
     if (!base) return undefined
-
-    if (this.config.operatingMode === 'translate') {
-      return this.config.sourceLang
-    }
 
     if (base === this.config.sourceLang || base === this.config.targetLang) {
       return base
@@ -381,25 +400,67 @@ export class SonioxStreamAssembler {
   }
 
   /**
-   * Only triggers an immediate mid-stream turn split when a genuine finalized word
-   * switches from Language A to Language B (e.g., Spanish -> English in Conversation mode).
-   * Punctuation-only tokens or same-language speaker changes NEVER split the paragraph.
+   * Triggers an immediate turn split whenever a different diarized voice (speaker)
+   * produces a finalized word after the current speaker has already spoken.
+   * Ignores isolated punctuation tokens so trailing punctuation stays with the first speaker.
+   */
+  private isGenuineSpeakerChange(
+    current: InternalTurnState,
+    nextSpeaker: string | undefined,
+    rawText: string
+  ): boolean {
+    if (!nextSpeaker || !current.speakerId || nextSpeaker === current.speakerId) return false
+    if (cleanJoinedText(current.finalOriginalText).length === 0) return false
+    if (!HAS_WORD_CHAR_REGEX.test(rawText)) return false
+    return true
+  }
+
+  /**
+   * Triggers an immediate turn split whenever a genuine finalized word switches
+   * between the active language pair (e.g., Spanish <-> English) in either operating mode.
    */
   private isGenuineLanguageSwitch(
     current: InternalTurnState,
     nextLang: string | undefined,
     rawText: string
   ): boolean {
-    if (this.config.operatingMode !== 'conversation') return false
     if (!nextLang || !current.sourceLanguage || nextLang === current.sourceLanguage) return false
     if (cleanJoinedText(current.finalOriginalText).length === 0) return false
-    // Ignore punctuation-only tokens that may carry an ambiguous language tag
-    if (!/[A-Za-zÀ-ÖØ-öø-ÿ\p{L}\p{N}]/u.test(rawText)) return false
+    if (!HAS_WORD_CHAR_REGEX.test(rawText)) return false
     return true
   }
 
-  private resolveTranslationTargetTurn(tokenSourceLang?: string): InternalTurnState | null {
-    // 1. Prioritize a recently committed turn whose translation is still empty and matches sourceLang
+  /**
+   * Routes translation tokens strictly to the matching speaker + source language turn.
+   * When Speaker 2 interrupts Speaker 1, trailing translation tokens for Speaker 1
+   * still land cleanly on Speaker 1's committed row instead of bleeding into Speaker 2.
+   */
+  private resolveTranslationTargetTurn(
+    tokenSpeaker?: string,
+    tokenSourceLang?: string
+  ): InternalTurnState | null {
+    // 1. Exact speaker + language match: check activeTurn first, then recently committed turns
+    if (tokenSpeaker) {
+      if (
+        this.activeTurn &&
+        this.activeTurn.speakerId === tokenSpeaker &&
+        (!tokenSourceLang || this.activeTurn.sourceLanguage === tokenSourceLang)
+      ) {
+        return this.activeTurn
+      }
+
+      for (let i = this.recentCommitted.length - 1; i >= 0; i--) {
+        const candidate = this.recentCommitted[i]
+        if (
+          candidate.speakerId === tokenSpeaker &&
+          (!tokenSourceLang || candidate.sourceLanguage === tokenSourceLang)
+        ) {
+          return candidate
+        }
+      }
+    }
+
+    // 2. Fallback when translation token omits speaker: prioritize recently committed turn with empty translation
     for (let i = this.recentCommitted.length - 1; i >= 0; i--) {
       const candidate = this.recentCommitted[i]
       const langMatches = !tokenSourceLang || candidate.sourceLanguage === tokenSourceLang
@@ -408,7 +469,7 @@ export class SonioxStreamAssembler {
       }
     }
 
-    // 2. Match activeTurn by sourceLanguage (most common steady-state path)
+    // 3. Match activeTurn by sourceLanguage
     if (this.activeTurn) {
       const langMatches = !tokenSourceLang || this.activeTurn.sourceLanguage === tokenSourceLang
       if (langMatches) {
@@ -416,7 +477,7 @@ export class SonioxStreamAssembler {
       }
     }
 
-    // 3. Match most recent committed turn by sourceLanguage (trailing tokens right after language switch)
+    // 4. Match most recent committed turn by sourceLanguage
     for (let i = this.recentCommitted.length - 1; i >= 0; i--) {
       const candidate = this.recentCommitted[i]
       const langMatches = !tokenSourceLang || candidate.sourceLanguage === tokenSourceLang
@@ -512,7 +573,7 @@ export class SonioxStreamAssembler {
     if (!snap) return
 
     this.recentCommitted.push(turn)
-    if (this.recentCommitted.length > 8) {
+    if (this.recentCommitted.length > MAX_RECENT_COMMITTED_TURNS) {
       this.recentCommitted.shift()
     }
 

@@ -23,6 +23,7 @@ export interface ParagraphAccumulatorCallbacks {
 interface ChannelTurnBuffer {
   turnId: string
   channelId: ChannelId
+  speakerId?: string
   speakerLabel: string
   language: string
   startedAtMs: number
@@ -101,7 +102,7 @@ export class ParagraphTurnAccumulator {
     const cleanText = utterance.text.trim()
     if (!cleanText) return
 
-    const buf = this.ensureBuffer(utterance)
+    const buf = this.ensureBuffer(utterance, true)
     buf.finalizedSegments.push(cleanText)
 
     const tokenOffset = buf.finalizedTokens.length
@@ -188,19 +189,38 @@ export class ParagraphTurnAccumulator {
     return Boolean(this.buffers[channelId])
   }
 
-  private ensureBuffer(utterance: TranscriptUtterance): ChannelTurnBuffer {
+  private ensureBuffer(utterance: TranscriptUtterance, isFinal: boolean = false): ChannelTurnBuffer {
     const existing = this.buffers[utterance.channelId]
     if (existing) {
-      if (utterance.language) {
-        existing.language = utterance.language
+      const incomingBaseLang = utterance.language?.trim().toLowerCase().split(/[-_]/)[0]
+      const existingBaseLang = existing.language?.trim().toLowerCase().split(/[-_]/)[0]
+      const isDifferentSpeaker =
+        Boolean(utterance.speakerId) &&
+        Boolean(existing.speakerId) &&
+        utterance.speakerId !== existing.speakerId
+      const isDifferentLanguage =
+        Boolean(incomingBaseLang) &&
+        Boolean(existingBaseLang) &&
+        incomingBaseLang !== existingBaseLang
+
+      if (isFinal && existing.finalizedSegments.length > 0 && (isDifferentSpeaker || isDifferentLanguage)) {
+        this.commitChannel(utterance.channelId)
+      } else {
+        if (utterance.language && existing.finalizedSegments.length === 0) {
+          existing.language = utterance.language
+        }
+        if (utterance.speakerId && existing.finalizedSegments.length === 0) {
+          existing.speakerId = utterance.speakerId
+        }
+        return existing
       }
-      return existing
     }
 
     this.turnSequence += 1
     const created: ChannelTurnBuffer = {
       turnId: `para-${utterance.channelId}-${Date.now()}-${this.turnSequence}`,
       channelId: utterance.channelId,
+      speakerId: utterance.speakerId,
       speakerLabel: utterance.speakerLabel,
       language: utterance.language,
       startedAtMs: utterance.timestampMs || Date.now(),
@@ -244,6 +264,7 @@ export class ParagraphTurnAccumulator {
     return {
       id: buf.turnId,
       channelId: buf.channelId,
+      speakerId: buf.speakerId,
       speakerLabel: buf.speakerLabel,
       language: buf.language,
       text: fullText,

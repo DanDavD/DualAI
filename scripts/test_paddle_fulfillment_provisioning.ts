@@ -548,6 +548,91 @@ async function runPaddleFulfillmentSuite(): Promise<void> {
       }
       assert.equal(undoData.ok, true)
       assert.equal(undoData.subscription.scheduledChangeAction, null)
+
+      // Self-healing reconciliation when Paddle already has a scheduled cancellation
+      // (e.g. canceled in Customer Portal while local mirror was stale)
+      fulfillmentClient.subscriptions.cancel = async () => {
+        const lockedErr = new Error('This subscription already has a scheduled change.') as Error & {
+          code: string
+        }
+        lockedErr.code = 'subscription_locked_pending_changes'
+        throw lockedErr
+      }
+      fulfillmentClient.subscriptions.get = async (subId) => {
+        assert.equal(subId, 'sub_live_cancel_test_001')
+        return {
+          id: subId,
+          customerId: 'ctm_test_dualai_001',
+          status: 'active',
+          items: [{ price: { id: 'pri_01m8aw2f6rzakqqenynbztq74f', productId: 'pro_01m8avhb2vpt2qhxh6mfchxv7x' } }],
+          scheduledChange: { action: 'cancel', effectiveAt: nextPeriodEnd },
+          nextBilledAt: null,
+          updatedAt: new Date().toISOString()
+        } as any
+      }
+
+      const reconciledCancelRes = await fetch(`${gw.baseUrl}/v1/billing/subscription/cancel`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${session.accessToken}` }
+      })
+      assert.equal(reconciledCancelRes.status, 200)
+      const reconciledData = (await reconciledCancelRes.json()) as {
+        ok: boolean
+        alreadyScheduled?: boolean
+        message?: string
+        subscription: { scheduledChangeAction: string | null; scheduledChangeAt: string | null }
+      }
+      assert.equal(reconciledData.ok, true, 'Already-scheduled cancel on Paddle must reconcile idempotently')
+      assert.equal(reconciledData.alreadyScheduled, true)
+      assert.equal(reconciledData.subscription.scheduledChangeAction, 'cancel')
+      assert.ok(reconciledData.message && reconciledData.message.includes('already scheduled to end on'))
+
+      // Scheduled pause on Paddle must return friendly date-aware error + synced subscription
+      await gw.paddleFulfillment.upsertSubscriptionMirror({
+        subscriptionId: 'sub_live_cancel_test_001',
+        customerId: 'ctm_test_dualai_001',
+        userId: session.user.userId,
+        status: 'active',
+        priceId: 'pri_01m8aw2f6rzakqqenynbztq74f',
+        productId: 'pro_01m8avhb2vpt2qhxh6mfchxv7x',
+        scheduledChangeAction: null,
+        scheduledChangeAt: null,
+        lastEventAt: new Date(Date.now() + 1000).toISOString()
+      })
+      fulfillmentClient.subscriptions.get = async (subId) =>
+        ({
+          id: subId,
+          customerId: 'ctm_test_dualai_001',
+          status: 'active',
+          items: [{ price: { id: 'pri_01m8aw2f6rzakqqenynbztq74f', productId: 'pro_01m8avhb2vpt2qhxh6mfchxv7x' } }],
+          scheduledChange: { action: 'pause', effectiveAt: nextPeriodEnd },
+          nextBilledAt: null,
+          updatedAt: new Date(Date.now() + 2000).toISOString()
+        }) as any
+
+      const pausedConflictRes = await fetch(`${gw.baseUrl}/v1/billing/subscription/cancel`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${session.accessToken}` }
+      })
+      assert.equal(pausedConflictRes.status, 400)
+      const pausedConflictData = (await pausedConflictRes.json()) as {
+        ok: boolean
+        error?: string
+        subscription?: { scheduledChangeAction: string | null }
+      }
+      assert.equal(pausedConflictData.ok, false)
+      assert.equal(pausedConflictData.subscription?.scheduledChangeAction, 'pause')
+      assert.ok(pausedConflictData.error?.includes('scheduled to pause on'))
+
+      // Explicit ?sync=1 on GET /v1/account/quota must live-reconcile from Paddle
+      const liveSyncQuotaRes = await fetch(`${gw.baseUrl}/v1/account/quota?sync=1`, {
+        headers: { Authorization: `Bearer ${session.accessToken}` }
+      })
+      assert.equal(liveSyncQuotaRes.status, 200)
+      const liveSyncQuotaData = (await liveSyncQuotaRes.json()) as {
+        subscription: { scheduledChangeAction: string | null }
+      }
+      assert.equal(liveSyncQuotaData.subscription.scheduledChangeAction, 'pause')
     }
 
     // Approved refund adjustment must claw back hours atomically and idempotently
