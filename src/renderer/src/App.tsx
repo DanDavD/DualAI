@@ -6,6 +6,7 @@ import { FloatingTransportPill } from './components/Footer/FloatingTransportPill
 import { GlossaryModal } from './components/Modals/GlossaryModal'
 import { SettingsModal } from './components/Modals/SettingsModal'
 import { AccountPlanModal } from './components/Modals/AccountPlanModal'
+import { InteractiveTourOverlay } from './components/Onboarding/InteractiveTourOverlay'
 
 const WorkspaceContent: React.FC = () => {
   return (
@@ -25,6 +26,9 @@ const WorkspaceContent: React.FC = () => {
       <GlossaryModal />
       <SettingsModal />
       <AccountPlanModal />
+
+      {/* INTERACTIVE NEW-ACCOUNT GUIDED WALKTHROUGH OVERLAY */}
+      <InteractiveTourOverlay />
     </div>
   )
 }

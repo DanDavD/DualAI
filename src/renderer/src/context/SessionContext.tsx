@@ -94,6 +94,7 @@ const STORAGE_KEY_LOOPBACK_DEVICE = 'dualai_loopback_device_id'
 const STORAGE_KEY_INPUT_DEVICE = 'dualai_input_device_id'
 const STORAGE_KEY_OUTPUT_DEVICE = 'dualai_output_device_id'
 const STORAGE_KEY_ACCOUNT_CACHE = 'dualai_account_display_cache'
+const STORAGE_KEY_TOUR_COMPLETED = 'dualai_onboarding_tour_completed_v1'
 
 interface AccountDisplayCache {
   userId: string
@@ -256,6 +257,11 @@ export interface SessionState {
   isGatewayAuthenticated: boolean
   isQuotaExhausted: boolean
 
+  // Interactive Onboarding Product Tour State
+  isProductTourOpen: boolean
+  startProductTour: () => void
+  closeProductTour: (markCompleted?: boolean) => void
+
   // Actions
   setAudioRoute: (route: AudioRouteMode) => void
   setOperatingMode: (mode: OperatingMode) => void
@@ -374,6 +380,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     'audio' | 'interpretation' | 'reading' | 'shortcuts' | 'privacy'
   >('audio')
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false)
+  const [isProductTourOpen, setIsProductTourOpen] = useState(false)
+  const tourAutoTriggeredRef = useRef<boolean>(false)
 
   // Zero-Trust SaaS Account & Authoritative Quota State
   const [authSession, setAuthSession] = useState<AuthenticatedSession | null>(null)
@@ -2453,6 +2461,45 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const openAccountModal = useCallback(() => setIsAccountModalOpen(true), [])
   const closeAccountModal = useCallback(() => setIsAccountModalOpen(false), [])
 
+  const startProductTour = useCallback(() => {
+    setIsSettingsModalOpen(false)
+    setIsAccountModalOpen(false)
+    setIsGlossaryModalOpen(false)
+    setIsProductTourOpen(true)
+  }, [])
+
+  const closeProductTour = useCallback((markCompleted = true) => {
+    setIsProductTourOpen(false)
+    if (!markCompleted) return
+    try {
+      localStorage.setItem(STORAGE_KEY_TOUR_COMPLETED, 'done')
+    } catch {
+      // Ignore storage errors
+    }
+  }, [])
+
+  // Auto-launch the interactive guided tour strictly once on first app open (independent of login)
+  useEffect(() => {
+    if (tourAutoTriggeredRef.current) return
+    if (isAccountModalOpen || isSettingsModalOpen || isGlossaryModalOpen || isAudioActive) return
+
+    try {
+      if (localStorage.getItem(STORAGE_KEY_TOUR_COMPLETED) === 'done') {
+        tourAutoTriggeredRef.current = true
+        return
+      }
+    } catch {
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      tourAutoTriggeredRef.current = true
+      setIsProductTourOpen(true)
+    }, 520)
+
+    return () => window.clearTimeout(timer)
+  }, [isAccountModalOpen, isSettingsModalOpen, isGlossaryModalOpen, isAudioActive])
+
   return (
     <SessionContext.Provider
       value={{
@@ -2525,6 +2572,9 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         isAccountModalOpen,
         isGatewayAuthenticated,
         isQuotaExhausted,
+        isProductTourOpen,
+        startProductTour,
+        closeProductTour,
         setAudioRoute,
         setOperatingMode,
         setDomainId,

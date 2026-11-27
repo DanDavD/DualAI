@@ -91,7 +91,8 @@ export const SettingsModal: React.FC = () => {
     setDomainId,
     operatingMode,
     setOperatingMode,
-    settingsInitialTab
+    settingsInitialTab,
+    startProductTour
   } = useSession()
 
   const [activeTab, setActiveTab] = useState<SettingsTabId>(settingsInitialTab || 'audio')
@@ -815,7 +816,14 @@ export const SettingsModal: React.FC = () => {
 
         {/* Clean Footer */}
         <div className="flex h-12 shrink-0 items-center justify-between border-t border-white/[0.07] px-5 text-[11px] text-white/45">
-          <span>Changes are saved automatically.</span>
+          <button
+            type="button"
+            onClick={startProductTour}
+            className="glass-control-hover flex items-center space-x-1.5 rounded-full border border-white/[0.1] bg-white/[0.05] px-3 py-1 text-[11px] font-medium text-white/75 hover:text-white"
+          >
+            <Sparkles className="h-3 w-3 text-accent-steel" strokeWidth={1.85} />
+            <span>Replay Guided Tour</span>
+          </button>
           <button
             type="button"
             onClick={closeSettingsModal}

@@ -372,7 +372,10 @@ export const FloatingTransportPill: React.FC = () => {
           </div>
 
           {/* 2. Split Headphones Control (Pause DualAI Listening + Output Device Dropdown) */}
-          <div className="flex h-9 items-center rounded-full border border-white/[0.08] bg-white/[0.045] p-0.5">
+          <div
+            data-tour-id="headphones"
+            className="flex h-9 items-center rounded-full border border-white/[0.08] bg-white/[0.045] p-0.5"
+          >
             <GlassTooltip
               label={isSystemAudioMuted ? 'Resume DualAI Listening' : 'Pause DualAI Listening'}
               description="Pauses live translation of incoming call audio without muting your speakers"
