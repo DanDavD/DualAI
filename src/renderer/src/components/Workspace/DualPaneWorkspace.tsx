@@ -1164,7 +1164,7 @@ export const DualPaneWorkspace: React.FC = () => {
                 </div>
 
                 {/* 2. Sliding Liquid Glass Mode Switcher */}
-                <div>
+                <div data-tour-id="hero-mode">
                   <GlassSegmentedControl<OperatingMode>
                     ariaLabel="Interpretation Mode"
                     value={operatingMode}
@@ -1189,6 +1189,7 @@ export const DualPaneWorkspace: React.FC = () => {
 
                 {/* 3. Listen-Only Call Audio Selector */}
                 <div
+                  data-tour-id="hero-audio-source"
                   role="radiogroup"
                   aria-label="Choose your call audio source"
                   className="grid w-full max-w-md grid-cols-2 gap-3"
