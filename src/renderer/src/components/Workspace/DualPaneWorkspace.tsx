@@ -6,7 +6,7 @@
  * and a clear plain-English audio source picker when idle.
  */
 
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react'
 import {
   ArrowDownCircle,
   Filter,
@@ -29,6 +29,7 @@ import { UtteranceCard } from './UtteranceCard'
 import { TranslationCard } from './TranslationCard'
 import { GlassSegmentedControl } from '../UI/GlassSegmentedControl'
 import { GlassTooltip } from '../UI/GlassTooltip'
+import { AcousticPulse } from '../UI/AcousticPulse'
 import { formatPlatformShortcut } from '../../utils/platform'
 import { TranslationResult } from '../../../../types/translation'
 import {
@@ -40,9 +41,8 @@ import {
   resolveTurnPaneColors
 } from '../../utils/typographyPreferences'
 
-const ESTIMATED_ITEM_HEIGHT = 84
-const OVERSCAN_COUNT = 6
 const STORAGE_KEY_SPLIT = 'dualai_workspace_split_ratio'
+const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 36
 
 const EMPTY_STATE_ROUTES: Array<{
   id: AudioRouteMode
@@ -83,6 +83,9 @@ function getLanguageDisplay(code: string): string {
 
 export const DualPaneWorkspace: React.FC = () => {
   const {
+    isAudioActive,
+    isInitializingAudio,
+    isCoughMuted,
     audioRoute,
     setAudioRoute,
     operatingMode,
@@ -276,58 +279,116 @@ export const DualPaneWorkspace: React.FC = () => {
     workspaceDisplaySettings
   ])
 
-  // 4. Smart Auto-Scroll, Narrow Viewport Adaptation & Virtualization State
+  // 4. Flawless, Zero-Jitter Auto-Scroll & Narrow Viewport Adaptation
+  const feedContentRef = useRef<HTMLDivElement>(null)
   const [isAutoScrollActive, setIsAutoScrollActive] = useState(true)
+  const isAutoScrollActiveRef = useRef(true)
+  const programmaticScrollUntilRef = useRef(0)
+  const lastScrollTopRef = useRef(0)
   const [unreadCount, setUnreadCount] = useState(0)
-  const [scrollTop, setScrollTop] = useState(0)
-  const [viewportHeight, setViewportHeight] = useState(600)
   const [viewportWidth, setViewportWidth] = useState(1000)
   const prevItemsLengthRef = useRef(pairedItems.length)
 
+  const setAutoScrollState = useCallback((next: boolean) => {
+    if (isAutoScrollActiveRef.current === next) return
+    isAutoScrollActiveRef.current = next
+    setIsAutoScrollActive(next)
+    if (next) {
+      setUnreadCount(0)
+    }
+  }, [])
+
+  const pinToBottomImmediate = useCallback(() => {
+    const el = scrollContainerRef.current
+    if (!el) return
+    const targetTop = Math.max(0, el.scrollHeight - el.clientHeight)
+    if (Math.abs(el.scrollTop - targetTop) < 1) return
+    programmaticScrollUntilRef.current = performance.now() + 100
+    el.scrollTop = targetTop
+    lastScrollTopRef.current = el.scrollTop
+  }, [])
+
+  // Track viewport width for narrow-window adaptation & keep pinned on window resize
   useEffect(() => {
     const el = scrollContainerRef.current
     if (!el) return
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        setViewportHeight(entry.contentRect.height)
         setViewportWidth(entry.contentRect.width)
+      }
+      if (isAutoScrollActiveRef.current) {
+        pinToBottomImmediate()
       }
     })
     observer.observe(el)
     return () => observer.disconnect()
-  }, [])
+  }, [pinToBottomImmediate])
+
+  const hasTranscriptContent =
+    pairedItems.length > 0 ||
+    Boolean(interimTranscriptA) ||
+    Boolean(interimTranscriptB) ||
+    Boolean(draftTranslationA) ||
+    Boolean(draftTranslationB) ||
+    Boolean(activeTranslation)
+
+  const hasLiveContent = hasTranscriptContent || isAudioActive || isInitializingAudio
+
+  // Observe exact rendered height of the feed content so every streaming word wrap
+  // and new paragraph pins smoothly to the bottom in the exact same frame with zero bounce
+  useEffect(() => {
+    if (!hasLiveContent) return
+    const contentEl = feedContentRef.current
+    if (!contentEl) return
+    const observer = new ResizeObserver(() => {
+      if (isAutoScrollActiveRef.current) {
+        pinToBottomImmediate()
+      }
+    })
+    observer.observe(contentEl)
+    return () => observer.disconnect()
+  }, [pinToBottomImmediate, hasLiveContent])
+
+  // Immediate upward wheel intent immediately yields scroll control to the user
+  const handleWheel = useCallback(
+    (e: React.WheelEvent<HTMLDivElement>) => {
+      const el = scrollContainerRef.current
+      if (!el) return
+      if (e.deltaY < 0 && el.scrollHeight > el.clientHeight + 8) {
+        programmaticScrollUntilRef.current = 0
+        setAutoScrollState(false)
+      }
+    },
+    [setAutoScrollState]
+  )
 
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current
     if (!el) return
 
-    setScrollTop(el.scrollTop)
-
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-    const isAtBottom = distanceFromBottom <= 36
+    const currentTop = el.scrollTop
+    const distanceFromBottom = el.scrollHeight - currentTop - el.clientHeight
+    const isAtBottom = distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX
+    const isProgrammatic = performance.now() <= programmaticScrollUntilRef.current
 
     if (isAtBottom) {
-      if (!isAutoScrollActive) {
-        setIsAutoScrollActive(true)
-        setUnreadCount(0)
-      }
-    } else if (isAutoScrollActive) {
-      setIsAutoScrollActive(false)
+      setAutoScrollState(true)
+    } else if (!isProgrammatic && currentTop < lastScrollTopRef.current - 3) {
+      // User deliberately scrolled upward (scrollbar drag, keyboard, touch, or trackpad)
+      setAutoScrollState(false)
     }
-  }, [isAutoScrollActive])
 
-  useEffect(() => {
-    const hasNewItems = pairedItems.length > prevItemsLengthRef.current
+    lastScrollTopRef.current = currentTop
+  }, [setAutoScrollState])
+
+  useLayoutEffect(() => {
+    const delta = pairedItems.length - prevItemsLengthRef.current
     prevItemsLengthRef.current = pairedItems.length
 
-    if (isAutoScrollActive && scrollContainerRef.current) {
-      requestAnimationFrame(() => {
-        if (scrollContainerRef.current) {
-          scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight
-        }
-      })
-    } else if (hasNewItems) {
-      setUnreadCount((prev) => prev + 1)
+    if (isAutoScrollActiveRef.current) {
+      pinToBottomImmediate()
+    } else if (delta > 0) {
+      setUnreadCount((prev) => prev + delta)
     }
   }, [
     pairedItems,
@@ -337,19 +398,19 @@ export const DualPaneWorkspace: React.FC = () => {
     draftTranslationB,
     interimTranscriptA,
     interimTranscriptB,
-    isAutoScrollActive
+    pinToBottomImmediate
   ])
 
   const scrollToBottom = useCallback(() => {
-    if (scrollContainerRef.current) {
-      scrollContainerRef.current.scrollTo({
-        top: scrollContainerRef.current.scrollHeight,
-        behavior: 'smooth'
-      })
-      setIsAutoScrollActive(true)
-      setUnreadCount(0)
-    }
-  }, [])
+    const el = scrollContainerRef.current
+    if (!el) return
+    programmaticScrollUntilRef.current = performance.now() + 550
+    setAutoScrollState(true)
+    el.scrollTo({
+      top: el.scrollHeight,
+      behavior: 'smooth'
+    })
+  }, [setAutoScrollState])
 
   const lineMetrics = resolveLineSpacingMetrics(workspaceDisplaySettings.lineSpacing)
   const isNarrowViewport = viewportWidth < 620
@@ -365,35 +426,8 @@ export const DualPaneWorkspace: React.FC = () => {
     ? 'border-white/[0.14]'
     : 'border-white/[0.06]'
 
-  // Dynamic virtualization item height scales cleanly with Font Size, Line Spacing & Linear Cascade
-  const effectiveItemHeight = Math.round(
-    ESTIMATED_ITEM_HEIGHT *
-      (workspaceDisplaySettings.fontSizePx / 15) *
-      (isTargetOnlyView ? 1 : 1.55) *
-      (workspaceDisplaySettings.lineSpacing === 'relaxed'
-        ? 1.18
-        : workspaceDisplaySettings.lineSpacing === 'compact'
-          ? 0.85
-          : 1)
-  )
-
-  // Virtualized visible window
-  const totalItems = pairedItems.length
-  const startIndex = Math.max(0, Math.floor(scrollTop / effectiveItemHeight) - OVERSCAN_COUNT)
-  const visibleCount = Math.ceil(viewportHeight / effectiveItemHeight) + 2 * OVERSCAN_COUNT
-  const endIndex = Math.min(totalItems, startIndex + visibleCount)
-
-  const topSpacerHeight = startIndex * effectiveItemHeight
-  const bottomSpacerHeight = Math.max(0, (totalItems - endIndex) * effectiveItemHeight)
-  const visibleItems = pairedItems.slice(startIndex, endIndex)
-
-  const hasLiveContent =
-    pairedItems.length > 0 ||
-    Boolean(interimTranscriptA) ||
-    Boolean(interimTranscriptB) ||
-    Boolean(draftTranslationA) ||
-    Boolean(draftTranslationB) ||
-    Boolean(activeTranslation)
+  // Render rows directly with native Chromium content-visibility:auto (zero spacer-height oscillation!)
+  const visibleItems = pairedItems
 
   const sourceDisplayName = getLanguageDisplay(sourceLang)
   const targetDisplayName = getLanguageDisplay(targetLang)
@@ -499,12 +533,88 @@ export const DualPaneWorkspace: React.FC = () => {
         <div
           ref={scrollContainerRef}
           onScroll={handleScroll}
-          className="h-full w-full overflow-y-auto relative"
+          onWheel={handleWheel}
+          className="h-full w-full overflow-y-auto relative [overflow-anchor:none]"
         >
           {hasLiveContent ? (
-            <div className="min-h-full py-3 pb-24">
-              {/* Top Virtual Spacer */}
-              {topSpacerHeight > 0 && <div style={{ height: `${topSpacerHeight}px` }} />}
+            <div
+              ref={feedContentRef}
+              className={hasTranscriptContent ? 'min-h-full py-3 pb-28' : 'flex h-full w-full flex-col'}
+            >
+              {/* Instant Live Listening Stage (Shown immediately on Start while awaiting first spoken words) */}
+              {!hasTranscriptContent && (
+                isDualView ? (
+                  <div className="flex flex-1 w-full pb-20 animate-utterance">
+                    <div
+                      style={{ width: `${splitRatio}%` }}
+                      className={`flex flex-col justify-start px-6 pt-8 border-r ${dividerBorderClass}`}
+                    >
+                      <div className="glass-capsule-subtle inline-flex w-fit items-center space-x-2.5 rounded-full px-3.5 py-2 text-xs text-white/75">
+                        <AcousticPulse
+                          active={isAudioActive && !isCoughMuted}
+                          tone={
+                            isInitializingAudio
+                              ? 'amber'
+                              : isCoughMuted
+                                ? 'crimson'
+                                : 'emerald'
+                          }
+                        />
+                        <span className="font-medium tracking-tight">
+                          {isInitializingAudio
+                            ? 'Connecting...'
+                            : isCoughMuted
+                              ? 'Muted'
+                              : 'Listening...'}
+                        </span>
+                      </div>
+                      <p className="mt-3 max-w-sm text-xs leading-relaxed text-white/38">
+                        Spoken paragraphs appear here separated automatically by speaker.
+                      </p>
+                    </div>
+
+                    <div
+                      style={{ width: `${100 - splitRatio}%` }}
+                      className="flex flex-col justify-start px-6 pt-8"
+                    >
+                      <div className="inline-flex w-fit items-center space-x-2 rounded-full border border-white/[0.06] bg-white/[0.025] px-3.5 py-2 text-xs text-white/45">
+                        <span className="h-1.5 w-1.5 rounded-full bg-accent-emerald/75 animate-pulse" />
+                        <span>Translation ready</span>
+                      </div>
+                      <p className="mt-3 max-w-sm text-xs leading-relaxed text-white/32">
+                        Real-time translations stream alongside each speaker turn.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-1 w-full flex-col items-center justify-center px-6 pb-24 text-center animate-utterance">
+                    <div className="glass-capsule-subtle inline-flex items-center space-x-2.5 rounded-full px-4 py-2 text-xs text-white/80">
+                      <AcousticPulse
+                        active={isAudioActive && !isCoughMuted}
+                        tone={
+                          isInitializingAudio
+                            ? 'amber'
+                            : isCoughMuted
+                              ? 'crimson'
+                              : 'emerald'
+                        }
+                      />
+                      <span className="font-medium tracking-tight">
+                        {isInitializingAudio
+                          ? 'Connecting...'
+                          : isCoughMuted
+                            ? 'Muted'
+                            : 'Listening...'}
+                      </span>
+                    </div>
+                    <p className="mt-3 max-w-sm text-xs leading-relaxed text-white/38">
+                      {isTargetOnlyView
+                        ? 'Translation ready — live text will stream here as soon as speech begins.'
+                        : 'Original speech and translations will stack here separated by speaker.'}
+                    </p>
+                  </div>
+                )
+              )}
 
               {/* Flowing, Boxless Paired Paragraph Rows */}
               {visibleItems.map((item) => {
@@ -512,7 +622,7 @@ export const DualPaneWorkspace: React.FC = () => {
                   return (
                     <div
                       key={item.id}
-                      className={`animate-utterance px-6 sm:px-8 ${rowPaddingClass} hover:bg-white/[0.025] transition-colors max-w-5xl mx-auto rounded-2xl`}
+                      className={`animate-utterance [content-visibility:auto] [contain-intrinsic-size:auto_72px] px-6 sm:px-8 ${rowPaddingClass} hover:bg-white/[0.025] transition-colors max-w-5xl mx-auto rounded-2xl`}
                     >
                       <TranslationCard
                         translation={item.translation}
@@ -533,7 +643,7 @@ export const DualPaneWorkspace: React.FC = () => {
                   return (
                     <div
                       key={item.id}
-                      className={`animate-utterance px-5 sm:px-6 ${rowPaddingClass} border-b border-white/[0.05] hover:bg-white/[0.025] transition-colors space-y-1 max-w-4xl mx-auto`}
+                      className={`animate-utterance [content-visibility:auto] [contain-intrinsic-size:auto_96px] px-5 sm:px-6 ${rowPaddingClass} border-b border-white/[0.05] hover:bg-white/[0.025] transition-colors space-y-1 max-w-4xl mx-auto`}
                     >
                       <UtteranceCard
                         utterance={item.utterance}
@@ -562,7 +672,7 @@ export const DualPaneWorkspace: React.FC = () => {
                 return (
                   <div
                     key={item.id}
-                    className="animate-utterance border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors"
+                    className="animate-utterance [content-visibility:auto] [contain-intrinsic-size:auto_112px] border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors"
                   >
                     {/* Step 1: Original Speech (Left Pane) */}
                     <div className="flex">
@@ -909,8 +1019,7 @@ export const DualPaneWorkspace: React.FC = () => {
                   )
                 })()}
 
-              {/* Bottom Virtual Spacer */}
-              {bottomSpacerHeight > 0 && <div style={{ height: `${bottomSpacerHeight}px` }} />}
+              {/* End of live conversation feed */}
             </div>
           ) : (
             /* Original Apple-Native Centered Session Stage (Bento Horizontal Tiles + Sliding Mode Pill) */

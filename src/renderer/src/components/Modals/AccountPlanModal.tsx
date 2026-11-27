@@ -103,9 +103,23 @@ export const AccountPlanModal: React.FC = () => {
   const [msStoreIdKey, setMsStoreIdKey] = useState('')
   const [isVerifyingStoreReceipt, setIsVerifyingStoreReceipt] = useState(false)
   const [isOpeningPortal, setIsOpeningPortal] = useState(false)
+  const [isRefreshingAccount, setIsRefreshingAccount] = useState(false)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [isUpdatingSubscription, setIsUpdatingSubscription] = useState(false)
   const [paddleInstance, setPaddleInstance] = useState<Paddle | null>(null)
+
+  useEffect(() => {
+    if (!isAccountModalOpen) {
+      setShowCancelConfirm(false)
+      return
+    }
+    setErrorMessage(null)
+    setStatusNotice(null)
+    setShowCancelConfirm(false)
+    if (authSession?.accessToken) {
+      void refreshAccountQuota({ syncBilling: false }).catch(() => undefined)
+    }
+  }, [isAccountModalOpen, authSession?.accessToken, refreshAccountQuota])
 
   useEffect(() => {
     const clientToken = import.meta.env.VITE_PADDLE_CLIENT_TOKEN
@@ -325,7 +339,6 @@ export const AccountPlanModal: React.FC = () => {
 
   const handleOpenCustomerPortal = async () => {
     if (!authSession?.accessToken) {
-      console.warn('[CustomerPortal] No authenticated session or accessToken.')
       setErrorMessage('Please sign in first to access your billing portal.')
       return
     }
@@ -333,23 +346,47 @@ export const AccountPlanModal: React.FC = () => {
     setErrorMessage(null)
     setCheckoutError(null)
     try {
-      console.log('[CustomerPortal] Requesting portal session for user:', authSession.user.email)
       const res = await requestCustomerPortalSession(authSession.accessToken)
-      console.log('[CustomerPortal] Response from gateway:', res)
       if (res.ok && res.portalUrl) {
         window.open(res.portalUrl, '_blank')
+        // Reconcile billing state automatically when the user returns from Paddle Customer Portal
+        const syncOnReturn = () => {
+          window.removeEventListener('focus', syncOnReturn)
+          void refreshAccountQuota({ syncBilling: true }).catch(() => undefined)
+        }
+        window.addEventListener('focus', syncOnReturn, { once: true })
       } else {
         setErrorMessage(
-          res.error || 'Could not open billing portal. No active subscription found for this account.'
+          res.error ||
+            'No billing history yet. Once you choose a paid plan, your invoices and payment settings will appear here.'
         )
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to launch billing portal.'
-      console.error('[CustomerPortal] Error:', msg)
+      const msg = err instanceof Error ? err.message : 'Unable to open Manage Billing right now.'
       setErrorMessage(msg)
     } finally {
       setIsOpeningPortal(false)
     }
+  }
+
+  const handleManualRefreshAccount = async () => {
+    if (isRefreshingAccount) return
+    setIsRefreshingAccount(true)
+    setErrorMessage(null)
+    try {
+      await refreshAccountQuota({ syncBilling: true })
+    } catch {
+      setErrorMessage('Unable to refresh your account right now. Please try again.')
+    } finally {
+      setIsRefreshingAccount(false)
+    }
+  }
+
+  const formatShortDate = (iso?: string | null): string => {
+    if (!iso) return 'the end of your billing period'
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return 'the end of your billing period'
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
   }
 
   const handleConfirmCancelSubscription = async () => {
@@ -360,10 +397,24 @@ export const AccountPlanModal: React.FC = () => {
       const res = await cancelSubscriptionAccount()
       if (res.ok) {
         setShowCancelConfirm(false)
-        setStatusNotice(
-          'Subscription scheduled to cancel at the end of your billing period. You keep access and remaining hours until then.'
-        )
+        const endIso = res.subscription?.scheduledChangeAt ?? accountSubscription?.scheduledChangeAt
+        const formattedEnd = endIso ? formatShortDate(endIso) : null
+        if (res.alreadyScheduled && formattedEnd) {
+          setStatusNotice(
+            `Your subscription is already scheduled to end on ${formattedEnd}. You keep full access and all remaining hours until then.`
+          )
+        } else if (formattedEnd) {
+          setStatusNotice(
+            `Your subscription is scheduled to end on ${formattedEnd}. You keep full access and all remaining hours until then.`
+          )
+        } else {
+          setStatusNotice(
+            res.message ||
+              'Subscription scheduled to cancel at the end of your billing period. You keep access and remaining hours until then.'
+          )
+        }
       } else {
+        setShowCancelConfirm(false)
         setErrorMessage(res.error || 'Could not cancel subscription right now.')
       }
     } catch (err) {
@@ -380,7 +431,15 @@ export const AccountPlanModal: React.FC = () => {
     try {
       const res = await undoCancelSubscriptionAccount()
       if (res.ok) {
-        setStatusNotice('Cancellation undone. Your subscription will continue as normal.')
+        const renewIso = res.subscription?.nextBilledAt
+        const formattedRenew = renewIso ? formatShortDate(renewIso) : null
+        setStatusNotice(
+          res.alreadyActive
+            ? 'Your subscription is already active and will continue as normal.'
+            : formattedRenew
+              ? `Cancellation undone. Your subscription remains active and renews on ${formattedRenew}.`
+              : res.message || 'Cancellation undone. Your subscription will continue as normal.'
+        )
       } else {
         setErrorMessage(res.error || 'Could not keep subscription right now.')
       }
@@ -391,19 +450,23 @@ export const AccountPlanModal: React.FC = () => {
     }
   }
 
-  const formatShortDate = (iso?: string | null): string => {
-    if (!iso) return 'end of period'
-    const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) return 'end of period'
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
-  }
-
   const hasActiveSubscription = Boolean(
     accountSubscription && accountSubscription.status !== 'canceled'
   )
   const isScheduledToCancel = Boolean(
     hasActiveSubscription && accountSubscription?.scheduledChangeAction === 'cancel'
   )
+  const isScheduledToPause = Boolean(
+    hasActiveSubscription && accountSubscription?.scheduledChangeAction === 'pause'
+  )
+  const isPausedSubscription = Boolean(accountSubscription?.status === 'paused')
+  const isPastDueSubscription = Boolean(accountSubscription?.status === 'past_due')
+  const formattedScheduledDate = accountSubscription?.scheduledChangeAt
+    ? formatShortDate(accountSubscription.scheduledChangeAt)
+    : null
+  const formattedNextBilledDate = accountSubscription?.nextBilledAt
+    ? formatShortDate(accountSubscription.nextBilledAt)
+    : null
 
   const isPlansView = section === 'plans'
 
@@ -725,18 +788,26 @@ export const AccountPlanModal: React.FC = () => {
                       {hasActiveSubscription && (
                         <span
                           className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                            isScheduledToCancel
+                            isScheduledToCancel || isScheduledToPause || isPausedSubscription
                               ? 'bg-accent-amber/18 text-accent-amber border border-accent-amber/35'
-                              : accountSubscription?.status === 'past_due'
+                              : isPastDueSubscription
                                 ? 'bg-accent-crimson/18 text-accent-crimson border border-accent-crimson/35'
                                 : 'bg-accent-emerald/18 text-accent-emerald border border-accent-emerald/35'
                           }`}
                         >
                           {isScheduledToCancel
-                            ? `Cancels ${formatShortDate(accountSubscription?.scheduledChangeAt)}`
-                            : accountSubscription?.status === 'past_due'
-                              ? 'Past Due'
-                              : 'Active'}
+                            ? formattedScheduledDate
+                              ? `Cancels ${formattedScheduledDate}`
+                              : 'Cancels end of cycle'
+                            : isScheduledToPause
+                              ? formattedScheduledDate
+                                ? `Pauses ${formattedScheduledDate}`
+                                : 'Pause scheduled'
+                              : isPausedSubscription
+                                ? 'Paused'
+                                : isPastDueSubscription
+                                  ? 'Past Due'
+                                  : 'Active'}
                         </span>
                       )}
                       {accountSubscription?.status === 'canceled' && (
@@ -748,21 +819,50 @@ export const AccountPlanModal: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Scheduled Cancellation Banner with One-Click Undo */}
+                {/* Authoritative Subscription Lifecycle Banner (from DB / Paddle) */}
                 {isScheduledToCancel && (
-                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-accent-amber/35 bg-accent-amber/10 px-3.5 py-2.5 text-xs text-accent-amber">
-                    <span>
-                      Ends on {formatShortDate(accountSubscription?.scheduledChangeAt)}. Your hours
-                      remain available until then.
-                    </span>
+                  <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-2xl border border-accent-amber/35 bg-accent-amber/10 px-3.5 py-3 text-xs text-accent-amber">
+                    <div className="space-y-0.5">
+                      <p className="font-semibold text-white">
+                        {formattedScheduledDate
+                          ? `Subscription ends on ${formattedScheduledDate}`
+                          : 'Subscription scheduled to end'}
+                      </p>
+                      <p className="text-[11px] text-accent-amber/90">
+                        {formattedScheduledDate
+                          ? `Your remaining hours stay available until ${formattedScheduledDate}. You will not be billed again.`
+                          : 'Your remaining hours stay available through the end of your billing period.'}
+                      </p>
+                    </div>
                     <button
                       type="button"
                       disabled={isUpdatingSubscription}
                       onClick={() => void handleUndoCancelSubscription()}
-                      className="glass-control-hover shrink-0 rounded-full border border-accent-amber/45 bg-white/[0.1] px-3 py-1 text-[11px] font-semibold text-white disabled:opacity-50"
+                      className="glass-control-hover shrink-0 rounded-full border border-accent-amber/45 bg-white/[0.1] px-3 py-1.5 text-[11px] font-semibold text-white disabled:opacity-50"
                     >
                       {isUpdatingSubscription ? 'Saving...' : 'Keep Subscription'}
                     </button>
+                  </div>
+                )}
+
+                {isScheduledToPause && (
+                  <div className="rounded-2xl border border-accent-amber/35 bg-accent-amber/10 px-3.5 py-2.5 text-xs text-accent-amber">
+                    {formattedScheduledDate
+                      ? `Subscription scheduled to pause on ${formattedScheduledDate}. Manage or change this anytime in Manage Billing.`
+                      : 'Subscription scheduled to pause. Manage or change this anytime in Manage Billing.'}
+                  </div>
+                )}
+
+                {isPausedSubscription && (
+                  <div className="rounded-2xl border border-accent-amber/30 bg-accent-amber/10 px-3.5 py-2.5 text-xs text-accent-amber">
+                    Your subscription is paused. Resume anytime in Manage Billing.
+                  </div>
+                )}
+
+                {isPastDueSubscription && (
+                  <div className="rounded-2xl border border-accent-crimson/40 bg-accent-crimson/12 px-3.5 py-2.5 text-xs text-accent-crimson">
+                    Your last payment could not be processed. Update your payment method in Manage
+                    Billing to keep your plan active.
                   </div>
                 )}
 
@@ -787,14 +887,23 @@ export const AccountPlanModal: React.FC = () => {
                     />
                   </div>
                   <div className="flex items-center justify-between text-[11px] text-white/40">
-                    <span>{remainingPct}% left in current cycle</span>
+                    <span>
+                      {isScheduledToCancel && formattedScheduledDate
+                        ? `${remainingPct}% left · Ends ${formattedScheduledDate}`
+                        : formattedNextBilledDate && !isScheduledToCancel
+                          ? `${remainingPct}% left · Renews ${formattedNextBilledDate}`
+                          : `${remainingPct}% left in current cycle`}
+                    </span>
                     <button
                       type="button"
-                      onClick={() => void refreshAccountQuota()}
-                      className="flex items-center space-x-1 text-white/65 hover:text-white transition"
+                      disabled={isRefreshingAccount}
+                      onClick={() => void handleManualRefreshAccount()}
+                      className="flex items-center space-x-1 text-white/65 hover:text-white transition disabled:opacity-50"
                     >
-                      <RefreshCw className="h-3 w-3" />
-                      <span>Refresh</span>
+                      <RefreshCw
+                        className={`h-3 w-3 ${isRefreshingAccount ? 'animate-spin' : ''}`}
+                      />
+                      <span>{isRefreshingAccount ? 'Syncing...' : 'Refresh'}</span>
                     </button>
                   </div>
                 </div>

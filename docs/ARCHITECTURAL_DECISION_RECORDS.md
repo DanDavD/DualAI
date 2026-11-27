@@ -535,3 +535,37 @@ We transition DualAI's desktop interface to an authentic **Apple macOS Tahoe / i
 3. **Cross-Platform OS Accelerator Parity (`platform.ts` & `GlassTooltip.tsx`):**
    * Dynamic platform detection maps `CommandOrControl` and `Cmd` to native `Ctrl` on Windows/Linux and `Cmd` on macOS across all tooltips, keyboard strips, and rebind dialogs.
    * Windows 11 `titleBarOverlay` preserves standard minimize/maximize/close hitboxes while macOS `hiddenInset` preserves native traffic lights.
+
+---
+
+## ADR-022: STRICT MULTI-SPEAKER TURN SEPARATION, HOT-SWAP AUDIO DEVICE CONTROLS, ZERO-JITTER AUTO-SCROLL & SELF-HEALING PADDLE RECONCILIATION
+
+### Status
+Accepted (Approved by Chief Architect)
+
+### Context
+Live production validation following the Liquid Glass redesign and live Paddle Billing rollout uncovered four high-impact usability and reliability gaps:
+1. **Multi-Speaker & Bilingual Paragraph Merging:** When two or more speakers interrupted each other or alternated languages rapidly (e.g., English and Spanish in a medical consultation), finalized utterances merged into a single left-hand paragraph with misaligned right-hand translations.
+2. **Audio Device Ergonomics & Viewport Scroll Jitter:** Users had to leave the active workspace and open Settings to switch microphones or output headphones, and the previous virtualized spacer list oscillated rapidly during streaming updates instead of following the bottom smoothly while respecting manual scroll-up intent.
+3. **Immediate Live Stage Feedback & Silent Reconnects:** Pressing `Start` remained on the setup menu until the first spoken word arrived, and transient Fly.io gateway restarts (`SERVER_RESTARTING`) briefly flashed a red `Audio Notice` banner containing developer CLI instructions (`pnpm run dev:gateway`).
+4. **Paddle Subscription Mirror Drift & Incomplete Error Coverage:** If a subscription already had a scheduled cancellation or pause in Paddle (for instance, initiated from the Paddle Customer Portal or prior to a migration) while the Supabase `subscriptions` mirror was stale, clicking **Cancel Subscription** surfaced a raw `subscription_locked_pending_changes` error without updating the profile or displaying the authoritative end date from the database.
+
+### Decision
+We adopted a four-part architectural upgrade spanning the Renderer audio/UI pipeline and the Zero-Trust Cloud Gateway:
+1. **Strict Speaker & Language Turn Separation ("Supreme Law") (`sonioxStreamAssembler.ts`, `paragraphAccumulator.ts`):**
+   * Enforced immediate 0ms paragraph boundary commits whenever finalized Soniox tokens change `speaker` ID OR spoken `language` across both `conversation` and `translate` modes — strictly without rendering synthetic speaker tags (`Speaker 1`, `Person 2`) in the UI.
+   * Isolated provisional interrupting tokens from the active paragraph and introduced `resolveTranslationTargetTurn(tokenSpeaker, tokenSourceLang)` so trailing finalized translations always route back to the interrupted speaker's row rather than leaking into the interrupting speaker's paragraph.
+2. **Discord-Style Split Mic & Headphones Controls + Consolidated Transport Pill (`AudioIngestionEngine.ts`, `FloatingTransportPill.tsx`, `Header.tsx`, `SessionContext.tsx`):**
+   * Added live input device hot-swapping (`switchInputDevice`), output sink routing (`setOutputDevice` via `HTMLMediaElement.setSinkId`), and system-audio muting (`setSystemAudioMuted`) with persisted device preferences in `SessionContext`.
+   * Upgraded `FloatingTransportPill.tsx` with Liquid Glass split `[ Mic | chevron ]` and `[ Headphones | chevron ]` upward device pickers showing live active selection state, and relocated the `Clear Screen` (`Trash2`) action from `Header.tsx` into the bottom-right transport pill.
+3. **Zero-Jitter Auto-Scroll, Instant Live Listening Stage & Silent Reconnects (`DualPaneWorkspace.tsx`, `GatewaySttClient.ts`):**
+   * Replaced oscillating virtualized height spacers with CSS `[content-visibility:auto]`, `[overflow-anchor:none]`, `ResizeObserver` observation on `feedContentRef`, and wheel/scroll intent locking (`AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 36`) so scrolling up pauses auto-follow cleanly and returning to the bottom re-engages it.
+   * Switched `DualPaneWorkspace.tsx` immediately upon pressing `Start` into the active workspace layout with language-agnostic status pills (`Listening...` / `Connecting...` / `Muted` and `Translation ready`), and silenced transient `SERVER_RESTARTING` WebSocket transitions in `GatewaySttClient.ts` so reconnects occur cleanly without error banners.
+4. **Self-Healing Paddle Billing Reconciliation & Authoritative End-Date Surfacing (`paddleFulfillment.ts`, `server/src/index.ts`, `gatewayAuthService.ts`, `AccountPlanModal.tsx`):**
+   * Added `syncSubscriptionFromPaddle(...)`, `reconcileActiveSubscriptionForUser(...)`, and `mapPaddleBillingError(...)` in `PaddleFulfillmentService` to cover all Paddle API error codes (`subscription_locked_pending_changes`, `subscription_locked_renewal`, `subscription_locked_processing`, `subscription_not_active`, `subscription_is_canceled`, `subscription_update_when_canceled`, `subscription_cannot_be_canceled`, payment declines, rate limits, and network/401 failures).
+   * Enabled `GET /v1/account/quota?sync=1` for explicit Account Refresh and automatic post-Customer-Portal focus reconciliation, plus pre-checkout reconciliation so recently canceled users are never blocked by stale mirrors.
+   * Surfaced the authoritative end/pause/renewal date (`scheduled_change_at` / `nextBilledAt`) both in the **Account Profile** (status badge, lifecycle banner with one-click `Keep Subscription`, and `Time remaining` footer) and in every cancel/undo confirmation or conflict message.
+
+### Consequences
+* **Positive:** Clean per-speaker and per-language paragraph separation without visual clutter; zero-jitter streaming scroll; one-click audio input/output switching directly inside the workspace; immediate Start feedback with zero false error flashes; and self-healing Paddle/Supabase subscription synchronization with clear date-aware messaging across all billing edge cases.
+* **Negative:** Explicit live reconciliation (`?sync=1` or error-triggered `subscriptions.get`) adds one server-side Paddle API roundtrip during manual refresh or conflict recovery; normal boot and background quota reads remain DB-first (<20ms) to avoid unnecessary upstream latency or rate limits.

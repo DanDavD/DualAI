@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from 'react'
 import {
   ArrowRightLeft,
   PictureInPicture2,
-  Trash2,
   Settings,
   MousePointerClick
 } from 'lucide-react'
@@ -28,13 +27,11 @@ export const Header: React.FC = () => {
     isCoughMuted,
     pipelineState,
     endToEndLatencyMs,
-    utterances,
     sourceLang,
     setSourceLang,
     targetLang,
     setTargetLang,
     swapLanguages,
-    clearTranscripts,
     openSettingsModal,
     isHudOpen,
     hudSettings,
@@ -336,23 +333,6 @@ export const Header: React.FC = () => {
               </div>
             )}
           </div>
-
-          {/* 6. Contextual Clear Screen */}
-          {utterances.length > 0 && (
-            <div data-tour-id="clear" className="inline-flex">
-              <GlassTooltip label="Clear Screen" shortcut="Cmd+Shift+K" align="right">
-                <button
-                  type="button"
-                  data-toolbar-item="true"
-                  onClick={clearTranscripts}
-                  aria-label="Clear transcript history"
-                  className="glass-control-hover flex h-7 w-7 items-center justify-center rounded-full text-white/55 hover:text-accent-crimson focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-steel/70"
-                >
-                  <Trash2 className="h-3.5 w-3.5" strokeWidth={1.75} />
-                </button>
-              </GlassTooltip>
-            </div>
-          )}
         </div>
 
         {/* Capsule 4: Account Avatar & Settings */}

@@ -88,6 +88,8 @@ const STORAGE_KEY_HUD = 'dualai_hud_settings'
 const STORAGE_KEY_GLOSSARY = 'dualai_custom_glossary'
 const STORAGE_KEY_SHORTCUTS = 'dualai_shortcut_bindings'
 const STORAGE_KEY_LOOPBACK_DEVICE = 'dualai_loopback_device_id'
+const STORAGE_KEY_INPUT_DEVICE = 'dualai_input_device_id'
+const STORAGE_KEY_OUTPUT_DEVICE = 'dualai_output_device_id'
 const STORAGE_KEY_ACCOUNT_CACHE = 'dualai_account_display_cache'
 
 interface AccountDisplayCache {
@@ -177,6 +179,7 @@ export interface SessionState {
   isAudioActive: boolean
   isInitializingAudio: boolean
   isCoughMuted: boolean
+  isSystemAudioMuted: boolean
   isMonitorLoopbackActive: boolean
   selectedInputDeviceId: string
   selectedLoopbackDeviceId: string
@@ -268,6 +271,7 @@ export interface SessionState {
   startAudioEngine: () => Promise<void>
   stopAudioEngine: () => void
   toggleCoughMute: () => void
+  toggleSystemAudioMute: () => void
   setCoughMute: (muted: boolean) => void
   setGainChannelA: (gain: number) => void
   setGainChannelB: (gain: number) => void
@@ -315,9 +319,21 @@ export interface SessionState {
   signOutAccount: () => Promise<void>
   requestPasswordResetAccount: (email: string) => Promise<string>
   resendVerificationEmailAccount: (email: string) => Promise<string>
-  refreshAccountQuota: () => Promise<void>
-  cancelSubscriptionAccount: () => Promise<{ ok: boolean; error?: string }>
-  undoCancelSubscriptionAccount: () => Promise<{ ok: boolean; error?: string }>
+  refreshAccountQuota: (options?: { syncBilling?: boolean }) => Promise<void>
+  cancelSubscriptionAccount: () => Promise<{
+    ok: boolean
+    subscription?: AccountSubscriptionSummary
+    alreadyScheduled?: boolean
+    message?: string
+    error?: string
+  }>
+  undoCancelSubscriptionAccount: () => Promise<{
+    ok: boolean
+    subscription?: AccountSubscriptionSummary
+    alreadyActive?: boolean
+    message?: string
+    error?: string
+  }>
   startPlanCheckout: (
     planId: PlanId,
     provider: CheckoutProvider
@@ -363,12 +379,19 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [isAudioActive, setIsAudioActive] = useState(false)
   const [isInitializingAudio, setIsInitializingAudio] = useState(false)
   const [isCoughMuted, setIsCoughMuted] = useState(false)
+  const [isSystemAudioMuted, setIsSystemAudioMuted] = useState(false)
   const [isMonitorLoopbackActive, setIsMonitorLoopbackActive] = useState(false)
   const [hasPipelineError, setHasPipelineError] = useState(false)
   const [pipelineErrorMessage, setPipelineErrorMessage] = useState<string | null>(null)
   const [loopbackStatus, setLoopbackStatus] = useState<LoopbackSourceStatus>('inactive')
   const [loopbackStatusMessage, setLoopbackStatusMessage] = useState<string | null>(null)
-  const [selectedInputDeviceId, setSelectedInputDeviceId] = useState('default')
+  const [selectedInputDeviceId, setSelectedInputDeviceIdState] = useState<string>(() => {
+    try {
+      return localStorage.getItem(STORAGE_KEY_INPUT_DEVICE) || 'default'
+    } catch {
+      return 'default'
+    }
+  })
   const [selectedLoopbackDeviceId, setSelectedLoopbackDeviceIdState] = useState<string>(() => {
     try {
       return localStorage.getItem(STORAGE_KEY_LOOPBACK_DEVICE) || 'system_loopback'
@@ -376,7 +399,13 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return 'system_loopback'
     }
   })
-  const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState('default')
+  const [selectedOutputDeviceId, setSelectedOutputDeviceIdState] = useState<string>(() => {
+    try {
+      return localStorage.getItem(STORAGE_KEY_OUTPUT_DEVICE) || 'default'
+    } catch {
+      return 'default'
+    }
+  })
   const [gainChannelA, setGainChannelAState] = useState(1.0)
   const [gainChannelB, setGainChannelBState] = useState(1.0)
   const [levelMetricA, setLevelMetricA] = useState<AudioLevelMetric | null>(null)
@@ -1000,8 +1029,11 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         },
         onError: (channelId, err) => {
           console.warn(`[DUALAI] STT Error on ${channelId}:`, err)
+          if (/restarting|reconnecting/i.test(err.message)) {
+            return
+          }
           setPipelineErrorMessage(
-            `Speech connection failed (${err.message}). Verify the Cloud Gateway is running ("pnpm run dev:gateway") or sign in again under Account.`
+            `Connection interrupted (${err.message}). Check your internet connection or sign in again under Account.`
           )
         },
         onQuotaUpdate: (remainingSeconds, totalAllocatedSeconds) => {
@@ -1253,7 +1285,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           return
         }
         setPipelineErrorMessage(
-          'Cannot reach DualAI Cloud Gateway. Make sure "pnpm run dev:gateway" is running.'
+          'Unable to reach the DualAI translation service. Check your internet connection and try again.'
         )
         return
       }
@@ -1269,6 +1301,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         gainB: gainChannelB,
         deviceIdA: selectedInputDeviceId,
         deviceIdB: selectedLoopbackDeviceId,
+        outputDeviceId: selectedOutputDeviceId,
         captureChannelA: activeRouting.captureChannelA,
         captureChannelB: activeRouting.captureChannelB
       })
@@ -1302,6 +1335,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     gainChannelB,
     selectedInputDeviceId,
     selectedLoopbackDeviceId,
+    selectedOutputDeviceId,
     latencyMode
   ])
 
@@ -1625,6 +1659,45 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [])
 
+  const setSelectedInputDeviceId = useCallback(
+    (deviceId: string) => {
+      const next = deviceId || 'default'
+      setSelectedInputDeviceIdState(next)
+      try {
+        localStorage.setItem(STORAGE_KEY_INPUT_DEVICE, next)
+      } catch {
+        // Ignore storage error
+      }
+      if (engineRef.current?.getIsRunning()) {
+        void engineRef.current
+          .switchInputDevice(next, { noiseSuppression, echoCancellation })
+          .catch((err) => {
+            console.warn('[DUALAI] Live microphone switch failed:', err)
+          })
+      }
+    },
+    [noiseSuppression, echoCancellation]
+  )
+
+  const setSelectedOutputDeviceId = useCallback((deviceId: string) => {
+    const next = deviceId || 'default'
+    setSelectedOutputDeviceIdState(next)
+    try {
+      localStorage.setItem(STORAGE_KEY_OUTPUT_DEVICE, next)
+    } catch {
+      // Ignore storage error
+    }
+    void engineRef.current?.setOutputDevice(next)
+  }, [])
+
+  const toggleSystemAudioMute = useCallback(() => {
+    setIsSystemAudioMuted((prev) => {
+      const next = !prev
+      engineRef.current?.setSystemAudioMuted(next)
+      return next
+    })
+  }, [])
+
   const setSelectedLoopbackDeviceId = useCallback((deviceId: string) => {
     setSelectedLoopbackDeviceIdState(deviceId)
     try {
@@ -1773,50 +1846,89 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return resendVerificationEmail(email)
   }, [])
 
-  const refreshAccountQuota = useCallback(async () => {
-    if (!authSession?.accessToken) return
-    const snapshot = await fetchAuthoritativeQuota(authSession.accessToken)
-    setAccountQuota(snapshot.quota)
-    setAccountSubscription(snapshot.subscription)
-    setAvailablePlans(snapshot.plans)
-    writeAccountDisplayCache(authSession.user.userId, snapshot.quota, snapshot.subscription)
-  }, [authSession])
+  const refreshAccountQuota = useCallback(
+    async (options?: { syncBilling?: boolean }) => {
+      if (!authSession?.accessToken) return
+      const snapshot = await fetchAuthoritativeQuota(authSession.accessToken, options)
+      setAccountQuota(snapshot.quota)
+      setAccountSubscription(snapshot.subscription)
+      setAvailablePlans(snapshot.plans)
+      writeAccountDisplayCache(authSession.user.userId, snapshot.quota, snapshot.subscription)
+    },
+    [authSession]
+  )
 
   const cancelSubscriptionAccount = useCallback(async (): Promise<{
     ok: boolean
+    subscription?: AccountSubscriptionSummary
+    alreadyScheduled?: boolean
+    message?: string
     error?: string
   }> => {
     if (!authSession?.accessToken) {
       return { ok: false, error: 'Sign in first before managing your subscription.' }
     }
     const res = await cancelUserSubscription(authSession.accessToken)
-    if (res.ok) {
-      if (res.subscription) {
-        setAccountSubscription(res.subscription)
+    if (res.subscription) {
+      setAccountSubscription(res.subscription)
+      if (accountQuota) {
+        writeAccountDisplayCache(authSession.user.userId, accountQuota, res.subscription)
       }
-      await refreshAccountQuota().catch(() => undefined)
-      return { ok: true }
     }
-    return { ok: false, error: res.error || 'Could not cancel subscription.' }
-  }, [authSession, refreshAccountQuota])
+    if (res.ok) {
+      await refreshAccountQuota().catch(() => undefined)
+      return {
+        ok: true,
+        subscription: res.subscription,
+        alreadyScheduled: res.alreadyScheduled,
+        message: res.message
+      }
+    }
+    if (res.subscription) {
+      await refreshAccountQuota().catch(() => undefined)
+    }
+    return {
+      ok: false,
+      subscription: res.subscription,
+      error: res.error || 'Could not cancel subscription.'
+    }
+  }, [authSession, accountQuota, refreshAccountQuota])
 
   const undoCancelSubscriptionAccount = useCallback(async (): Promise<{
     ok: boolean
+    subscription?: AccountSubscriptionSummary
+    alreadyActive?: boolean
+    message?: string
     error?: string
   }> => {
     if (!authSession?.accessToken) {
       return { ok: false, error: 'Sign in first before managing your subscription.' }
     }
     const res = await undoCancelUserSubscription(authSession.accessToken)
-    if (res.ok) {
-      if (res.subscription) {
-        setAccountSubscription(res.subscription)
+    if (res.subscription) {
+      setAccountSubscription(res.subscription)
+      if (accountQuota) {
+        writeAccountDisplayCache(authSession.user.userId, accountQuota, res.subscription)
       }
-      await refreshAccountQuota().catch(() => undefined)
-      return { ok: true }
     }
-    return { ok: false, error: res.error || 'Could not keep subscription.' }
-  }, [authSession, refreshAccountQuota])
+    if (res.ok) {
+      await refreshAccountQuota().catch(() => undefined)
+      return {
+        ok: true,
+        subscription: res.subscription,
+        alreadyActive: res.alreadyActive,
+        message: res.message
+      }
+    }
+    if (res.subscription) {
+      await refreshAccountQuota().catch(() => undefined)
+    }
+    return {
+      ok: false,
+      subscription: res.subscription,
+      error: res.error || 'Could not keep subscription.'
+    }
+  }, [authSession, accountQuota, refreshAccountQuota])
 
   const startPlanCheckout = useCallback(
     async (planId: PlanId, provider: CheckoutProvider): Promise<CheckoutSessionResult> => {
@@ -2029,6 +2141,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         isAudioActive,
         isInitializingAudio,
         isCoughMuted,
+        isSystemAudioMuted,
         isMonitorLoopbackActive,
         selectedInputDeviceId,
         selectedLoopbackDeviceId,
@@ -2098,6 +2211,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         startAudioEngine,
         stopAudioEngine,
         toggleCoughMute,
+        toggleSystemAudioMute,
         setCoughMute,
         setGainChannelA,
         setGainChannelB,

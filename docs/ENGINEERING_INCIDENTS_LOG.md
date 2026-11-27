@@ -634,3 +634,53 @@ Migrate deployment manifest to an active low-latency region (`dfw` - Dallas, Tex
 * `npm run typecheck` passing cleanly with 0 errors across node, web, and server targets.
 * `npm run security:gate` passing with 0 secrets detected.
 
+---
+
+## INCIDENT 025: MULTI-SPEAKER PARAGRAPH MERGING, AUTO-SCROLL OSCILLATION & TRANSIENT GATEWAY RESTART BANNER
+
+* **Date:** 2026-11-26
+* **Component:** `src/renderer/src/audio/stt/sonioxStreamAssembler.ts`, `src/renderer/src/audio/paragraphAccumulator.ts`, `src/renderer/src/components/Workspace/DualPaneWorkspace.tsx`, `src/renderer/src/audio/stt/GatewaySttClient.ts`, `src/renderer/src/context/SessionContext.tsx`
+* **Severity:** High (Core Real-Time Interpretation Readability & UX Stability)
+
+### 1. Situation
+During live bilingual testing (English and Spanish multi-speaker consultations), three UX defects degraded real-time comprehension:
+1. When Speaker 2 interrupted Speaker 1 or spoke in the opposite language, `sonioxStreamAssembler.ts` appended both voices into a single paragraph block instead of terminating Speaker 1's paragraph and opening a new row for Speaker 2.
+2. As the transcript grew past viewport height, virtualized spacer recalculations caused rapid up/down scroll oscillation and failed to keep the latest streaming lines anchored smoothly at the bottom while allowing the user to scroll up undisturbed.
+3. Transient Fly.io container restarts sent `SERVER_RESTARTING`, which routed through `onError` and flashed a red `Audio Notice` bar telling end users to run `"pnpm run dev:gateway"`.
+
+### 2. Task
+Enforce deterministic 0ms turn splitting on speaker or language transitions with accurate translation routing, eliminate scroll oscillation while preserving manual scroll-up reading, immediately transition out of the setup screen when `Start` is pressed, and handle `SERVER_RESTARTING` silently without displaying developer diagnostics.
+
+### 3. Action
+* **Turn Separation & Translation Routing (`sonioxStreamAssembler.ts`, `paragraphAccumulator.ts`):** Updated the streaming assembler to split immediately at 0ms on any finalized `speaker` change or `language` switch in both `conversation` and `translate` modes, isolate provisional interrupting tokens, and route delayed finalized translations back to the interrupted turn via `resolveTranslationTargetTurn(tokenSpeaker, tokenSourceLang)`. Added comprehensive regression scenarios in `scripts/test_soniox_unified_engine.ts`.
+* **Zero-Jitter Auto-Scroll & Live Listening Stage (`DualPaneWorkspace.tsx`):** Removed oscillating virtual spacer math in favor of CSS `[content-visibility:auto]`, `[overflow-anchor:none]`, `ResizeObserver` tracking on `feedContentRef`, and a 36px bottom-lock threshold (`AUTO_SCROLL_BOTTOM_THRESHOLD_PX`) that disengages immediately on upward user wheel/scroll intent and resumes when returning to the bottom. Switched immediately on `Start` to the active layout with clean language-agnostic pills (`Listening...` / `Connecting...` / `Muted` and `Translation ready`).
+* **Silent Gateway Reconnects (`GatewaySttClient.ts`, `SessionContext.tsx`):** Updated `GatewaySttClient.ts` to transition `SERVER_RESTARTING` frames to `reconnecting` state silently without invoking `onError`, and sanitized user-facing notices in `SessionContext.tsx` to remove developer CLI commands.
+
+### 4. Result
+* `scripts/test_soniox_unified_engine.ts` passed 5/5 scenarios verifying zero-merge speaker interruption separation and trailing translation attribution.
+* Smooth 60/120fps auto-scroll verified with zero jitter and instant manual scroll-up release.
+* Zero false `Audio Notice` flashes during gateway restarts.
+
+---
+
+## INCIDENT 026: PADDLE SUBSCRIPTION MIRROR DRIFT (`subscription_locked_pending_changes`) & SELF-HEALING LIFECYCLE RECONCILIATION
+
+* **Date:** 2026-11-26
+* **Component:** `server/src/billing/paddleFulfillment.ts`, `server/src/index.ts`, `src/renderer/src/services/gatewayAuthService.ts`, `src/renderer/src/context/SessionContext.tsx`, `src/renderer/src/components/Modals/AccountPlanModal.tsx`
+* **Severity:** High (Production Subscription Cancellation UX & Database Consistency)
+
+### 1. Situation
+A live subscription (`sub_01m8cnm9a8enhfpja3rxqq24d1`) already had a scheduled end-of-period cancellation in Paddle (`2026-12-26T19:34:27.908Z`) from an earlier `subscription.updated` event delivered before migration `003_atomic_billing_hardening.sql` was applied. Because the Supabase `subscriptions` mirror still held `scheduled_change_action = null`, the desktop app showed a green `Active` badge with the **Cancel Subscription** button. When the user clicked **Confirm Cancellation**, Paddle returned `subscription_locked_pending_changes` ("This subscription already has a scheduled change."), and the gateway returned a raw error without reconciling Supabase or showing the authoritative cancellation date.
+
+### 2. Task
+Synchronize the drifted production row in Supabase, add automatic live Paddle-to-Supabase reconciliation on billing mutations and explicit refreshes, map every Paddle API and network error to calm consumer-friendly messaging, and surface the exact database end date (`scheduled_change_at`) both in the Account Profile and in confirmation/status messages.
+
+### 3. Action
+* **Live DB Sync & Self-Healing Gateway (`paddleFulfillment.ts`, `server/src/index.ts`):** Synced `sub_01m8cnm9a8enhfpja3rxqq24d1` via `upsert_paddle_subscription`, implemented `syncSubscriptionFromPaddle(...)`, `reconcileActiveSubscriptionForUser(...)`, and `mapPaddleBillingError(...)` covering all Paddle lock/state/payment/rate-limit codes, and enabled `GET /v1/account/quota?sync=1` for explicit Refresh and post-Portal focus reconciliation. Added pre-checkout live reconciliation before rejecting duplicate plans.
+* **Client Transport & Profile UI (`gatewayAuthService.ts`, `SessionContext.tsx`, `AccountPlanModal.tsx`):** Preserved reconciled `subscription`, `alreadyScheduled`, `alreadyActive`, and `message` fields across both success and error responses; added automatic quota refresh on modal open and Customer Portal return; and updated `AccountPlanModal.tsx` to display the authoritative DB end/pause/renewal date in the profile badge, lifecycle banner (with one-click `Keep Subscription`), `Time remaining` footer, and cancellation confirmation messages.
+* **Automated Regression & Production Rollout:** Expanded `scripts/test_paddle_fulfillment_provisioning.ts` to verify idempotent `subscription_locked_pending_changes` cancel reconciliation with date, scheduled-pause conflict handling with date, and `GET /v1/account/quota?sync=1`. Deployed updated gateway to Fly.io (`https://dualai-cloud-gateway.fly.dev`).
+
+### 4. Result
+* `npm run typecheck`, `npm run build`, `npm run build:gateway`, `scripts/test_paddle_fulfillment_provisioning.ts` (9/9 PASS), `scripts/test_zero_trust_security.ts` (9/9 PASS), and `npm run security:gate` (PASS, 0 secrets) all passed with 0 errors.
+* Live production health verified at `https://dualai-cloud-gateway.fly.dev/v1/health` (`HTTP 200 OK`).
+
