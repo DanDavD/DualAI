@@ -24,6 +24,7 @@ export interface TranslationManagerCallbacks {
   onDraftStart?: (result: TranslationResult) => void
   onDraftToken?: (utteranceId: string, token: TranslationToken, accumulatedText: string) => void
   onDraftComplete?: (result: TranslationResult) => void
+  onDraftError?: (utteranceId: string, error: Error) => void
   onTelemetry: (telemetry: TranslationTelemetry) => void
   onError: (error: Error) => void
   onQuotaExhausted?: (message: string) => void
@@ -93,7 +94,9 @@ export class TranslationManager {
   public async translateDraftPreview(
     utterance: TranscriptUtterance,
     domainId: DomainId,
-    targetLang: string
+    targetLang: string,
+    operatingMode?: 'translate' | 'conversation',
+    sourceLangOverride?: string
   ): Promise<void> {
     const draftCallbacks: TranslationCallbacks = {
       onStart: (result) => this.callbacks.onDraftStart?.(result),
@@ -102,8 +105,8 @@ export class TranslationManager {
       onComplete: (result) => this.callbacks.onDraftComplete?.(result),
       onTelemetry: (telemetry) => this.callbacks.onTelemetry(telemetry),
       onError: (err) => {
-        // Live previews degrade quietly without popping error banners if superseded
-        console.warn('[DUALAI] Live draft preview warning:', err.message)
+        console.warn('[DUALAI] Background translation warning:', err.message)
+        this.callbacks.onDraftError?.(utterance.id, err)
       }
     }
 
@@ -114,7 +117,7 @@ export class TranslationManager {
         targetLang,
         this.dialogueHistory,
         draftCallbacks,
-        { isDraft: true }
+        { isDraft: true, operatingMode, sourceLangOverride }
       )
       return
     }
@@ -128,8 +131,11 @@ export class TranslationManager {
   public async translateUtterance(
     utterance: TranscriptUtterance,
     domainId: DomainId,
-    targetLang: string
+    targetLang: string,
+    operatingMode?: 'translate' | 'conversation',
+    sourceLangOverride?: string
   ): Promise<void> {
+    const effectiveSourceLang = sourceLangOverride || utterance.language || 'en'
     const internalCallbacks: TranslationCallbacks = {
       onStart: (result) => this.callbacks.onTranslationStart(result),
       onToken: (token, accumulatedText) =>
@@ -139,7 +145,7 @@ export class TranslationManager {
           id: `turn-${utterance.id}`,
           channelId: utterance.channelId,
           speakerLabel: utterance.speakerLabel,
-          sourceLang: utterance.language,
+          sourceLang: effectiveSourceLang,
           targetLang,
           sourceText: utterance.text,
           translatedText: result.translatedText,
@@ -159,7 +165,7 @@ export class TranslationManager {
         targetLang,
         this.dialogueHistory,
         internalCallbacks,
-        { isDraft: false }
+        { isDraft: false, operatingMode, sourceLangOverride: effectiveSourceLang }
       )
       return
     }
@@ -170,6 +176,10 @@ export class TranslationManager {
       targetLang,
       internalCallbacks
     )
+  }
+
+  public promoteDraftToFinal(channelId: ChannelId, utteranceId: string): boolean {
+    return this.gatewayEngine?.promoteDraftToFinal(channelId, utteranceId) ?? false
   }
 
   public cancelDraftPreview(channelId?: ChannelId): void {

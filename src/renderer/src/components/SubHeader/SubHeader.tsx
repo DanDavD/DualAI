@@ -1,5 +1,5 @@
 import React from 'react'
-import { ArrowRightLeft, Zap } from 'lucide-react'
+import { ArrowRightLeft } from 'lucide-react'
 import { useSession } from '../../context/SessionContext'
 import { LanguageSelector } from './LanguageSelector'
 import { WorkspaceLayoutPopover } from './WorkspaceLayoutPopover'
@@ -11,9 +11,7 @@ export const SubHeader: React.FC = () => {
     setSourceLang,
     targetLang,
     setTargetLang,
-    swapLanguages,
-    latencyMode,
-    setLatencyMode
+    swapLanguages
   } = useSession()
 
   return (
@@ -43,47 +41,10 @@ export const SubHeader: React.FC = () => {
         />
       </div>
 
-      {/* Right Cluster: Separate Layout Menu, Text & Colors Menu, and Live / Accurate Toggle */}
+      {/* Right Cluster: Layout Menu and Text & Colors Menu */}
       <div className="flex items-center space-x-2">
         <WorkspaceLayoutPopover />
         <TextPersonalizationPopover />
-
-        <div
-          role="radiogroup"
-          aria-label="Audio Latency Precision Mode"
-          className="flex h-7 items-center rounded border border-surface-border bg-surface-panel p-0.5"
-        >
-          <button
-            type="button"
-            role="radio"
-            aria-checked={latencyMode === 'sub_second_live'}
-            onClick={() => setLatencyMode('sub_second_live')}
-            className={`flex h-full items-center space-x-1 rounded px-2 text-[11px] font-medium transition focus:outline-none ${
-              latencyMode === 'sub_second_live'
-                ? 'bg-surface-active text-text-primary'
-                : 'text-text-muted hover:text-text-secondary'
-            }`}
-            title="Live mode: streams progressive draft translation while speaking, then finalizes after a 2-second pause"
-          >
-            <Zap className="h-3 w-3 text-accent-amber" strokeWidth={1.5} />
-            <span>Live</span>
-          </button>
-
-          <button
-            type="button"
-            role="radio"
-            aria-checked={latencyMode === 'sentence_accurate'}
-            onClick={() => setLatencyMode('sentence_accurate')}
-            className={`flex h-full items-center rounded px-2 text-[11px] font-medium transition focus:outline-none ${
-              latencyMode === 'sentence_accurate'
-                ? 'bg-surface-active text-text-primary'
-                : 'text-text-muted hover:text-text-secondary'
-            }`}
-            title="Accurate mode: accumulates the full paragraph until a 2-second pause before translating"
-          >
-            <span>Accurate</span>
-          </button>
-        </div>
       </div>
     </div>
   )

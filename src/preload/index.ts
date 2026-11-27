@@ -7,7 +7,9 @@ import {
   TranscriptPayload,
   ShortcutRegistrationReport,
   OAuthPreparedSession,
-  OAuthCallbackResult
+  OAuthCallbackResult,
+  SystemMicMuteResult,
+  ClientTelemetryPayload
 } from '../types/ipc'
 import { AudioLevelMetric } from '../types/audio'
 import { HudBounds, HudSettings, ShortcutBinding } from '../types/settings'
@@ -33,6 +35,12 @@ const electronBridgeApi: ElectronBridgeApi = {
   },
   captureScreenRegion: async (bounds: CaptureBounds): Promise<string> => {
     return ipcRenderer.invoke(IPC_CHANNELS.AUDIO_CAPTURE_LOOPBACK, bounds)
+  },
+  setSystemMicMute: async (muted: boolean): Promise<SystemMicMuteResult> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AUDIO_SET_SYSTEM_MIC_MUTE, muted)
+  },
+  getSystemMicMute: async (): Promise<{ muted: boolean }> => {
+    return ipcRenderer.invoke(IPC_CHANNELS.AUDIO_GET_SYSTEM_MIC_MUTE)
   },
 
   // HUD Controls (Day 10)
@@ -100,6 +108,9 @@ const electronBridgeApi: ElectronBridgeApi = {
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.CHECKOUT_CLOSED, handler)
     }
+  },
+  recordClientTelemetry: (payload: ClientTelemetryPayload): void => {
+    ipcRenderer.send(IPC_CHANNELS.TELEMETRY_RECORD_SESSION, payload)
   },
 
   // Event Listeners (Main -> Renderer)

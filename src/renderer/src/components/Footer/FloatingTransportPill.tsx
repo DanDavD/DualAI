@@ -18,7 +18,6 @@ import { formatPlatformShortcut } from '../../utils/platform'
 interface AudioDeviceOption {
   deviceId: string
   label: string
-  isDefaultAlias?: boolean
 }
 
 function formatElapsed(seconds: number): string {
@@ -36,7 +35,7 @@ function cleanDeviceLabel(rawLabel: string, fallback: string): string {
 
 /**
  * Floating Bottom-Right Apple Liquid Glass Transport Pill + Whisper-Quiet Bottom-Left Shortcut Hints.
- * Houses Discord-inspired split Mic & Headphones controls with upward Liquid Glass device menus,
+ * Houses System-Wide Call Microphone Mute, Call Listening Pause + Output Device selector,
  * Mini View floating toggle, and high-contrast Start/Stop CTA.
  */
 export const FloatingTransportPill: React.FC = () => {
@@ -50,9 +49,7 @@ export const FloatingTransportPill: React.FC = () => {
     interimTranscriptA,
     interimTranscriptB,
     clearTranscripts,
-    selectedInputDeviceId,
     selectedOutputDeviceId,
-    setSelectedInputDeviceId,
     setSelectedOutputDeviceId,
     workspaceDisplaySettings,
     startAudioEngine,
@@ -63,13 +60,13 @@ export const FloatingTransportPill: React.FC = () => {
   } = useSession()
 
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
-  const [openMenu, setOpenMenu] = useState<'input' | 'output' | null>(null)
-  const [inputDevices, setInputDevices] = useState<AudioDeviceOption[]>([])
+  const [openMenu, setOpenMenu] = useState<'output' | null>(null)
   const [outputDevices, setOutputDevices] = useState<AudioDeviceOption[]>([])
-  const [defaultInputName, setDefaultInputName] = useState<string | null>(null)
   const [defaultOutputName, setDefaultOutputName] = useState<string | null>(null)
 
   const pillContainerRef = useRef<HTMLDivElement>(null)
+  const outputMenuRef = useRef<HTMLDivElement>(null)
+  const outputTriggerRef = useRef<HTMLButtonElement>(null)
   const hasToggledMicRef = useRef(false)
   const prevMicMutedRef = useRef(isCoughMuted)
   const hasToggledHeadphonesRef = useRef(false)
@@ -104,31 +101,13 @@ export const FloatingTransportPill: React.FC = () => {
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) return
     try {
       const all = await navigator.mediaDevices.enumerateDevices()
-      const inputs: AudioDeviceOption[] = []
       const outputs: AudioDeviceOption[] = []
-      const seenInputIds = new Set<string>()
       const seenOutputIds = new Set<string>()
-      let defIn: string | null = null
       let defOut: string | null = null
-
-      let inIdx = 1
       let outIdx = 1
 
       for (const dev of all) {
-        if (dev.kind === 'audioinput') {
-          if (dev.deviceId === 'default') {
-            if (dev.label) defIn = cleanDeviceLabel(dev.label, '')
-            continue
-          }
-          if (dev.deviceId === 'communications' || !dev.deviceId || seenInputIds.has(dev.deviceId)) {
-            continue
-          }
-          seenInputIds.add(dev.deviceId)
-          inputs.push({
-            deviceId: dev.deviceId,
-            label: cleanDeviceLabel(dev.label, `Microphone ${inIdx++}`)
-          })
-        } else if (dev.kind === 'audiooutput') {
+        if (dev.kind === 'audiooutput') {
           if (dev.deviceId === 'default') {
             if (dev.label) defOut = cleanDeviceLabel(dev.label, '')
             continue
@@ -148,9 +127,7 @@ export const FloatingTransportPill: React.FC = () => {
         }
       }
 
-      setDefaultInputName(defIn)
       setDefaultOutputName(defOut)
-      setInputDevices(inputs)
       setOutputDevices(outputs)
     } catch {
       // Ignore enumeration errors in restricted environments
@@ -173,28 +150,29 @@ export const FloatingTransportPill: React.FC = () => {
   useEffect(() => {
     if (!openMenu) return
     void refreshDevices()
+    const focusTimer = setTimeout(() => {
+      const firstItem = outputMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitemradio"]')
+      firstItem?.focus()
+    }, 0)
     const handleOutside = (e: MouseEvent) => {
       if (pillContainerRef.current && !pillContainerRef.current.contains(e.target as Node)) {
         setOpenMenu(null)
       }
     }
     const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpenMenu(null)
+      if (e.key === 'Escape') {
+        setOpenMenu(null)
+        outputTriggerRef.current?.focus()
+      }
     }
     document.addEventListener('mousedown', handleOutside)
     document.addEventListener('keydown', handleEsc)
     return () => {
+      clearTimeout(focusTimer)
       document.removeEventListener('mousedown', handleOutside)
       document.removeEventListener('keydown', handleEsc)
     }
   }, [openMenu, refreshDevices])
-
-  const activeInputLabel =
-    selectedInputDeviceId === 'default'
-      ? defaultInputName
-        ? `System Default (${defaultInputName})`
-        : 'System Default Microphone'
-      : inputDevices.find((d) => d.deviceId === selectedInputDeviceId)?.label || 'Custom Microphone'
 
   const activeOutputLabel =
     selectedOutputDeviceId === 'default'
@@ -218,7 +196,7 @@ export const FloatingTransportPill: React.FC = () => {
             <kbd className="rounded border border-white/[0.1] bg-white/[0.06] px-1.5 py-0.5 font-mono text-[9px] text-white/65">
               SPACE
             </kbd>
-            <span>Mute</span>
+            <span>Mute Mic</span>
           </span>
           <span className="h-2.5 w-px bg-white/[0.08]" />
           <span className="flex items-center space-x-1">
@@ -244,168 +222,115 @@ export const FloatingTransportPill: React.FC = () => {
         aria-label="Session Transport Controls"
         className="fixed bottom-5 right-5 z-30 select-none"
       >
-        {/* Upward Liquid Glass Input / Output Device Selector Popover */}
-        {openMenu && (
+        {/* Upward Liquid Glass Output Device Selector Popover */}
+        {openMenu === 'output' && (
           <div
+            ref={outputMenuRef}
             role="menu"
-            aria-label={openMenu === 'input' ? 'Select Input Device' : 'Select Output Device'}
+            aria-label="Select Output Device"
+            onKeyDown={(e) => {
+              const items = Array.from(
+                e.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')
+              )
+              if (items.length === 0) return
+              const currentIdx = items.findIndex((el) => el === document.activeElement)
+              if (e.key === 'ArrowDown') {
+                e.preventDefault()
+                items[(currentIdx + 1) % items.length]?.focus()
+              } else if (e.key === 'ArrowUp') {
+                e.preventDefault()
+                items[(currentIdx - 1 + items.length) % items.length]?.focus()
+              } else if (e.key === 'Home') {
+                e.preventDefault()
+                items[0]?.focus()
+              } else if (e.key === 'End') {
+                e.preventDefault()
+                items[items.length - 1]?.focus()
+              }
+            }}
             className="glass-sheet animate-glass-pop-up absolute bottom-full left-0 mb-2.5 z-50 w-[290px] max-w-[calc(100vw-32px)] rounded-[20px] p-2 text-left text-xs text-text-primary"
           >
             <div className="flex items-center justify-between px-2.5 py-1.5">
               <div className="flex items-center space-x-1.5">
-                {openMenu === 'input' ? (
-                  <Mic className="h-3.5 w-3.5 text-accent-steel" strokeWidth={1.75} />
-                ) : (
-                  <Headphones className="h-3.5 w-3.5 text-accent-steel" strokeWidth={1.75} />
-                )}
+                <Headphones className="h-3.5 w-3.5 text-accent-steel" strokeWidth={1.75} />
                 <span className="text-[11px] font-semibold tracking-tight text-white">
-                  {openMenu === 'input' ? 'Input Device' : 'Output Device'}
+                  Output Device
                 </span>
               </div>
               <span className="text-[10px] text-white/40">
-                {openMenu === 'input'
-                  ? `${inputDevices.length + 1} available`
-                  : `${outputDevices.length + 1} available`}
+                {`${outputDevices.length + 1} available`}
               </span>
             </div>
 
             <div className="mt-0.5 max-h-60 overflow-y-auto space-y-0.5 pr-0.5">
-              {openMenu === 'input' ? (
-                <>
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={selectedOutputDeviceId === 'default'}
+                onClick={() => {
+                  setSelectedOutputDeviceId('default')
+                  setOpenMenu(null)
+                }}
+                className={`glass-control-hover flex w-full items-center justify-between rounded-xl border px-2.5 py-2 text-left transition-colors ${
+                  selectedOutputDeviceId === 'default'
+                    ? 'border-accent-steel/45 bg-accent-steel/20 text-white font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]'
+                    : 'border-transparent text-white/75 hover:bg-white/[0.08] hover:text-white'
+                }`}
+              >
+                <div className="min-w-0 pr-2">
+                  <div className="truncate text-[11px] leading-tight">System Default</div>
+                  {defaultOutputName && (
+                    <div className="mt-0.5 truncate text-[10px] font-normal text-white/45">
+                      {defaultOutputName}
+                    </div>
+                  )}
+                </div>
+                {selectedOutputDeviceId === 'default' && (
+                  <Check className="h-3.5 w-3.5 shrink-0 text-accent-steel" strokeWidth={2.25} />
+                )}
+              </button>
+
+              {outputDevices.map((dev) => {
+                const isSelected = selectedOutputDeviceId === dev.deviceId
+                return (
                   <button
+                    key={dev.deviceId}
                     type="button"
                     role="menuitemradio"
-                    aria-checked={selectedInputDeviceId === 'default'}
+                    aria-checked={isSelected}
                     onClick={() => {
-                      setSelectedInputDeviceId('default')
+                      setSelectedOutputDeviceId(dev.deviceId)
                       setOpenMenu(null)
                     }}
                     className={`glass-control-hover flex w-full items-center justify-between rounded-xl border px-2.5 py-2 text-left transition-colors ${
-                      selectedInputDeviceId === 'default'
+                      isSelected
                         ? 'border-accent-steel/45 bg-accent-steel/20 text-white font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]'
                         : 'border-transparent text-white/75 hover:bg-white/[0.08] hover:text-white'
                     }`}
                   >
-                    <div className="min-w-0 pr-2">
-                      <div className="truncate text-[11px] leading-tight">System Default</div>
-                      {defaultInputName && (
-                        <div className="mt-0.5 truncate text-[10px] font-normal text-white/45">
-                          {defaultInputName}
-                        </div>
-                      )}
-                    </div>
-                    {selectedInputDeviceId === 'default' && (
+                    <span className="truncate pr-2 text-[11px] leading-tight">{dev.label}</span>
+                    {isSelected && (
                       <Check
                         className="h-3.5 w-3.5 shrink-0 text-accent-steel"
                         strokeWidth={2.25}
                       />
                     )}
                   </button>
-
-                  {inputDevices.map((dev) => {
-                    const isSelected = selectedInputDeviceId === dev.deviceId
-                    return (
-                      <button
-                        key={dev.deviceId}
-                        type="button"
-                        role="menuitemradio"
-                        aria-checked={isSelected}
-                        onClick={() => {
-                          setSelectedInputDeviceId(dev.deviceId)
-                          setOpenMenu(null)
-                        }}
-                        className={`glass-control-hover flex w-full items-center justify-between rounded-xl border px-2.5 py-2 text-left transition-colors ${
-                          isSelected
-                            ? 'border-accent-steel/45 bg-accent-steel/20 text-white font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]'
-                            : 'border-transparent text-white/75 hover:bg-white/[0.08] hover:text-white'
-                        }`}
-                      >
-                        <span className="truncate pr-2 text-[11px] leading-tight">{dev.label}</span>
-                        {isSelected && (
-                          <Check
-                            className="h-3.5 w-3.5 shrink-0 text-accent-steel"
-                            strokeWidth={2.25}
-                          />
-                        )}
-                      </button>
-                    )
-                  })}
-                </>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={selectedOutputDeviceId === 'default'}
-                    onClick={() => {
-                      setSelectedOutputDeviceId('default')
-                      setOpenMenu(null)
-                    }}
-                    className={`glass-control-hover flex w-full items-center justify-between rounded-xl border px-2.5 py-2 text-left transition-colors ${
-                      selectedOutputDeviceId === 'default'
-                        ? 'border-accent-steel/45 bg-accent-steel/20 text-white font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]'
-                        : 'border-transparent text-white/75 hover:bg-white/[0.08] hover:text-white'
-                    }`}
-                  >
-                    <div className="min-w-0 pr-2">
-                      <div className="truncate text-[11px] leading-tight">System Default</div>
-                      {defaultOutputName && (
-                        <div className="mt-0.5 truncate text-[10px] font-normal text-white/45">
-                          {defaultOutputName}
-                        </div>
-                      )}
-                    </div>
-                    {selectedOutputDeviceId === 'default' && (
-                      <Check
-                        className="h-3.5 w-3.5 shrink-0 text-accent-steel"
-                        strokeWidth={2.25}
-                      />
-                    )}
-                  </button>
-
-                  {outputDevices.map((dev) => {
-                    const isSelected = selectedOutputDeviceId === dev.deviceId
-                    return (
-                      <button
-                        key={dev.deviceId}
-                        type="button"
-                        role="menuitemradio"
-                        aria-checked={isSelected}
-                        onClick={() => {
-                          setSelectedOutputDeviceId(dev.deviceId)
-                          setOpenMenu(null)
-                        }}
-                        className={`glass-control-hover flex w-full items-center justify-between rounded-xl border px-2.5 py-2 text-left transition-colors ${
-                          isSelected
-                            ? 'border-accent-steel/45 bg-accent-steel/20 text-white font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]'
-                            : 'border-transparent text-white/75 hover:bg-white/[0.08] hover:text-white'
-                        }`}
-                      >
-                        <span className="truncate pr-2 text-[11px] leading-tight">{dev.label}</span>
-                        {isSelected && (
-                          <Check
-                            className="h-3.5 w-3.5 shrink-0 text-accent-steel"
-                            strokeWidth={2.25}
-                          />
-                        )}
-                      </button>
-                    )
-                  })}
-                </>
-              )}
+                )
+              })}
             </div>
           </div>
         )}
 
         <div className="glass-capsule flex items-center space-x-1.5 rounded-full p-1.5 shadow-[0_14px_36px_-6px_rgba(0,0,0,0.65)]">
-          {/* 1. Split Microphone Control (Mute + Input Device Dropdown) */}
+          {/* 1. System-Wide Call Microphone Mute (Mutes OS Mic across Zoom/Teams/Meet; AI never listens to mic) */}
           <div
             data-tour-id="mute"
             className="flex h-9 items-center rounded-full border border-white/[0.08] bg-white/[0.045] p-0.5"
           >
             <GlassTooltip
-              label={isCoughMuted ? 'Unmute Microphone' : 'Mute Microphone'}
-              description={activeInputLabel}
+              label={isCoughMuted ? 'Unmute System Microphone' : 'Mute System Microphone'}
+              description="Mutes your mic across Zoom, Teams & all calls — DualAI never listens to your mic"
               shortcut="SPACE"
               placement="top"
               align="left"
@@ -414,16 +339,18 @@ export const FloatingTransportPill: React.FC = () => {
               <button
                 type="button"
                 onClick={(e) => {
-                  e.currentTarget.blur()
+                  if (e.detail !== 0) e.currentTarget.blur()
                   toggleCoughMute()
                 }}
                 aria-pressed={isCoughMuted}
                 aria-label={
                   isCoughMuted
-                    ? 'Unmute microphone (Spacebar)'
-                    : 'Engage instant cough mute (Spacebar)'
+                    ? 'Unmute system microphone across calls (Spacebar)'
+                    : 'Mute system microphone across calls (Spacebar)'
                 }
-                className="glass-control-hover flex h-8 w-8 items-center justify-center rounded-l-full focus:outline-none"
+                className={`glass-control-hover flex h-8 w-8 items-center justify-center rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-steel/70 ${
+                  isCoughMuted ? 'bg-accent-crimson/20' : ''
+                }`}
               >
                 {isCoughMuted ? (
                   <MicOff
@@ -442,46 +369,13 @@ export const FloatingTransportPill: React.FC = () => {
                 )}
               </button>
             </GlassTooltip>
-
-            <span className="h-4 w-px bg-white/[0.09]" />
-
-            <GlassTooltip
-              label="Input Device"
-              description={activeInputLabel}
-              placement="top"
-              align="left"
-              disabled={openMenu !== null}
-            >
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.currentTarget.blur()
-                  setOpenMenu((prev) => (prev === 'input' ? null : 'input'))
-                }}
-                aria-expanded={openMenu === 'input'}
-                aria-haspopup="menu"
-                aria-label="Choose input microphone device"
-                className={`glass-control-hover flex h-8 w-5 items-center justify-center rounded-r-full focus:outline-none ${
-                  openMenu === 'input'
-                    ? 'bg-white/[0.15] text-white'
-                    : 'text-white/55 hover:text-white'
-                }`}
-              >
-                <ChevronDown
-                  className={`h-3 w-3 transition-transform duration-200 ${
-                    openMenu === 'input' ? 'rotate-180' : ''
-                  }`}
-                  strokeWidth={2}
-                />
-              </button>
-            </GlassTooltip>
           </div>
 
-          {/* 2. Split Headphones Control (Mute System Audio + Output Device Dropdown) */}
+          {/* 2. Split Headphones Control (Pause DualAI Listening + Output Device Dropdown) */}
           <div className="flex h-9 items-center rounded-full border border-white/[0.08] bg-white/[0.045] p-0.5">
             <GlassTooltip
-              label={isSystemAudioMuted ? 'Unmute Call Audio' : 'Mute Call Audio'}
-              description={activeOutputLabel}
+              label={isSystemAudioMuted ? 'Resume DualAI Listening' : 'Pause DualAI Listening'}
+              description="Pauses live translation of incoming call audio without muting your speakers"
               placement="top"
               align="center"
               disabled={openMenu !== null}
@@ -489,14 +383,18 @@ export const FloatingTransportPill: React.FC = () => {
               <button
                 type="button"
                 onClick={(e) => {
-                  e.currentTarget.blur()
+                  if (e.detail !== 0) e.currentTarget.blur()
                   toggleSystemAudioMute()
                 }}
                 aria-pressed={isSystemAudioMuted}
                 aria-label={
-                  isSystemAudioMuted ? 'Unmute incoming call audio' : 'Mute incoming call audio'
+                  isSystemAudioMuted
+                    ? 'Resume DualAI live call translation'
+                    : 'Pause DualAI live call translation'
                 }
-                className="glass-control-hover flex h-8 w-8 items-center justify-center rounded-l-full focus:outline-none"
+                className={`glass-control-hover flex h-8 w-8 items-center justify-center rounded-l-full focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-steel/70 ${
+                  isSystemAudioMuted ? 'bg-accent-crimson/20' : ''
+                }`}
               >
                 {isSystemAudioMuted ? (
                   <HeadphoneOff
@@ -526,15 +424,16 @@ export const FloatingTransportPill: React.FC = () => {
               disabled={openMenu !== null}
             >
               <button
+                ref={outputTriggerRef}
                 type="button"
                 onClick={(e) => {
-                  e.currentTarget.blur()
+                  if (e.detail !== 0) e.currentTarget.blur()
                   setOpenMenu((prev) => (prev === 'output' ? null : 'output'))
                 }}
                 aria-expanded={openMenu === 'output'}
                 aria-haspopup="menu"
                 aria-label="Choose output audio device"
-                className={`glass-control-hover flex h-8 w-5 items-center justify-center rounded-r-full focus:outline-none ${
+                className={`glass-control-hover flex h-8 w-5 items-center justify-center rounded-r-full focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-steel/70 ${
                   openMenu === 'output'
                     ? 'bg-white/[0.15] text-white'
                     : 'text-white/55 hover:text-white'
@@ -566,11 +465,11 @@ export const FloatingTransportPill: React.FC = () => {
                 type="button"
                 disabled={!hasClearableContent}
                 onClick={(e) => {
-                  e.currentTarget.blur()
+                  if (e.detail !== 0) e.currentTarget.blur()
                   clearTranscripts()
                 }}
                 aria-label="Clear transcript history"
-                className="glass-control-hover flex h-9 w-9 items-center justify-center rounded-full text-white/65 hover:text-accent-crimson focus:outline-none disabled:opacity-30 disabled:pointer-events-none"
+                className="glass-control-hover flex h-9 w-9 items-center justify-center rounded-full text-white/65 hover:text-accent-crimson focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-steel/70 disabled:opacity-30 disabled:pointer-events-none"
               >
                 <Trash2 className="h-4 w-4" strokeWidth={1.75} />
               </button>
@@ -594,12 +493,12 @@ export const FloatingTransportPill: React.FC = () => {
               <button
                 type="button"
                 onClick={(e) => {
-                  e.currentTarget.blur()
+                  if (e.detail !== 0) e.currentTarget.blur()
                   void toggleHud()
                 }}
                 aria-pressed={isHudOpen}
                 aria-label={isHudOpen ? 'Close Mini View' : 'Open compact Mini View overlay'}
-                className={`glass-control-hover flex h-9 items-center space-x-1.5 rounded-full px-3 text-xs font-medium whitespace-nowrap focus:outline-none ${
+                className={`glass-control-hover flex h-9 items-center space-x-1.5 rounded-full px-3 text-xs font-medium whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-steel/70 ${
                   isHudOpen
                     ? 'bg-accent-steel/22 text-accent-steel border border-accent-steel/45'
                     : 'text-white/80 hover:text-white'
@@ -611,7 +510,7 @@ export const FloatingTransportPill: React.FC = () => {
             </GlassTooltip>
           </div>
 
-          {/* 4. High-Contrast Apple CTA Pill (White Start / Apple Red Stop) */}
+          {/* 5. High-Contrast Apple CTA Pill (White Start / Apple Red Stop) */}
           <div data-tour-id="start-stop" className="inline-flex">
             <GlassTooltip
               label={isAudioActive ? 'Stop Translation' : 'Start Translation'}
@@ -626,7 +525,7 @@ export const FloatingTransportPill: React.FC = () => {
                 type="button"
                 disabled={isInitializingAudio}
                 onClick={(e) => {
-                  e.currentTarget.blur()
+                  if (e.detail !== 0) e.currentTarget.blur()
                   if (isAudioActive) {
                     stopAudioEngine()
                   } else {
@@ -635,7 +534,7 @@ export const FloatingTransportPill: React.FC = () => {
                 }}
                 aria-pressed={isAudioActive}
                 aria-label={isAudioActive ? 'Stop Translation Session' : 'Start Translation Session'}
-                className={`flex h-9 items-center justify-center space-x-2 rounded-full px-5 text-xs font-semibold tracking-tight whitespace-nowrap focus:outline-none disabled:opacity-60 ${
+                className={`flex h-9 items-center justify-center space-x-2 rounded-full px-5 text-xs font-semibold tracking-tight whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-steel/70 disabled:opacity-60 ${
                   isAudioActive ? 'glass-cta-stop' : 'glass-cta-start'
                 }`}
               >

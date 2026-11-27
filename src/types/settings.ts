@@ -105,15 +105,15 @@ export interface ShortcutBinding {
 export const DEFAULT_SHORTCUT_BINDINGS: ShortcutBinding[] = [
   {
     id: 'ptt',
-    label: 'Push-to-Talk (PTT)',
-    description: 'Toggle active microphone capture window while running in background',
+    label: 'Start / Stop Session',
+    description: 'Toggle live call audio translation while running in background',
     accelerator: 'CommandOrControl+Shift+P',
     isGlobal: true
   },
   {
     id: 'mute',
-    label: 'Instant Cough / Mute',
-    description: 'Cut microphone input within 1 audio buffer (0ms audible bleed)',
+    label: 'System Call Mic Mute',
+    description: 'Mute or unmute your OS microphone across Zoom, Teams, and calls during hold',
     accelerator: 'CommandOrControl+Shift+M',
     isGlobal: true
   },

@@ -17,6 +17,8 @@ export const IPC_CHANNELS = {
   AUDIO_GET_SOURCES: 'dualai:audio-get-sources',
   AUDIO_CAPTURE_LOOPBACK: 'dualai:audio-capture-loopback',
   AUDIO_STOP_LOOPBACK: 'dualai:audio-stop-loopback',
+  AUDIO_SET_SYSTEM_MIC_MUTE: 'dualai:audio-set-system-mic-mute',
+  AUDIO_GET_SYSTEM_MIC_MUTE: 'dualai:audio-get-system-mic-mute',
 
   // Global Shortcuts & Events (Day 09 & Day 11)
   SHORTCUT_MUTE_TOGGLE: 'dualai:shortcut-mute-toggle',
@@ -50,7 +52,10 @@ export const IPC_CHANNELS = {
 
   // In-app Paddle checkout window
   CHECKOUT_OPEN: 'dualai:checkout-open',
-  CHECKOUT_CLOSED: 'dualai:checkout-closed'
+  CHECKOUT_CLOSED: 'dualai:checkout-closed',
+
+  // Zero-PII local cost & token telemetry (dev diagnostic only)
+  TELEMETRY_RECORD_SESSION: 'dualai:telemetry-record-session'
 } as const
 
 export type IpcChannel = typeof IPC_CHANNELS[keyof typeof IPC_CHANNELS]
@@ -104,6 +109,31 @@ export interface OAuthCallbackResult {
   error?: string
 }
 
+export interface SystemMicMuteResult {
+  ok: boolean
+  muted: boolean
+  error?: string
+}
+
+export interface ClientTelemetryPayload {
+  sessionId: string
+  startedAtIso: string
+  endedAtIso: string | null
+  status: 'active' | 'closed'
+  gatewayUrl: string
+  mode: 'translate' | 'conversation'
+  pair: string
+  domain: string
+  wallClockMs: number
+  audioSecondsCaptured: number
+  audioSecondsSent: number
+  audioSecondsSuppressed: number
+  audioSecondsEchoBlocked: number
+  finalOriginalTokens: number
+  finalTranslationTokens: number
+  finalizesSent: number
+}
+
 /**
  * Contract exposed to Renderer via ContextBridge
  */
@@ -117,6 +147,8 @@ export interface ElectronBridgeApi {
   // Hardware & Loopback Sources
   getDesktopSources: () => Promise<ScreenSourceInfo[]>
   captureScreenRegion: (bounds: CaptureBounds) => Promise<string>
+  setSystemMicMute: (muted: boolean) => Promise<SystemMicMuteResult>
+  getSystemMicMute: () => Promise<{ muted: boolean }>
 
   // HUD Controls (Day 10)
   openHud: (initialBounds?: HudBounds) => Promise<boolean>
@@ -143,6 +175,9 @@ export interface ElectronBridgeApi {
   // In-app Paddle checkout (modal window, never leaves the app)
   openCheckoutWindow: (url: string) => Promise<boolean>
   onCheckoutClosed: (callback: (completed: boolean) => void) => () => void
+
+  // Zero-PII local cost & token diagnostic telemetry (dev only)
+  recordClientTelemetry: (payload: ClientTelemetryPayload) => void
 
   // Event Listeners (Main -> Renderer)
   onShortcutMute: (callback: () => void) => () => void

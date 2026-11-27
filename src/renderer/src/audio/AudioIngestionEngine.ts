@@ -8,6 +8,7 @@
 import { ChannelId, AudioLevelMetric, VADEvent, LoopbackSourceStatus } from '../../../types/audio'
 import { CircularAudioBuffer } from './CircularAudioBuffer'
 import { PCM_PROCESSOR_CODE } from './PcmProcessorCode'
+import { downsampleInt16Pcm, TARGET_STREAM_SAMPLE_RATE } from './pcmDownsampler'
 import { SileroVadEngine } from './vad/SileroVadEngine'
 
 export interface AudioEngineCallbacks {
@@ -38,7 +39,7 @@ export class AudioIngestionEngine {
   private gainNodeA: GainNode | null = null
   private workletNodeA: AudioWorkletNode | null = null
   private bufferChannelA: CircularAudioBuffer = new CircularAudioBuffer(16000)
-  private vadAccumulatorA: Int16Array = new Int16Array(480)
+  private vadAccumulatorA: Int16Array = new Int16Array(512)
   private vadAccumulatorIndexA: number = 0
 
   // Channel B (System Loopback)
@@ -48,12 +49,27 @@ export class AudioIngestionEngine {
   private gainNodeB: GainNode | null = null
   private workletNodeB: AudioWorkletNode | null = null
   private bufferChannelB: CircularAudioBuffer = new CircularAudioBuffer(16000)
-  private vadAccumulatorB: Int16Array = new Int16Array(480)
+  private vadAccumulatorB: Int16Array = new Int16Array(512)
   private vadAccumulatorIndexB: number = 0
   private loopbackStatus: LoopbackSourceStatus = 'inactive'
 
   // VAD Engine
   private vadEngine: SileroVadEngine | null = null
+
+  // Local-Only Self-Voice Echo Blocker (measures ONLY local mic RMS energy via AnalyserNode;
+  // ZERO microphone PCM bytes are ever captured, sent to VAD, or transmitted to Soniox)
+  private echoBlockerEnabled: boolean = false
+  private echoMonitorStream: MediaStream | null = null
+  private echoMonitorSource: MediaStreamAudioSourceNode | null = null
+  private echoMonitorAnalyser: AnalyserNode | null = null
+  private echoMonitorTimer: ReturnType<typeof setInterval> | null = null
+  private echoMonitorBuffer: Float32Array<ArrayBuffer> = new Float32Array(new ArrayBuffer(512 * 4))
+  private echoMicNoiseFloorRms: number = 0.0025
+  private echoVoiceStreak: number = 0
+  private lastLocalVoiceAtMs: number = 0
+  private echoMonitorGeneration: number = 0
+  private readonly echoTailHoldMs: number = 500
+  private boundDeviceChangeHandler: ((event: Event) => void) | null = null
 
   // Cough Mute, System Audio Mute & Output Sink State
   private isCoughMuted: boolean = false
@@ -74,11 +90,29 @@ export class AudioIngestionEngine {
 
   private setupDeviceChangeDetection(): void {
     if (typeof navigator !== 'undefined' && navigator.mediaDevices) {
-      navigator.mediaDevices.addEventListener('devicechange', (event) => {
+      this.boundDeviceChangeHandler = (event: Event) => {
         if (this.callbacks.onDeviceDisconnected) {
           this.callbacks.onDeviceDisconnected(event)
         }
-      })
+      }
+      navigator.mediaDevices.addEventListener('devicechange', this.boundDeviceChangeHandler)
+    }
+  }
+
+  public dispose(): void {
+    this.stop()
+    if (
+      this.boundDeviceChangeHandler &&
+      typeof navigator !== 'undefined' &&
+      navigator.mediaDevices
+    ) {
+      navigator.mediaDevices.removeEventListener('devicechange', this.boundDeviceChangeHandler)
+      this.boundDeviceChangeHandler = null
+    }
+    if (this.audioContext && this.audioContext.state !== 'closed') {
+      void this.audioContext.close().catch(() => undefined)
+      this.audioContext = null
+      this.workletLoaded = false
     }
   }
 
@@ -207,8 +241,10 @@ export class AudioIngestionEngine {
   }): Promise<void> {
     if (this.isRunning) return
 
-    const captureA = options.captureChannelA ?? true
+    // Listen-only architecture: DualAI NEVER captures, detects, or streams local microphone audio.
+    // Only Channel B (System Audio / Call Loopback) is ingested for AI interpretation.
     const captureB = options.captureChannelB ?? true
+    this.echoBlockerEnabled = false
 
     try {
       this.activeGainA = options.gainA
@@ -242,77 +278,11 @@ export class AudioIngestionEngine {
       }
       await this.vadEngine.start()
 
-      // 1. Channel A: Local Microphone Capture (only when routed)
-      if (captureA) {
-        const audioConstraints: MediaTrackConstraints = {
-          channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: options.echoCancellation,
-          noiseSuppression: options.noiseSuppression,
-          autoGainControl: false
-        }
-        if (options.deviceIdA && options.deviceIdA !== 'default') {
-          audioConstraints.deviceId = { exact: options.deviceIdA }
-        }
-
-        this.streamChannelA = await navigator.mediaDevices.getUserMedia({
-          audio: audioConstraints,
-          video: false
-        })
-
-        this.sourceNodeA = ctx.createMediaStreamSource(this.streamChannelA)
-        this.gainNodeA = ctx.createGain()
-        this.gainNodeA.gain.value = this.isCoughMuted ? 0.0 : options.gainA
-
-        this.workletNodeA = new AudioWorkletNode(ctx, 'pcm-processor', {
-          processorOptions: { channelId: 'channel_a' }
-        })
-
-        if (this.isCoughMuted) {
-          this.workletNodeA.port.postMessage({ type: 'set-mute', muted: true })
-        }
-
-        this.workletNodeA.port.onmessage = (event) => {
-          const { channelId, pcmData, rmsDb, peakDb, isClipping, timestampMs } = event.data
-          const samples = new Int16Array(pcmData)
-
-          if (!this.isCoughMuted) {
-            this.bufferChannelA.write(samples)
-          }
-
-          this.callbacks.onLevelMetric({
-            channelId,
-            rmsDb: this.isCoughMuted ? -60 : rmsDb,
-            peakDb: this.isCoughMuted ? -60 : peakDb,
-            isClipping: this.isCoughMuted ? false : isClipping,
-            timestampMs
-          })
-
-          this.callbacks.onPcmChunk(channelId, samples)
-
-          if (this.isCoughMuted) {
-            return
-          }
-
-          // Feed into 30ms (480-sample) accumulator for Silero VAD
-          for (let i = 0; i < samples.length; i++) {
-            this.vadAccumulatorA[this.vadAccumulatorIndexA++] = samples[i]
-            if (this.vadAccumulatorIndexA >= 480) {
-              this.vadEngine?.processPcmFrame('channel_a', this.vadAccumulatorA, timestampMs)
-              this.vadAccumulatorIndexA = 0
-            }
-          }
-        }
-
-        this.sourceNodeA.connect(this.gainNodeA)
-        this.gainNodeA.connect(this.workletNodeA)
-      }
-
-      // 2. Channel B: Native System Audio Loopback / Virtual Loopback Device (only when routed)
+      // Channel B: Native System Audio Loopback / Virtual Loopback Device (listen-only)
       if (captureB) {
         this.streamChannelB = await this.acquireChannelBStream(options.deviceIdB)
 
-        if (!this.streamChannelB && !captureA) {
+        if (!this.streamChannelB) {
           throw new Error(
             'Unable to capture System Audio Loopback. Check macOS Screen & System Audio Recording permission or configure a virtual loopback device (BlackHole) in Settings -> Audio.'
           )
@@ -356,10 +326,14 @@ export class AudioIngestionEngine {
             return
           }
 
-          // Feed into 30ms (480-sample) accumulator for Silero VAD
-          for (let i = 0; i < samples.length; i++) {
-            this.vadAccumulatorB[this.vadAccumulatorIndexB++] = samples[i]
-            if (this.vadAccumulatorIndexB >= 480) {
+          // Feed true 16kHz 512-sample (32ms) frames natively into Silero VAD v5
+          const vadPcmB =
+            ctx.sampleRate > TARGET_STREAM_SAMPLE_RATE
+              ? downsampleInt16Pcm(samples, ctx.sampleRate, TARGET_STREAM_SAMPLE_RATE)
+              : samples
+          for (let i = 0; i < vadPcmB.length; i++) {
+            this.vadAccumulatorB[this.vadAccumulatorIndexB++] = vadPcmB[i]
+            if (this.vadAccumulatorIndexB >= 512) {
               this.vadEngine?.processPcmFrame('channel_b', this.vadAccumulatorB, timestampMs)
               this.vadAccumulatorIndexB = 0
             }
@@ -371,6 +345,12 @@ export class AudioIngestionEngine {
       }
 
       this.isRunning = true
+
+      // Start Local-Only Self-Voice Echo Monitor strictly AFTER isRunning = true so async
+      // getUserMedia never aborts against a not-yet-running flag while getDisplayMedia resolves.
+      if (this.echoBlockerEnabled) {
+        void this.startSelfVoiceEchoMonitor(ctx)
+      }
     } catch (err) {
       this.stop()
       if (this.callbacks.onError) {
@@ -427,46 +407,13 @@ export class AudioIngestionEngine {
   }
 
   /**
-   * Hot-swap the active microphone input stream seamlessly mid-session with zero WebSocket drop.
+   * Local microphone capture is disabled in listen-only mode (no-op).
    */
   public async switchInputDevice(
-    deviceId: string,
-    options: { noiseSuppression: boolean; echoCancellation: boolean }
+    _deviceId: string,
+    _options: { noiseSuppression: boolean; echoCancellation: boolean }
   ): Promise<void> {
-    if (!this.isRunning || !this.audioContext || !this.gainNodeA) return
-
-    const audioConstraints: MediaTrackConstraints = {
-      channelCount: 1,
-      sampleRate: 16000,
-      echoCancellation: options.echoCancellation,
-      noiseSuppression: options.noiseSuppression,
-      autoGainControl: false
-    }
-    if (deviceId && deviceId !== 'default') {
-      audioConstraints.deviceId = { exact: deviceId }
-    }
-
-    const nextStream = await navigator.mediaDevices.getUserMedia({
-      audio: audioConstraints,
-      video: false
-    })
-
-    const nextSource = this.audioContext.createMediaStreamSource(nextStream)
-
-    if (this.sourceNodeA) {
-      try {
-        this.sourceNodeA.disconnect()
-      } catch {
-        // Ignore already disconnected
-      }
-    }
-    if (this.streamChannelA) {
-      this.streamChannelA.getTracks().forEach((track) => track.stop())
-    }
-
-    this.streamChannelA = nextStream
-    this.sourceNodeA = nextSource
-    this.sourceNodeA.connect(this.gainNodeA)
+    return
   }
 
   private async applyOutputSinkId(ctx: AudioContext, deviceId: string): Promise<void> {
@@ -518,6 +465,10 @@ export class AudioIngestionEngine {
     return this.isCoughMuted
   }
 
+  public getIsSystemAudioMuted(): boolean {
+    return this.isSystemAudioMuted
+  }
+
   /**
    * Audible Hardware Calibration Monitor Feedback (Day 11 DoD):
    * Plays a brief, smooth 440Hz reference tone scaled safely by the calibration gain slider.
@@ -555,32 +506,10 @@ export class AudioIngestionEngine {
   }
 
   /**
-   * Toggle live hardware microphone monitor loopback during Settings calibration
+   * Local microphone monitoring is disabled in listen-only mode (no-op).
    */
-  public setMonitorLoopback(enabled: boolean): void {
-    this.isMonitorLoopbackActive = enabled
-    if (!this.audioContext || !this.gainNodeA) return
-
-    if (enabled) {
-      if (!this.monitorGainNode) {
-        this.monitorGainNode = this.audioContext.createGain()
-        this.monitorGainNode.gain.value = 0.65
-      }
-      try {
-        this.gainNodeA.connect(this.monitorGainNode)
-        this.monitorGainNode.connect(this.audioContext.destination)
-      } catch {
-        // Already connected
-      }
-    } else if (this.monitorGainNode) {
-      try {
-        this.gainNodeA.disconnect(this.monitorGainNode)
-        this.monitorGainNode.disconnect()
-      } catch {
-        // Ignore if not connected
-      }
-      this.monitorGainNode = null
-    }
+  public setMonitorLoopback(_enabled: boolean): void {
+    this.isMonitorLoopbackActive = false
   }
 
   public getIsMonitorLoopbackActive(): boolean {
@@ -611,9 +540,118 @@ export class AudioIngestionEngine {
   }
 
   /**
+   * Starts a 100% local RMS-only microphone energy detector (AnalyserNode) so DualAI knows
+   * when the interpreter is actively speaking and suppresses return echo/sidetone from the call.
+   * ZERO microphone audio samples are ever recorded, buffered as PCM, or sent to any server.
+   */
+  private async startSelfVoiceEchoMonitor(ctx: AudioContext): Promise<void> {
+    this.stopSelfVoiceEchoMonitor()
+    const myGeneration = this.echoMonitorGeneration
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) return
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: false
+        },
+        video: false
+      })
+      if (!this.isRunning || !this.echoBlockerEnabled || this.echoMonitorGeneration !== myGeneration) {
+        stream.getTracks().forEach((t) => t.stop())
+        return
+      }
+
+      const source = ctx.createMediaStreamSource(stream)
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 512
+      source.connect(analyser)
+
+      this.echoMonitorStream = stream
+      this.echoMonitorSource = source
+      this.echoMonitorAnalyser = analyser
+      this.echoMicNoiseFloorRms = 0.0025
+      this.echoVoiceStreak = 0
+      this.lastLocalVoiceAtMs = 0
+
+      this.echoMonitorTimer = setInterval(() => {
+        if (!this.echoMonitorAnalyser || !this.echoBlockerEnabled || this.isCoughMuted) {
+          this.echoVoiceStreak = 0
+          return
+        }
+        this.echoMonitorAnalyser.getFloatTimeDomainData(this.echoMonitorBuffer)
+        let sumSq = 0
+        for (let i = 0; i < this.echoMonitorBuffer.length; i++) {
+          const s = this.echoMonitorBuffer[i]
+          sumSq += s * s
+        }
+        const rms = Math.sqrt(sumSq / this.echoMonitorBuffer.length)
+        const now = Date.now()
+        const currentlyActive = now - this.lastLocalVoiceAtMs <= this.echoTailHoldMs
+        const openFloor = Math.max(0.018, this.echoMicNoiseFloorRms * 4.5)
+        const holdFloor = Math.max(0.010, this.echoMicNoiseFloorRms * 2.8)
+        const threshold = currentlyActive ? holdFloor : openFloor
+
+        if (rms >= threshold) {
+          this.echoVoiceStreak++
+          // Require 3 consecutive 20ms frames (60ms) so desk taps/breathing never trigger echo block
+          if (currentlyActive || this.echoVoiceStreak >= 3) {
+            this.lastLocalVoiceAtMs = now
+          }
+        } else {
+          this.echoVoiceStreak = 0
+          const alpha = rms < this.echoMicNoiseFloorRms ? 0.15 : 0.03
+          const nextFloor = this.echoMicNoiseFloorRms * (1 - alpha) + rms * alpha
+          this.echoMicNoiseFloorRms = Math.max(0.0008, Math.min(0.025, nextFloor))
+        }
+      }, 20)
+    } catch {
+      // Gracefully degrade if mic permission is denied; System Audio still works uninterrupted
+    }
+  }
+
+  private stopSelfVoiceEchoMonitor(): void {
+    this.echoMonitorGeneration++
+    if (this.echoMonitorTimer) {
+      clearInterval(this.echoMonitorTimer)
+      this.echoMonitorTimer = null
+    }
+    if (this.echoMonitorSource) {
+      try {
+        this.echoMonitorSource.disconnect()
+      } catch {
+        // Ignore already disconnected
+      }
+      this.echoMonitorSource = null
+    }
+    this.echoMonitorAnalyser = null
+    if (this.echoMonitorStream) {
+      this.echoMonitorStream.getTracks().forEach((t) => t.stop())
+      this.echoMonitorStream = null
+    }
+    this.echoVoiceStreak = 0
+    this.lastLocalVoiceAtMs = 0
+  }
+
+  public setEchoBlockerEnabled(_enabled: boolean): void {
+    this.echoBlockerEnabled = false
+    this.stopSelfVoiceEchoMonitor()
+  }
+
+  public getIsLocalUserSpeaking(nowMs: number = Date.now()): boolean {
+    if (!this.echoBlockerEnabled || this.isCoughMuted || this.lastLocalVoiceAtMs === 0) {
+      return false
+    }
+    return nowMs - this.lastLocalVoiceAtMs <= this.echoTailHoldMs
+  }
+
+  /**
    * Stop audio ingestion and cleanly release hardware resources
    */
   public stop(): void {
+    this.stopSelfVoiceEchoMonitor()
     if (this.streamChannelA) {
       this.streamChannelA.getTracks().forEach((track) => track.stop())
       this.streamChannelA = null
@@ -649,8 +687,14 @@ export class AudioIngestionEngine {
       this.gainNodeB = null
     }
     if (this.workletNodeB) {
+      this.workletNodeB.port.onmessage = null
+      this.workletNodeB.port.close()
       this.workletNodeB.disconnect()
       this.workletNodeB = null
+    }
+
+    if (this.audioContext && this.audioContext.state === 'running') {
+      void this.audioContext.suspend().catch(() => undefined)
     }
 
     if (this.monitorGainNode) {

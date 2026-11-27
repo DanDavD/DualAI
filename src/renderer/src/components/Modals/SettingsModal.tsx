@@ -1,7 +1,7 @@
 /**
  * DUALAI - Consumer-Friendly macOS System Settings Modal
  * Clean, plain-English settings organized strictly around everyday user experience:
- *  - Audio: Microphone, Speakers, Sound Quality switches, Volume & Test Audio
+ *  - Audio: Call Audio Source, Speakers, Self-Voice Echo Blocker, Volume & Test Audio
  *  - Reading & HUD: Layout style, Font family & size, Line spacing, Teleprompter controls
  *  - Shortcuts: Everyday keyboard shortcuts with one-click rebind
  *  - Privacy & Account: Plain-English privacy guarantees (ZDR / HIPAA / GDPR) & Account link
@@ -16,7 +16,6 @@ import {
   Keyboard,
   ShieldCheck,
   RotateCcw,
-  Mic,
   Columns2,
   Maximize2,
   Rows2,
@@ -24,7 +23,6 @@ import {
   ArrowRight,
   ArrowRightLeft,
   Sparkles,
-  Zap,
   Check
 } from 'lucide-react'
 import { useSession } from '../../context/SessionContext'
@@ -34,7 +32,7 @@ import {
   WorkspaceViewMode
 } from '../../../../types/settings'
 import { DomainId, DOMAIN_PRESETS } from '../../../../types/domain'
-import { OperatingMode, LatencyMode } from '../../../../types/audio'
+import { OperatingMode } from '../../../../types/audio'
 import {
   LINE_SPACING_METRICS,
   MAX_WORKSPACE_FONT_SIZE_PX,
@@ -63,30 +61,22 @@ const VIEW_ICONS: Record<
   stacked: Rows2
 }
 
+const VIRTUAL_LOOPBACK_REGEX =
+  /blackhole|loopback|vb-cable|cable output|soundflower|stereo mix|voicemeeter|virtual/i
+
 export const SettingsModal: React.FC = () => {
   const {
     isSettingsModalOpen,
     closeSettingsModal,
-    gainChannelA,
     gainChannelB,
-    setGainChannelA,
     setGainChannelB,
     vadThreshold,
     setVadThreshold,
-    noiseSuppression,
-    setNoiseSuppression,
-    echoCancellation,
-    setEchoCancellation,
-    selectedInputDeviceId,
     selectedLoopbackDeviceId,
     selectedOutputDeviceId,
-    setSelectedInputDeviceId,
     setSelectedLoopbackDeviceId,
     setSelectedOutputDeviceId,
     playHardwareCalibrationTone,
-    isMonitorLoopbackActive,
-    setMonitorLoopback,
-    isAudioActive,
     workspaceDisplaySettings,
     updateWorkspaceDisplaySettings,
     resetWorkspaceDisplaySettings,
@@ -103,8 +93,6 @@ export const SettingsModal: React.FC = () => {
     setDomainId,
     operatingMode,
     setOperatingMode,
-    latencyMode,
-    setLatencyMode,
     settingsInitialTab
   } = useSession()
 
@@ -132,13 +120,23 @@ export const SettingsModal: React.FC = () => {
             deviceId: d.deviceId || `dev-${idx}`,
             label:
               d.label ||
-              (d.kind === 'audioinput' ? `Microphone ${idx + 1}` : `Speaker ${idx + 1}`),
+              (d.kind === 'audioinput' ? `Audio Input ${idx + 1}` : `Speaker ${idx + 1}`),
             kind: d.kind as 'audioinput' | 'audiooutput'
           }))
         setDevices(filtered)
+
+        // Auto-sanitize stale localStorage loopback device IDs that are not valid virtual loopbacks
+        if (selectedLoopbackDeviceId !== 'system_loopback') {
+          const validVirtualLoopbacks = filtered.filter(
+            (d) => d.kind === 'audioinput' && VIRTUAL_LOOPBACK_REGEX.test(d.label)
+          )
+          if (!validVirtualLoopbacks.some((d) => d.deviceId === selectedLoopbackDeviceId)) {
+            setSelectedLoopbackDeviceId('system_loopback')
+          }
+        }
       })
       .catch(() => setDevices([]))
-  }, [isSettingsModalOpen])
+  }, [isSettingsModalOpen, selectedLoopbackDeviceId, setSelectedLoopbackDeviceId])
 
   useEffect(() => {
     if (!isSettingsModalOpen) return
@@ -236,7 +234,7 @@ export const SettingsModal: React.FC = () => {
             aria-orientation="vertical"
             className="w-48 shrink-0 border-r border-white/[0.07] bg-white/[0.02] p-3 space-y-1 text-xs"
           >
-            {tabs.map((tab) => {
+            {tabs.map((tab, tabIdx) => {
               const isSelected = activeTab === tab.id
               return (
                 <button
@@ -245,7 +243,19 @@ export const SettingsModal: React.FC = () => {
                   type="button"
                   aria-selected={isSelected}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`glass-control-hover flex w-full items-center space-x-2.5 rounded-xl px-3 py-2 text-left ${
+                  onKeyDown={(e) => {
+                    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                      e.preventDefault()
+                      const nextIdx =
+                        e.key === 'ArrowDown'
+                          ? (tabIdx + 1) % tabs.length
+                          : (tabIdx - 1 + tabs.length) % tabs.length
+                      setActiveTab(tabs[nextIdx].id)
+                      const tabButtons = e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+                      tabButtons?.[nextIdx]?.focus()
+                    }
+                  }}
+                  className={`glass-control-hover flex w-full items-center space-x-2.5 rounded-xl px-3 py-2 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-steel/70 ${
                     isSelected
                       ? 'bg-accent-steel/22 text-white font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]'
                       : 'text-white/65 hover:bg-white/[0.06] hover:text-white'
@@ -270,28 +280,12 @@ export const SettingsModal: React.FC = () => {
                 <div>
                   <h3 className="text-base font-semibold tracking-tight text-white">Audio</h3>
                   <p className="mt-0.5 text-white/50">
-                    Choose your microphone, speakers, and sound clarity preferences.
+                    DualAI translates system call audio only — your microphone is never sent to AI.
                   </p>
                 </div>
 
                 {/* Devices Grouped Card */}
                 <div className="glass-grouped-card rounded-2xl divide-y divide-white/[0.06]">
-                  <label className="flex items-center justify-between gap-4 px-4 py-3">
-                    <span className="font-medium text-white/85 shrink-0">Microphone</span>
-                    <select
-                      value={selectedInputDeviceId}
-                      onChange={(e) => setSelectedInputDeviceId(e.target.value)}
-                      className="max-w-[260px] rounded-xl border border-white/[0.1] bg-white/[0.06] px-3 py-1.5 text-xs text-white outline-none focus:border-accent-steel"
-                    >
-                      <option value="default">System Default Microphone</option>
-                      {inputDevices.map((d) => (
-                        <option key={d.deviceId} value={d.deviceId}>
-                          {d.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-
                   <label className="flex items-center justify-between gap-4 px-4 py-3">
                     <span className="font-medium text-white/85 shrink-0">Call Audio Source</span>
                     <select
@@ -300,11 +294,13 @@ export const SettingsModal: React.FC = () => {
                       className="max-w-[260px] rounded-xl border border-white/[0.1] bg-white/[0.06] px-3 py-1.5 text-xs text-white outline-none focus:border-accent-steel"
                     >
                       <option value="system_loopback">Automatic System Audio (Recommended)</option>
-                      {inputDevices.map((d) => (
-                        <option key={`lb-${d.deviceId}`} value={d.deviceId}>
-                          {d.label}
-                        </option>
-                      ))}
+                      {inputDevices
+                        .filter((d) => VIRTUAL_LOOPBACK_REGEX.test(d.label))
+                        .map((d) => (
+                          <option key={`lb-${d.deviceId}`} value={d.deviceId}>
+                            {d.label}
+                          </option>
+                        ))}
                     </select>
                   </label>
 
@@ -325,84 +321,30 @@ export const SettingsModal: React.FC = () => {
                   </label>
                 </div>
 
-                {/* Sound Clarity Switches */}
-                <div className="glass-grouped-card rounded-2xl divide-y divide-white/[0.06]">
-                  <div className="flex items-center justify-between px-4 py-3">
-                    <div className="pr-4">
-                      <p className="font-medium text-white">Background Noise Reduction</p>
-                      <p className="text-[11px] text-white/45">
-                        Reduces fans, keyboard typing, and room noise automatically
-                      </p>
-                    </div>
-                    <AppleSwitch
-                      checked={noiseSuppression}
-                      onChange={setNoiseSuppression}
-                      ariaLabel="Toggle Background Noise Reduction"
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-between px-4 py-3">
-                    <div className="pr-4">
-                      <p className="font-medium text-white">Echo Cancellation</p>
-                      <p className="text-[11px] text-white/45">
-                        Prevents remote voices from echoing back into your microphone
-                      </p>
-                    </div>
-                    <AppleSwitch
-                      checked={echoCancellation}
-                      onChange={setEchoCancellation}
-                      ariaLabel="Toggle Echo Cancellation"
-                    />
+                {/* Hold Mute Info */}
+                <div className="glass-grouped-card rounded-2xl">
+                  <div className="px-4 py-3 text-[11px] leading-relaxed text-white/60">
+                    Press <span className="font-mono text-white/85">SPACE</span> or click the
+                    microphone button in the bottom bar to mute your OS microphone across Zoom, Teams,
+                    and all calls when on hold — without interrupting live call translation.
                   </div>
                 </div>
 
                 {/* Volume & Sound Test */}
                 <div className="glass-grouped-card rounded-2xl p-4 space-y-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-semibold text-white">Volume & Sound Check</span>
+                    <span className="font-semibold text-white">Call Audio Volume & Check</span>
                     <div className="flex items-center space-x-2">
                       <button
                         type="button"
-                        onClick={() => void playHardwareCalibrationTone(gainChannelA)}
+                        onClick={() => void playHardwareCalibrationTone(gainChannelB)}
                         aria-label="Play 440Hz Monitor Tone"
                         className="glass-control-hover flex items-center space-x-1.5 rounded-full border border-white/[0.12] bg-white/[0.08] px-3 py-1 text-[11px] font-medium text-white"
                       >
                         <Volume2 className="h-3.5 w-3.5 text-accent-steel" />
                         <span>Test Sound</span>
                       </button>
-                      <button
-                        type="button"
-                        disabled={!isAudioActive}
-                        onClick={() => setMonitorLoopback(!isMonitorLoopbackActive)}
-                        className={`glass-control-hover flex items-center space-x-1.5 rounded-full border px-3 py-1 text-[11px] font-medium disabled:opacity-35 ${
-                          isMonitorLoopbackActive
-                            ? 'border-accent-emerald/55 bg-accent-emerald/20 text-accent-emerald'
-                            : 'border-white/[0.1] bg-white/[0.06] text-white/75 hover:text-white'
-                        }`}
-                      >
-                        <Mic className="h-3.5 w-3.5" />
-                        <span>{isMonitorLoopbackActive ? 'Listening to Mic' : 'Hear Myself'}</span>
-                      </button>
                     </div>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <div className="flex justify-between text-[11px]">
-                      <span className="text-white/70">Microphone Volume</span>
-                      <span className="font-mono tabular-nums text-white">
-                        {Math.round(gainChannelA * 100)}%
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min="0.0"
-                      max="2.0"
-                      step="0.05"
-                      value={gainChannelA}
-                      onChange={(e) => setGainChannelA(parseFloat(e.target.value))}
-                      onMouseUp={() => void playHardwareCalibrationTone(gainChannelA)}
-                      className="apple-slider w-full"
-                    />
                   </div>
 
                   <div className="space-y-1.5">
@@ -414,6 +356,7 @@ export const SettingsModal: React.FC = () => {
                     </div>
                     <input
                       type="range"
+                      aria-label="Call Audio Volume"
                       min="0.0"
                       max="2.0"
                       step="0.05"
@@ -432,6 +375,7 @@ export const SettingsModal: React.FC = () => {
                     </div>
                     <input
                       type="range"
+                      aria-label="Voice Detection Sensitivity"
                       min="0.2"
                       max="0.9"
                       step="0.05"
@@ -475,26 +419,6 @@ export const SettingsModal: React.FC = () => {
                         options={[
                           { id: 'translate', label: 'One-Way', icon: ArrowRight },
                           { id: 'conversation', label: 'Two-Way', icon: ArrowRightLeft }
-                        ]}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 px-4 py-3.5">
-                    <div className="pr-2 min-w-0">
-                      <p className="font-semibold text-white text-xs">Speed & Delivery</p>
-                      <p className="text-[11px] text-white/45 leading-normal">
-                        Live streams words as spoken; Accurate waits for complete sentences
-                      </p>
-                    </div>
-                    <div className="shrink-0">
-                      <GlassSegmentedControl<LatencyMode>
-                        ariaLabel="Speed and Latency Mode"
-                        value={latencyMode}
-                        onChange={setLatencyMode}
-                        options={[
-                          { id: 'sub_second_live', label: 'Live', icon: Zap },
-                          { id: 'sentence_accurate', label: 'Accurate' }
                         ]}
                       />
                     </div>

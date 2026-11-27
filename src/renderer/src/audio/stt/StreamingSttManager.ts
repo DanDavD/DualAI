@@ -56,7 +56,7 @@ export class StreamingSttManager {
   private targetLanguageA: string = 'es'
   private targetLanguageB: string = 'es'
   private operatingMode: 'translate' | 'conversation' = 'conversation'
-  private enableChannelA: boolean = true
+  private enableChannelA: boolean = false
   private enableChannelB: boolean = true
   private endpointingMs: number = 250
   private sampleRate: number = 16000
@@ -121,7 +121,8 @@ export class StreamingSttManager {
     const targetBChanged = nextTargetB !== this.targetLanguageB
     const nextOpMode = routing.operatingMode ?? this.operatingMode
     const opModeChanged = nextOpMode !== this.operatingMode
-    const enableAChanged = routing.enableChannelA !== this.enableChannelA
+    // Listen-only enforcement: Channel A (local microphone) is NEVER enabled for STT/Soniox
+    const enableAChanged = false !== this.enableChannelA
     const enableBChanged = routing.enableChannelB !== this.enableChannelB
     const nextEndpointing = routing.endpointingMs ?? this.endpointingMs
     const endpointingChanged = nextEndpointing !== this.endpointingMs
@@ -133,19 +134,26 @@ export class StreamingSttManager {
     this.targetLanguageA = nextTargetA
     this.targetLanguageB = nextTargetB
     this.operatingMode = nextOpMode
-    this.enableChannelA = routing.enableChannelA
+    this.enableChannelA = false
     this.enableChannelB = routing.enableChannelB
     this.endpointingMs = nextEndpointing
     this.sampleRate = nextSampleRate
 
     if (!this.isRunning) return
 
+    const needsReconnectForEndpointingA =
+      endpointingChanged &&
+      !(this.clientA instanceof GatewaySttClient && this.clientA.getActiveProvider() === 'soniox-unified')
+    const needsReconnectForEndpointingB =
+      endpointingChanged &&
+      !(this.clientB instanceof GatewaySttClient && this.clientB.getActiveProvider() === 'soniox-unified')
+
     if (
       langAChanged ||
       targetAChanged ||
       opModeChanged ||
       enableAChanged ||
-      endpointingChanged ||
+      needsReconnectForEndpointingA ||
       sampleRateChanged
     ) {
       this.reconnectChannel('channel_a', this.enableChannelA)
@@ -155,7 +163,7 @@ export class StreamingSttManager {
       targetBChanged ||
       opModeChanged ||
       enableBChanged ||
-      endpointingChanged ||
+      needsReconnectForEndpointingB ||
       sampleRateChanged
     ) {
       this.reconnectChannel('channel_b', this.enableChannelB)
@@ -170,18 +178,27 @@ export class StreamingSttManager {
       }
       if (enabled) {
         this.clientA = this.createClient('channel_a', this.languageA)
-        this.clientA.connect()
+        if (this.clientA instanceof GatewaySttClient) {
+          this.clientA.connect({ isReplacingSession: true })
+        } else {
+          this.clientA.connect()
+        }
       } else {
         this.callbacks.onConnectionChange('channel_a', 'disconnected')
       }
     } else {
+      const hadExisting = Boolean(this.clientB)
       if (this.clientB) {
         this.clientB.disconnect()
         this.clientB = null
       }
       if (enabled) {
         this.clientB = this.createClient('channel_b', this.languageB)
-        this.clientB.connect()
+        if (this.clientB instanceof GatewaySttClient) {
+          this.clientB.connect({ isReplacingSession: hadExisting })
+        } else {
+          this.clientB.connect()
+        }
       } else {
         this.callbacks.onConnectionChange('channel_b', 'disconnected')
       }
@@ -228,10 +245,8 @@ export class StreamingSttManager {
 
   public sendAudio(channelId: ChannelId, pcmData: Int16Array): void {
     if (!this.isRunning) return
-
-    if (channelId === 'channel_a' && this.clientA) {
-      this.clientA.sendAudio(pcmData)
-    } else if (channelId === 'channel_b' && this.clientB) {
+    // Listen-only guard: never forward local microphone (channel_a) audio to Soniox
+    if (channelId === 'channel_b' && this.clientB) {
       this.clientB.sendAudio(pcmData)
     }
   }
@@ -248,6 +263,30 @@ export class StreamingSttManager {
     const client = channelId === 'channel_a' ? this.clientA : this.clientB
     if (client instanceof GatewaySttClient) {
       client.finalizeTurn()
+    }
+  }
+
+  public pauseChannel(channelId: ChannelId): void {
+    const client = channelId === 'channel_a' ? this.clientA : this.clientB
+    if (client instanceof GatewaySttClient) {
+      client.signalPause()
+    }
+  }
+
+  public getTokenTelemetry(): {
+    finalOriginalTokens: number
+    finalTranslationTokens: number
+    finalizesSent: number
+  } {
+    if (this.clientB instanceof GatewaySttClient) {
+      return this.clientB.getTokenTelemetry()
+    }
+    return { finalOriginalTokens: 0, finalTranslationTokens: 0, finalizesSent: 0 }
+  }
+
+  public resetTokenTelemetry(): void {
+    if (this.clientB instanceof GatewaySttClient) {
+      this.clientB.resetTokenTelemetry()
     }
   }
 

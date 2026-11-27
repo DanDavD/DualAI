@@ -49,8 +49,11 @@ async function run(): Promise<void> {
   assert.equal(twoWayCfg.sample_rate, 16000)
   assert.equal(twoWayCfg.enable_speaker_diarization, true)
   assert.equal(twoWayCfg.enable_language_identification, true)
-  assert.equal(twoWayCfg.enable_endpoint_detection, true)
-  assert.equal(twoWayCfg.max_endpoint_delay_ms, 2000)
+  assert.equal(
+    twoWayCfg.enable_endpoint_detection,
+    false,
+    'Endpoint detection must be disabled to maximize speaker diarization context per Soniox guidance'
+  )
   assert.deepEqual(twoWayCfg.language_hints, ['en', 'es'])
   assert.equal(twoWayCfg.language_hints_strict, true, 'Strict language hints must lock onto active pair')
   assert.deepEqual(twoWayCfg.translation, { type: 'two_way', language_a: 'en', language_b: 'es' })
@@ -256,7 +259,59 @@ async function run(): Promise<void> {
   assert.equal(timerCommits.length, 1, 'Back-to-back identical committed paragraph must be suppressed')
 
   timerAsm.reset()
-  console.log('  Async settle coalescing + 3x provisional pause frames + exact replay dedup -> 1 clean paragraph: VERIFIED')
+
+  // Verify endpoint-detection-OFF behavior: same speaker brief breath (0.8s acoustic gap) stays ONE paragraph,
+  // while a >= 2.2s acoustic pause OR >= maxMonologueWords sentence end splits cleanly!
+  const acousticCommits: UnifiedTurnSnapshot[] = []
+  const acousticAsm = new SonioxStreamAssembler(
+    {
+      channelId: 'channel_b',
+      sourceLang: 'en',
+      targetLang: 'es',
+      operatingMode: 'conversation',
+      domainId: 'general',
+      confidenceThreshold: 0.75,
+      sameLanguageSettleMs: 2200,
+      maxMonologueWords: 12
+    },
+    {
+      onUnifiedDraft: () => {},
+      onUnifiedCommit: (snap) => acousticCommits.push(snap),
+      onUnifiedCommitUpdate: () => {}
+    }
+  )
+
+  // Same speaker pauses 800ms between "desde el día 14." and "De noviembre." -> MUST stay 1 paragraph!
+  acousticAsm.ingestTokens([
+    { text: 'No hay nadie desde el día 14.', is_final: true, speaker: '1', language: 'es', translation_status: 'original', start_ms: 1000, end_ms: 3000 },
+    { text: 'There is no one since the 14th.', is_final: true, speaker: '1', language: 'en', source_language: 'es', translation_status: 'translation' }
+  ])
+  acousticAsm.ingestTokens([
+    { text: 'De noviembre.', is_final: true, speaker: '1', language: 'es', translation_status: 'original', start_ms: 3800, end_ms: 4600 },
+    { text: ' Of November.', is_final: true, speaker: '1', language: 'en', source_language: 'es', translation_status: 'translation' }
+  ])
+  assert.equal(acousticCommits.length, 0, 'Brief 800ms breath must NOT split paragraph')
+
+  // Same speaker pauses 2,500ms (>= 2,200ms threshold) -> MUST split cleanly!
+  acousticAsm.ingestTokens([
+    { text: 'Entonces mandó notificaciones a la oficina.', is_final: true, speaker: '1', language: 'es', translation_status: 'original', start_ms: 7100, end_ms: 9500 },
+    { text: 'So she sent notices to the office.', is_final: true, speaker: '1', language: 'en', source_language: 'es', translation_status: 'translation' }
+  ])
+  assert.equal(acousticCommits.length, 1, 'Acoustic pause >= 2.2s must commit previous paragraph cleanly')
+  assert.equal(
+    acousticCommits[0].utterance.text,
+    'No hay nadie desde el día 14. De noviembre.',
+    'Short-pause continuation must stay joined with clean spacing'
+  )
+
+  // Nonstop monologue crossing maxMonologueWords (12 in test) at sentence period -> splits cleanly at sentence end
+  acousticAsm.ingestTokens([
+    { text: ' Y me están desalojando a mí por la orden de alteración pública.', is_final: true, speaker: '1', language: 'es', translation_status: 'original', start_ms: 9900, end_ms: 12000 }
+  ])
+  assert.equal(acousticCommits.length, 2, 'Long monologue exceeding word cap must split cleanly at sentence period')
+  acousticAsm.reset()
+
+  console.log('  Async settle + acoustic 2.2s pause + 800ms breath coalescing + monologue cap: VERIFIED')
   console.log('PASS: Test 3 satisfied.\n')
 
   // TEST 4: 48 kHz -> 16 kHz PCM Downsampler (67% Bandwidth Reduction & Signal Integrity)

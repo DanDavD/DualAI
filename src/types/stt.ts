@@ -6,7 +6,7 @@
 
 import { ChannelId } from './audio'
 
-export type SttModel = 'soniox-rt' | 'nova-2' | 'whisper-turbo'
+export type SttModel = 'soniox-rt' | 'nova-3' | 'nova-2' | 'whisper-turbo'
 
 export type SttConnectionState =
   | 'disconnected'
@@ -35,6 +35,7 @@ export interface TranscriptUtterance {
   text: string
   tokens: TranscriptToken[]
   isFinal: boolean
+  speechFinal?: boolean
   timestampMs: number
   durationMs: number
   averageConfidence: number
@@ -47,7 +48,12 @@ export interface SttTelemetry {
   tokensCount: number
   connectionState: SttConnectionState
   reconnectCount: number
-  provider: 'soniox-unified' | 'deepgram-nova-2' | 'whisper-turbo' | 'simulated-stt'
+  provider:
+    | 'soniox-unified'
+    | 'deepgram-nova-3'
+    | 'deepgram-nova-2'
+    | 'whisper-turbo'
+    | 'simulated-stt'
 }
 
 export interface SttClientConfig {

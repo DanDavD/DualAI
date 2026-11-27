@@ -19,7 +19,8 @@ import {
   TranscriptPayload,
   ShortcutRegistrationReport,
   OAuthPreparedSession,
-  OAuthCallbackResult
+  OAuthCallbackResult,
+  ClientTelemetryPayload
 } from '../types/ipc'
 import {
   HudBounds,
@@ -28,6 +29,11 @@ import {
   DEFAULT_SHORTCUT_BINDINGS,
   ShortcutActionId
 } from '../types/settings'
+import {
+  setOsMicrophoneMute,
+  getOsMicrophoneMute,
+  restoreOsMicrophoneOnQuit
+} from './systemMicMute'
 
 // Enable native macOS CoreAudio Process Tap & ScreenCaptureKit system audio loopback
 // in Electron 45+ before Chromium initializes audio/media subsystems.
@@ -778,6 +784,42 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.AUTH_OAUTH_CANCEL, async (_event, sessionId: string): Promise<void> => {
     finishOAuthFlow(sessionId, { ok: false, error: 'Sign-in canceled.' })
   })
+
+  // OS-Wide System Microphone Mute (for call hold/silence — DualAI never captures mic audio)
+  ipcMain.handle(
+    IPC_CHANNELS.AUDIO_SET_SYSTEM_MIC_MUTE,
+    async (_event, muted: boolean) => {
+      return setOsMicrophoneMute(Boolean(muted))
+    }
+  )
+
+  ipcMain.handle(IPC_CHANNELS.AUDIO_GET_SYSTEM_MIC_MUTE, async () => {
+    return getOsMicrophoneMute()
+  })
+
+  // Zero-PII client telemetry writer (development diagnostic mode only — works even with Fly.io Gateway)
+  ipcMain.on(IPC_CHANNELS.TELEMETRY_RECORD_SESSION, (_event, payload: ClientTelemetryPayload) => {
+    if (app.isPackaged || !payload || typeof payload.sessionId !== 'string') return
+    try {
+      const telemetryDir = join(app.getAppPath(), 'server', '.telemetry')
+      if (!fs.existsSync(telemetryDir)) {
+        fs.mkdirSync(telemetryDir, { recursive: true })
+      }
+      if (payload.status === 'closed') {
+        const jsonlPath = join(telemetryDir, 'client_soniox_usage.jsonl')
+        fs.appendFileSync(jsonlPath, `${JSON.stringify(payload)}\n`, 'utf-8')
+        const activePath = join(telemetryDir, 'client_active_session.json')
+        if (fs.existsSync(activePath)) {
+          fs.unlinkSync(activePath)
+        }
+      } else {
+        const activePath = join(telemetryDir, 'client_active_session.json')
+        fs.writeFileSync(activePath, JSON.stringify(payload, null, 2), 'utf-8')
+      }
+    } catch {
+      // Non-fatal diagnostic write
+    }
+  })
 }
 
 /**
@@ -879,6 +921,7 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
+  restoreOsMicrophoneOnQuit()
 })
 
 app.on('window-all-closed', () => {

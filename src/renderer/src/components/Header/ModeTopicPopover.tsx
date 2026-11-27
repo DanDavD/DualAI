@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from 'react'
 import {
   ArrowRight,
   ArrowRightLeft,
-  Zap,
   Layers,
   Stethoscope,
   Scale,
@@ -11,7 +10,7 @@ import {
   Check,
   Sparkles
 } from 'lucide-react'
-import { LatencyMode, OperatingMode } from '../../../../types/audio'
+import { OperatingMode } from '../../../../types/audio'
 import { DomainId, DOMAIN_PRESETS } from '../../../../types/domain'
 import { useSession } from '../../context/SessionContext'
 import { GlassSegmentedControl } from '../UI/GlassSegmentedControl'
@@ -41,8 +40,6 @@ export const ModeTopicPopover: React.FC = () => {
   const {
     operatingMode,
     setOperatingMode,
-    latencyMode,
-    setLatencyMode,
     domainId,
     setDomainId
   } = useSession()
@@ -76,7 +73,7 @@ export const ModeTopicPopover: React.FC = () => {
     <div ref={containerRef} className="relative" data-tour-id="mode-topic">
       <GlassTooltip
         label="Mode & Topic"
-        description={`${operatingMode === 'conversation' ? 'Two-way' : 'One-way'} · ${latencyMode === 'sub_second_live' ? 'Live' : 'Accurate'} · ${shortTopic}`}
+        description={`${operatingMode === 'conversation' ? 'Two-way' : 'One-way'} · ${shortTopic}`}
         disabled={isOpen}
       >
         <button
@@ -85,7 +82,7 @@ export const ModeTopicPopover: React.FC = () => {
           onClick={() => setIsOpen((prev) => !prev)}
           aria-expanded={isOpen}
           aria-haspopup="dialog"
-          aria-label="Translation Mode, Speed and Topic"
+          aria-label="Translation Mode and Topic"
           className={`glass-control-hover flex h-7 items-center space-x-1.5 rounded-full px-2 text-[11px] font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-steel/70 ${
             isOpen ? 'bg-white/[0.15] text-white' : 'text-white/75 hover:text-white'
           }`}
@@ -106,7 +103,7 @@ export const ModeTopicPopover: React.FC = () => {
             <span className="text-[10px] text-white/40">How DualAI translates</span>
           </div>
 
-          <div className="glass-grouped-card rounded-2xl p-2.5 space-y-2.5">
+          <div className="glass-grouped-card rounded-2xl p-2.5">
             <div className="flex items-center justify-between gap-2">
               <span className="text-[11px] font-medium text-white/65 pl-1">Mode</span>
               <GlassSegmentedControl<OperatingMode>
@@ -125,30 +122,6 @@ export const ModeTopicPopover: React.FC = () => {
                     label: 'Conversation',
                     icon: ArrowRightLeft,
                     title: 'Two-way live conversation between both languages'
-                  }
-                ]}
-              />
-            </div>
-
-            <div className="h-px w-full bg-white/[0.06]" />
-
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] font-medium text-white/65 pl-1">Speed</span>
-              <GlassSegmentedControl<LatencyMode>
-                ariaLabel="Audio Latency Precision Mode"
-                value={latencyMode}
-                onChange={setLatencyMode}
-                options={[
-                  {
-                    id: 'sub_second_live',
-                    label: 'Live',
-                    icon: Zap,
-                    title: 'Instant progressive translation while speaking'
-                  },
-                  {
-                    id: 'sentence_accurate',
-                    label: 'Accurate',
-                    title: 'Waits for a brief pause to translate full thoughts'
                   }
                 ]}
               />

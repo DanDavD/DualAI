@@ -15,6 +15,7 @@ export interface TranslateProxyPayload {
   sourceText: string
   sourceLang: string
   targetLang: string
+  operatingMode?: 'translate' | 'conversation'
   domainId: string
   speakerLabel?: string
   dialogueHistory?: Array<{
@@ -25,22 +26,50 @@ export interface TranslateProxyPayload {
   customGlossary?: Record<string, string>
 }
 
+const STT_REPAIR_GUIDANCE =
+  'The input comes from live real-time speech-to-text and may contain occasional phonetic mishearings, stray punctuation, or brief cross-language slips (e.g. a Portuguese word like "primeiro" or "e" inside Spanish speech). Silently infer the speaker\'s true intended meaning from context and domain vocabulary before translating. Never explain corrections; output ONLY the clean, natural translation.'
+
 const DOMAIN_INSTRUCTIONS: Record<string, string> = {
-  medical:
-    'You are an expert clinical medical interpreter. Strictly follow ICD-10 anatomical nomenclature and pharmacological precision. Preserve all dosages, units, and numeric vitals verbatim. Output ONLY the direct translation without explanations.',
-  legal:
-    'You are a certified courtroom legal interpreter. Translate legal terms of art verbatim without colloquialisms, paraphrases, or softening. Preserve all statute numbers, dates, and monetary sums verbatim. Output ONLY the direct translation.',
-  technical:
-    'You are a systems engineering interpreter. Preserve technical acronyms, protocols, code identifiers, and numerical metrics accurately. Output ONLY the direct translation.',
-  business:
-    'You are an executive business interpreter. Use formal corporate register and preserve financial figures, percentages, and KPIs verbatim. Output ONLY the direct translation.',
-  general:
-    'You are a real-time professional simultaneous interpreter. Provide an accurate, natural, low-latency translation preserving all numbers and proper nouns. Output ONLY the direct translation.'
+  medical: `You are an expert clinical medical interpreter. Strictly follow ICD-10 anatomical nomenclature and pharmacological precision. Preserve all dosages, units, and numeric vitals verbatim. ${STT_REPAIR_GUIDANCE}`,
+  legal: `You are a certified courtroom legal interpreter. Translate legal terms of art verbatim without colloquialisms, paraphrases, or softening. Preserve all statute numbers, dates, and monetary sums verbatim. ${STT_REPAIR_GUIDANCE}`,
+  technical: `You are a systems engineering interpreter. Preserve technical acronyms, protocols, code identifiers, and numerical metrics accurately. ${STT_REPAIR_GUIDANCE}`,
+  business: `You are an executive business interpreter. Use formal corporate register and preserve financial figures, percentages, and KPIs verbatim. ${STT_REPAIR_GUIDANCE}`,
+  general: `You are a real-time professional simultaneous interpreter. Provide an accurate, natural, low-latency translation preserving all numbers and proper nouns. ${STT_REPAIR_GUIDANCE}`
 }
 
 const MAX_SOURCE_TEXT_LENGTH = 4000
 const MAX_GLOSSARY_ENTRIES = 50
-const MAX_HISTORY_TURNS = 20
+const MAX_HISTORY_TURNS = 4
+const QUOTA_CACHE_TTL_MS = 8000
+const MAX_QUOTA_CACHE_ENTRIES = 2000
+
+interface CachedQuotaEntry {
+  remainingSeconds: number
+  fetchedAtMs: number
+}
+
+const translateQuotaCache = new Map<string, CachedQuotaEntry>()
+
+async function getFastQuotaRemaining(
+  userId: string,
+  quotaStore: QuotaStore
+): Promise<number> {
+  const now = Date.now()
+  const cached = translateQuotaCache.get(userId)
+  if (cached && now - cached.fetchedAtMs <= QUOTA_CACHE_TTL_MS && cached.remainingSeconds > 30) {
+    return cached.remainingSeconds
+  }
+  const quota = await quotaStore.getOrCreateUserQuota(userId)
+  if (!translateQuotaCache.has(userId) && translateQuotaCache.size >= MAX_QUOTA_CACHE_ENTRIES) {
+    const oldestKey = translateQuotaCache.keys().next().value
+    if (oldestKey) translateQuotaCache.delete(oldestKey)
+  }
+  translateQuotaCache.set(userId, {
+    remainingSeconds: quota.remainingSeconds,
+    fetchedAtMs: now
+  })
+  return quota.remainingSeconds
+}
 
 let cachedClientKey: string | null = null
 let cachedGenAiClient: GoogleGenAI | null = null
@@ -51,6 +80,48 @@ function getGenAiClient(apiKey: string): GoogleGenAI {
     cachedClientKey = apiKey
   }
   return cachedGenAiClient
+}
+
+export function buildGeminiTranslationPrompt(params: {
+  cleanSourceText: string
+  sourceLang: string
+  targetLang: string
+  operatingMode?: 'translate' | 'conversation'
+  historyLines: string[]
+  glossaryEntries: Array<[string, string]>
+}): string {
+  const { cleanSourceText, sourceLang, targetLang, operatingMode, historyLines, glossaryEntries } =
+    params
+  const promptSections: string[] = []
+  if (glossaryEntries.length > 0) {
+    promptSections.push(
+      'MANDATORY CUSTOM GLOSSARY:\n' +
+        glossaryEntries
+          .map(([src, tgt]) => `- "${src.slice(0, 80)}" => "${String(tgt).slice(0, 80)}"`)
+          .join('\n')
+    )
+  }
+  if (historyLines.length > 0) {
+    promptSections.push(`RECENT DIALOGUE CONTEXT:\n${historyLines.join('\n')}`)
+  }
+
+  const isTwoWayConversation =
+    operatingMode === 'conversation' && sourceLang.toLowerCase() !== targetLang.toLowerCase()
+
+  if (isTwoWayConversation) {
+    promptSections.push(
+      `This is a live two-way bilingual conversation between ${sourceLang.toUpperCase()} and ${targetLang.toUpperCase()}. ` +
+        `Detect which language the utterance is spoken in: if it is in ${sourceLang.toUpperCase()}, translate it into ${targetLang.toUpperCase()}; ` +
+        `if it is in ${targetLang.toUpperCase()}, translate it into ${sourceLang.toUpperCase()}. ` +
+        `Output ONLY the direct translation without quotes or labels:\n"${cleanSourceText}"`
+    )
+  } else {
+    promptSections.push(
+      `Translate the following utterance from ${sourceLang.toUpperCase()} to ${targetLang.toUpperCase()}:\n"${cleanSourceText}"`
+    )
+  }
+
+  return promptSections.join('\n\n')
 }
 
 function sendSseEvent(res: ServerResponse, event: string, data: unknown): void {
@@ -67,9 +138,10 @@ export async function handleGeminiTranslateStream(params: {
 }): Promise<void> {
   const { payload, res, user, config, quotaStore } = params
 
-  // 1. Validate authoritative quota
-  const quota = await quotaStore.getOrCreateUserQuota(user.userId)
-  if (quota.remainingSeconds <= 0) {
+  // 1. Validate authoritative quota (8s in-memory hot-path cache saves 50-120ms Supabase RTT per call)
+  const remainingSeconds = await getFastQuotaRemaining(user.userId, quotaStore)
+  if (remainingSeconds <= 0) {
+    translateQuotaCache.delete(user.userId)
     res.writeHead(402, { 'Content-Type': 'application/json' })
     res.end(
       JSON.stringify({
@@ -116,22 +188,14 @@ export async function handleGeminiTranslateStream(params: {
       ? Object.entries(payload.customGlossary).slice(0, MAX_GLOSSARY_ENTRIES)
       : []
 
-  const promptSections: string[] = []
-  if (glossaryEntries.length > 0) {
-    promptSections.push(
-      'MANDATORY CUSTOM GLOSSARY:\n' +
-        glossaryEntries
-          .map(([src, tgt]) => `- "${src.slice(0, 80)}" => "${String(tgt).slice(0, 80)}"`)
-          .join('\n')
-    )
-  }
-  if (historyLines.length > 0) {
-    promptSections.push(`RECENT DIALOGUE CONTEXT:\n${historyLines.join('\n')}`)
-  }
-  promptSections.push(
-    `Translate the following utterance from ${sourceLang.toUpperCase()} to ${targetLang.toUpperCase()}:\n"${cleanSourceText}"`
-  )
-  const prompt = promptSections.join('\n\n')
+  const prompt = buildGeminiTranslationPrompt({
+    cleanSourceText,
+    sourceLang,
+    targetLang,
+    operatingMode: payload.operatingMode,
+    historyLines,
+    glossaryEntries
+  })
 
   // 3. Begin Server-Sent Events stream
   res.writeHead(200, {
@@ -158,7 +222,7 @@ export async function handleGeminiTranslateStream(params: {
     }
     sendSseEvent(res, 'done', {
       provider: 'gateway-dev-mock',
-      remainingSeconds: quota.remainingSeconds
+      remainingSeconds
     })
     res.end()
     return
@@ -167,7 +231,12 @@ export async function handleGeminiTranslateStream(params: {
   try {
     const client = getGenAiClient(config.geminiApiKey)
     const candidateModels = Array.from(
-      new Set([config.geminiModel, 'gemini-3.5-flash-lite', 'gemini-3.8-flash'])
+      new Set([
+        config.geminiModel,
+        'gemini-2.5-flash-lite',
+        'gemini-3.5-flash-lite',
+        'gemini-3.8-flash'
+      ])
     )
 
     let lastError: unknown = null
@@ -211,7 +280,7 @@ export async function handleGeminiTranslateStream(params: {
 
     sendSseEvent(res, 'done', {
       provider: 'gemini-2.0-flash',
-      remainingSeconds: quota.remainingSeconds
+      remainingSeconds
     })
     res.end()
   } catch (err) {

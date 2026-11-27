@@ -41,8 +41,9 @@ import {
 import { AudioIngestionEngine } from '../audio/AudioIngestionEngine'
 import {
   resolveAudioRoutingPolicy,
-  resolveTranslationTargetForChannel,
-  resolveEndpointingMs
+  resolveTranslationPairForUtterance,
+  resolveEndpointingMs,
+  sanitizeListenOnlyRoute
 } from '../audio/audioRoutingPolicy'
 import {
   DEFAULT_PAUSE_COMMIT_MS,
@@ -53,6 +54,7 @@ import {
   TARGET_STREAM_SAMPLE_RATE,
   downsampleInt16Pcm
 } from '../audio/pcmDownsampler'
+import { SmartSpeechGate } from '../audio/smartSpeechGate'
 import { StreamingSttManager } from '../audio/stt/StreamingSttManager'
 import { TranslationManager } from '../translation/TranslationManager'
 import {
@@ -212,7 +214,12 @@ export interface SessionState {
   sttStatusA: SttConnectionState
   sttStatusB: SttConnectionState
   sttLatencyMs: number
-  sttProvider: 'soniox-unified' | 'deepgram-nova-2' | 'whisper-turbo' | 'simulated-stt'
+  sttProvider:
+    | 'soniox-unified'
+    | 'deepgram-nova-3'
+    | 'deepgram-nova-2'
+    | 'whisper-turbo'
+    | 'simulated-stt'
   sttReconnectCount: number
   utterances: TranscriptUtterance[]
   interimTranscriptA: TranscriptUtterance | null
@@ -347,14 +354,18 @@ export interface SessionState {
 const SessionContext = createContext<SessionState | null>(null)
 
 export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [audioRoute, setAudioRoute] = useState<AudioRouteMode>('system')
+  const [audioRoute, setAudioRouteState] = useState<AudioRouteMode>('system')
+  const setAudioRoute = useCallback((nextRoute: AudioRouteMode) => {
+    setAudioRouteState(sanitizeListenOnlyRoute(nextRoute))
+  }, [])
   const [operatingMode, setOperatingMode] = useState<OperatingMode>('translate')
   const [domainId, setDomainId] = useState<DomainId>('medical')
   const [sourceLang, setSourceLang] = useState('en')
   const [targetLang, setTargetLang] = useState('es')
-  const [latencyMode, setLatencyMode] = useState<LatencyMode>('sub_second_live')
-  const [noiseSuppression, setNoiseSuppression] = useState(true)
-  const [echoCancellation, setEchoCancellation] = useState(true)
+  const [latencyMode] = useState<LatencyMode>('sentence_accurate')
+  const setLatencyMode = useCallback((_mode: LatencyMode) => undefined, [])
+  const [noiseSuppression, setNoiseSuppression] = useState(false)
+  const [echoCancellation, setEchoCancellation] = useState(false)
   const [latencyPingMs, setLatencyPingMs] = useState(42)
   const [isGlossaryModalOpen, setIsGlossaryModalOpen] = useState(false)
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false)
@@ -429,7 +440,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [sttStatusB, setSttStatusB] = useState<SttConnectionState>('disconnected')
   const [sttLatencyMs, setSttLatencyMs] = useState(0)
   const [sttProvider, setSttProvider] = useState<
-    'soniox-unified' | 'deepgram-nova-2' | 'whisper-turbo' | 'simulated-stt'
+    'soniox-unified' | 'deepgram-nova-3' | 'deepgram-nova-2' | 'whisper-turbo' | 'simulated-stt'
   >('simulated-stt')
   const [sttReconnectCount, setSttReconnectCount] = useState(0)
   const [utterances, setUtterances] = useState<TranscriptUtterance[]>([])
@@ -498,6 +509,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const translationManagerRef = useRef<TranslationManager | null>(null)
   const paragraphAccumulatorRef = useRef<ParagraphTurnAccumulator | null>(null)
   const domainIdRef = useRef(domainId)
+  const operatingModeRef = useRef(operatingMode)
   const sourceLangRef = useRef(sourceLang)
   const targetLangRef = useRef(targetLang)
   const latencyModeRef = useRef(latencyMode)
@@ -505,21 +517,31 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const isHudOpenRef = useRef(isHudOpen)
   const hudSettingsRef = useRef(hudSettings)
   const isAudioActiveRef = useRef(isAudioActive)
-  const lastActiveAudioMsRef = useRef<Record<ChannelId, number>>({
-    channel_a: 0,
-    channel_b: 0
+  const isCoughMutedRef = useRef(isCoughMuted)
+  const speechGatesRef = useRef<Record<ChannelId, SmartSpeechGate>>({
+    channel_a: new SmartSpeechGate(),
+    channel_b: new SmartSpeechGate()
   })
-  const channelPauseFinalizedRef = useRef<Record<ChannelId, boolean>>({
-    channel_a: true,
-    channel_b: true
-  })
+  const telemetrySessionRef = useRef<{
+    sessionId: string
+    startedAtMs: number
+    startedAtIso: string
+    mode: OperatingMode
+    pair: string
+    domain: DomainId
+  } | null>(null)
+  const telemetryCheckpointTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const draftDebounceTimersRef = useRef<Partial<Record<ChannelId, ReturnType<typeof setTimeout>>>>(
     {}
   )
   const lastDraftRequestedRef = useRef<Partial<Record<ChannelId, { id: string; text: string }>>>({})
   const draftResultRef = useRef<Partial<Record<ChannelId, TranslationResult | null>>>({})
+  const pendingCommitPromotionRef = useRef<
+    Map<string, { committed: TranscriptUtterance; sourceLang: string; targetLang: string }>
+  >(new Map())
 
   domainIdRef.current = domainId
+  operatingModeRef.current = operatingMode
   sourceLangRef.current = sourceLang
   targetLangRef.current = targetLang
   latencyModeRef.current = latencyMode
@@ -539,40 +561,39 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (!channelId) {
         delete lastDraftRequestedRef.current[ch]
         draftResultRef.current[ch] = null
+        pendingCommitPromotionRef.current.clear()
       }
     }
   }, [])
 
   // Resolve Master Pipeline Finite State Machine (Day 09)
+  // Note: OS-level call mic mute (isCoughMuted) mutes your mic across Zoom/Teams/calls
+  // without pausing DualAI's System Audio interpretation (isSystemAudioMuted).
   const pipelineState = useMemo<PipelineStateSnapshot>(
     () =>
       resolvePipelineState({
         isAudioActive,
         isInitializing: isInitializingAudio,
-        isMuted: isCoughMuted,
-        isSpeechActiveA,
+        isMuted: isSystemAudioMuted,
+        isSpeechActiveA: false,
         isSpeechActiveB,
-        hasInterimTranscript: Boolean(interimTranscriptA || interimTranscriptB),
+        hasInterimTranscript: Boolean(interimTranscriptB),
         isTranslating: Boolean(activeTranslation),
-        sttStatusA,
+        sttStatusA: 'disconnected',
         sttStatusB,
         hasError: hasPipelineError,
-        bufferSamplesA,
+        bufferSamplesA: 0,
         bufferSamplesB
       }),
     [
       isAudioActive,
       isInitializingAudio,
-      isCoughMuted,
-      isSpeechActiveA,
+      isSystemAudioMuted,
       isSpeechActiveB,
-      interimTranscriptA,
       interimTranscriptB,
       activeTranslation,
-      sttStatusA,
       sttStatusB,
       hasPipelineError,
-      bufferSamplesA,
       bufferSamplesB
     ]
   )
@@ -656,48 +677,21 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           }
         },
         onDraftStart: (result) => {
-          const updateDraft = (prev: TranslationResult | null): TranslationResult => {
-            // Keep existing draft words visible while refreshed tokens stream in (zero flicker)
-            const next =
-              prev && prev.utteranceId === result.utteranceId && prev.translatedText.trim().length > 0
-                ? { ...result, translatedText: prev.translatedText, isStreaming: true }
-                : { ...result, isStreaming: true }
-            draftResultRef.current[result.channelId] = next
-            return next
-          }
-          if (result.channelId === 'channel_a') {
-            setDraftTranslationA(updateDraft)
-          } else {
-            setDraftTranslationB(updateDraft)
-          }
+          // Option A: Keep in-flight tokens silent in RAM (zero partial-word flicker on screen)
+          draftResultRef.current[result.channelId] = { ...result, isStreaming: true }
         },
         onDraftToken: (utteranceId, _token, accumulatedText) => {
-          const applyToken = (
-            channelId: ChannelId,
-            prev: TranslationResult | null
-          ): TranslationResult | null => {
-            if (!prev || prev.utteranceId !== utteranceId) return prev
-            const updated: TranslationResult = {
+          const updateCached = (channelId: ChannelId): void => {
+            const prev = draftResultRef.current[channelId]
+            if (!prev || prev.utteranceId !== utteranceId) return
+            draftResultRef.current[channelId] = {
               ...prev,
               translatedText: accumulatedText,
               isStreaming: true
             }
-            draftResultRef.current[channelId] = updated
-            if (isHudOpenRef.current && window.electronAPI?.sendHudTranscript) {
-              window.electronAPI.sendHudTranscript({
-                id: updated.utteranceId,
-                speakerId: updated.channelId,
-                speakerLabel: updated.speakerLabel,
-                sourceText: updated.sourceText,
-                translatedText: accumulatedText,
-                timestampMs: updated.timestampMs,
-                isInterim: true
-              })
-            }
-            return updated
           }
-          setDraftTranslationA((prev) => applyToken('channel_a', prev))
-          setDraftTranslationB((prev) => applyToken('channel_b', prev))
+          updateCached('channel_a')
+          updateCached('channel_b')
         },
         onDraftComplete: (result) => {
           const finalizedDraft: TranslationResult = {
@@ -705,15 +699,95 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
             isStreaming: false,
             isComplete: true
           }
-          draftResultRef.current[result.channelId] = finalizedDraft
-          if (result.channelId === 'channel_a') {
-            setDraftTranslationA((prev) =>
-              prev && prev.utteranceId !== result.utteranceId ? prev : finalizedDraft
-            )
-          } else {
-            setDraftTranslationB((prev) =>
-              prev && prev.utteranceId !== result.utteranceId ? prev : finalizedDraft
-            )
+
+          // If the paragraph already committed while this exact translation was in-flight,
+          // promote directly into finalized translations with zero abort & zero duplicate API call.
+          const pendingCommit = pendingCommitPromotionRef.current.get(result.utteranceId)
+          if (pendingCommit) {
+            pendingCommitPromotionRef.current.delete(result.utteranceId)
+            const { committed, sourceLang: pSrc, targetLang: pTgt } = pendingCommit
+            const promoted: TranslationResult = {
+              ...finalizedDraft,
+              id: `trans-${committed.id}`,
+              utteranceId: committed.id,
+              sourceLang: pSrc,
+              targetLang: pTgt,
+              sourceText: committed.text,
+              isStreaming: false,
+              isComplete: true
+            }
+            setStreamingTranslations((prev) => {
+              const next = { ...prev }
+              delete next[committed.id]
+              return next
+            })
+            setTranslations((prev) => {
+              const filtered = prev.filter((t) => t.utteranceId !== committed.id)
+              return [...filtered.slice(-999), promoted]
+            })
+            translationManagerRef.current?.appendDialogueTurn({
+              id: `turn-${committed.id}`,
+              channelId: committed.channelId,
+              speakerLabel: committed.speakerLabel,
+              sourceLang: pSrc,
+              targetLang: pTgt,
+              sourceText: committed.text,
+              translatedText: promoted.translatedText,
+              domainId: domainIdRef.current,
+              timestampMs: Date.now()
+            })
+            if (isHudOpenRef.current && window.electronAPI?.sendHudTranscript) {
+              window.electronAPI.sendHudTranscript({
+                id: committed.id,
+                speakerId: committed.speakerId || committed.channelId,
+                speakerLabel: committed.speakerLabel,
+                sourceText: committed.text,
+                translatedText: promoted.translatedText,
+                timestampMs: committed.timestampMs,
+                isInterim: false
+              })
+            }
+            return
+          }
+
+          // Option A atomic reveal: display the complete translated paragraph immediately (~0.9s)
+          // without waiting for the 2.2s paragraph-grouping timer.
+          const existing = draftResultRef.current[result.channelId]
+          if (!existing || existing.utteranceId === result.utteranceId) {
+            draftResultRef.current[result.channelId] = finalizedDraft
+            if (result.channelId === 'channel_a') {
+              setDraftTranslationA(finalizedDraft)
+            } else {
+              setDraftTranslationB(finalizedDraft)
+            }
+            if (isHudOpenRef.current && window.electronAPI?.sendHudTranscript) {
+              window.electronAPI.sendHudTranscript({
+                id: finalizedDraft.utteranceId,
+                speakerId: finalizedDraft.speakerId || finalizedDraft.channelId,
+                speakerLabel: finalizedDraft.speakerLabel,
+                sourceText: finalizedDraft.sourceText,
+                translatedText: finalizedDraft.translatedText,
+                timestampMs: finalizedDraft.timestampMs,
+                isInterim: false
+              })
+            }
+          }
+        },
+        onDraftError: (utteranceId, err) => {
+          const pendingCommit = pendingCommitPromotionRef.current.get(utteranceId)
+          if (pendingCommit) {
+            pendingCommitPromotionRef.current.delete(utteranceId)
+            setStreamingTranslations((prev) => {
+              const next = { ...prev }
+              delete next[pendingCommit.committed.id]
+              return next
+            })
+            setPipelineErrorMessage(err.message)
+          }
+          for (const ch of ['channel_a', 'channel_b'] as ChannelId[]) {
+            if (draftResultRef.current[ch]?.utteranceId === utteranceId) {
+              draftResultRef.current[ch] = null
+            }
           }
         },
         onTelemetry: (telemetry) => {
@@ -768,6 +842,45 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [hudSettings])
 
+  const flushAndStopClientTelemetry = useCallback(() => {
+    if (telemetryCheckpointTimerRef.current) {
+      clearInterval(telemetryCheckpointTimerRef.current)
+      telemetryCheckpointTimerRef.current = null
+    }
+    if (telemetrySessionRef.current && window.electronAPI?.recordClientTelemetry) {
+      const meta = telemetrySessionRef.current
+      telemetrySessionRef.current = null
+      const gateStats = speechGatesRef.current.channel_b.getStats()
+      const tokStats = sttManagerRef.current?.getTokenTelemetry() || {
+        finalOriginalTokens: 0,
+        finalTranslationTokens: 0,
+        finalizesSent: 0
+      }
+      window.electronAPI.recordClientTelemetry({
+        sessionId: meta.sessionId,
+        startedAtIso: meta.startedAtIso,
+        endedAtIso: new Date().toISOString(),
+        status: 'closed',
+        gatewayUrl: getGatewayHttpUrl(),
+        mode: meta.mode,
+        pair: meta.pair,
+        domain: meta.domain,
+        wallClockMs: Math.max(0, Date.now() - meta.startedAtMs),
+        audioSecondsCaptured:
+          Math.round((gateStats.totalInputSamples / TARGET_STREAM_SAMPLE_RATE) * 100) / 100,
+        audioSecondsSent:
+          Math.round((gateStats.totalSentSamples / TARGET_STREAM_SAMPLE_RATE) * 100) / 100,
+        audioSecondsSuppressed:
+          Math.round((gateStats.suppressedSamples / TARGET_STREAM_SAMPLE_RATE) * 100) / 100,
+        audioSecondsEchoBlocked:
+          Math.round((gateStats.echoBlockedSamples / TARGET_STREAM_SAMPLE_RATE) * 100) / 100,
+        finalOriginalTokens: tokStats.finalOriginalTokens,
+        finalTranslationTokens: tokStats.finalTranslationTokens,
+        finalizesSent: tokStats.finalizesSent
+      })
+    }
+  }, [])
+
   // Initialize 2-Second Pause Paragraph Accumulator & Streaming STT Manager
   useEffect(() => {
     const accumulator = new ParagraphTurnAccumulator(
@@ -779,8 +892,10 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
             setInterimTranscriptB(draft)
           }
 
-          // Live mode: progressively translate while speaking so text appears in softer draft font
-          if (latencyModeRef.current !== 'sub_second_live') {
+          // Option A sub-second trigger: never fire Gemini on unstable raw interims.
+          // Fire IMMEDIATELY (0ms debounce) on Deepgram speech_final: true so the complete
+          // translation lands on screen in ~0.85s-0.96s without waiting for the 2.2s commit timer.
+          if (!meta.isClauseFinalized) {
             return
           }
 
@@ -790,9 +905,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
             return
           }
 
-          // Avoid firing premature API requests for a single noise syllable
-          const wordCount = normalized.split(/\s+/).filter(Boolean).length
-          if (!meta.isClauseFinalized && wordCount < 2 && normalized.length < 6) {
+          const endsSentence = /[.!?。？！]["”'»)]*$/.test(draft.text.trim())
+          if (!meta.isSpeechFinal && !endsSentence) {
             return
           }
 
@@ -801,24 +915,34 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
             clearTimeout(existingTimer)
           }
 
-          const delayMs = meta.isClauseFinalized ? 120 : 420
-          draftDebounceTimersRef.current[draft.channelId] = setTimeout(() => {
+          const firePrefetch = (): void => {
             delete draftDebounceTimersRef.current[draft.channelId]
-            if (latencyModeRef.current !== 'sub_second_live') return
             lastDraftRequestedRef.current[draft.channelId] = {
               id: draft.id,
               text: normalized
             }
-            const target = resolveTranslationTargetForChannel(
-              draft.channelId,
-              routingDecisionRef.current
-            )
+            const pair = resolveTranslationPairForUtterance({
+              utteranceLang: draft.language,
+              channelId: draft.channelId,
+              decision: routingDecisionRef.current,
+              operatingMode: operatingModeRef.current,
+              sourceLang: sourceLangRef.current,
+              targetLang: targetLangRef.current
+            })
             void translationManagerRef.current?.translateDraftPreview(
               draft,
               domainIdRef.current,
-              target
+              pair.targetLang,
+              operatingModeRef.current,
+              pair.sourceLang
             )
-          }, delayMs)
+          }
+
+          if (meta.isSpeechFinal) {
+            firePrefetch()
+          } else {
+            draftDebounceTimersRef.current[draft.channelId] = setTimeout(firePrefetch, 350)
+          }
         },
         onParagraphCommit: (committed) => {
           clearDraftTimers(committed.channelId)
@@ -837,15 +961,19 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
           setUtterances((prev) => [...prev.slice(-999), committed])
 
-          const target = resolveTranslationTargetForChannel(
-            committed.channelId,
-            routingDecisionRef.current
-          )
+          const pair = resolveTranslationPairForUtterance({
+            utteranceLang: committed.language,
+            channelId: committed.channelId,
+            decision: routingDecisionRef.current,
+            operatingMode: operatingModeRef.current,
+            sourceLang: sourceLangRef.current,
+            targetLang: targetLangRef.current
+          })
+          const target = pair.targetLang
 
-          // Live mode 2-second commit signal: if draft already matches the complete paragraph,
-          // promote instantaneously into finalized crisp typography with zero extra latency
+          // Instant 0ms promotion: if silent background prefetch already translated this exact paragraph,
+          // reveal the complete translation immediately with zero "Translating..." wait and zero extra API call.
           const canPromoteDraftImmediately =
-            latencyModeRef.current === 'sub_second_live' &&
             Boolean(latestDraft) &&
             latestDraft?.utteranceId === committed.id &&
             latestDraft?.isComplete &&
@@ -857,6 +985,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
               ...latestDraft,
               id: `trans-${committed.id}`,
               utteranceId: committed.id,
+              sourceLang: pair.sourceLang,
+              targetLang: target,
               sourceText: committed.text,
               isStreaming: false,
               isComplete: true
@@ -869,7 +999,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
               id: `turn-${committed.id}`,
               channelId: committed.channelId,
               speakerLabel: committed.speakerLabel,
-              sourceLang: committed.language,
+              sourceLang: pair.sourceLang,
               targetLang: target,
               sourceText: committed.text,
               translatedText: promoted.translatedText,
@@ -879,7 +1009,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
             if (isHudOpenRef.current && window.electronAPI?.sendHudTranscript) {
               window.electronAPI.sendHudTranscript({
                 id: committed.id,
-                speakerId: committed.channelId,
+                speakerId: committed.speakerId || committed.channelId,
                 speakerLabel: committed.speakerLabel,
                 sourceText: committed.text,
                 translatedText: promoted.translatedText,
@@ -887,6 +1017,38 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 isInterim: false
               })
             }
+            return
+          }
+
+          // If an identical background translation is STILL in-flight, promote its AbortController
+          // into finalControllers so subsequent speaker drafts cannot abort it (zero double-call).
+          const isMatchingInFlightDraft =
+            Boolean(latestDraft) &&
+            latestDraft?.utteranceId === committed.id &&
+            latestDraft?.isStreaming &&
+            normalizeTextForMatch(latestDraft.sourceText) === normalizeTextForMatch(committed.text)
+
+          if (
+            isMatchingInFlightDraft &&
+            latestDraft &&
+            translationManagerRef.current?.promoteDraftToFinal(committed.channelId, committed.id)
+          ) {
+            pendingCommitPromotionRef.current.set(committed.id, {
+              committed,
+              sourceLang: pair.sourceLang,
+              targetLang: target
+            })
+            setStreamingTranslations((prev) => ({
+              ...prev,
+              [committed.id]: {
+                ...latestDraft,
+                id: `trans-${committed.id}`,
+                utteranceId: committed.id,
+                sourceText: committed.text,
+                isStreaming: true,
+                isComplete: false
+              }
+            }))
             return
           }
 
@@ -914,7 +1076,9 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           void translationManagerRef.current?.translateUtterance(
             committed,
             domainIdRef.current,
-            target
+            target,
+            operatingModeRef.current,
+            pair.sourceLang
           )
         }
       },
@@ -1049,7 +1213,10 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           )
         },
         onQuotaExhausted: (message) => {
+          flushAndStopClientTelemetry()
           engineRef.current?.stop()
+          speechGatesRef.current.channel_a.reset()
+          speechGatesRef.current.channel_b.reset()
           sttManagerRef.current?.stop()
           accumulator.reset()
           clearDraftTimers()
@@ -1117,6 +1284,10 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     sttManagerRef.current?.updateDomain(domainId)
   }, [domainId])
 
+  useEffect(() => {
+    engineRef.current?.setEchoBlockerEnabled(echoCancellation)
+  }, [echoCancellation])
+
   // Initialize Audio Ingestion Engine
   useEffect(() => {
     const engine = new AudioIngestionEngine({
@@ -1136,40 +1307,36 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
             setBufferSamplesB(status.available)
           }
         }
-        // In live Zero-Trust Gateway mode, downsample to 16 kHz and stream active PCM
-        // (above -57dBFS + 2.2s hangover) so soft/distant voices transcribe cleanly while silence saves quota
+        // Listen-only architecture: strictly stream Channel B (System Audio / Call Loopback)
+        // through SmartSpeechGate; local microphone (Channel A) is never captured or sent to Soniox.
+        // When local self-voice echo blocker detects the interpreter speaking, call return echo/sidetone
+        // in System Audio is suppressed so the interpreter's own voice is never translated.
         if (sttManagerRef.current?.isGatewayAuthenticated()) {
-          if (channelId === 'channel_a' && engineRef.current?.getIsCoughMuted()) {
+          if (channelId !== 'channel_b') {
             return
           }
-          let maxAbs = 0
-          for (let i = 0; i < pcmData.length; i++) {
-            const v = pcmData[i] < 0 ? -pcmData[i] : pcmData[i]
-            if (v > maxAbs) maxAbs = v
+          if (engineRef.current?.getIsSystemAudioMuted()) {
+            return
           }
-          const now = Date.now()
-          if (maxAbs >= 45) {
-            lastActiveAudioMsRef.current[channelId] = now
-            channelPauseFinalizedRef.current[channelId] = false
-          }
-          const silenceElapsedMs = now - lastActiveAudioMsRef.current[channelId]
-          // 2.2s hangover guarantees Soniox receives full trailing silence, then emits ONE clean finalize
-          if (silenceElapsedMs <= 2200) {
-            const actualRate = engineRef.current?.getActualSampleRate() || TARGET_STREAM_SAMPLE_RATE
-            const streamPcm = downsampleInt16Pcm(pcmData, actualRate, TARGET_STREAM_SAMPLE_RATE)
-            if (streamPcm.length > 0) {
-              sttManagerRef.current.sendAudio(channelId, streamPcm)
+          const actualRate = engineRef.current?.getActualSampleRate() || TARGET_STREAM_SAMPLE_RATE
+          const streamPcm = downsampleInt16Pcm(pcmData, actualRate, TARGET_STREAM_SAMPLE_RATE)
+          if (streamPcm.length > 0) {
+            const nowMs = Date.now()
+            const suppressAsSelfEcho = engineRef.current?.getIsLocalUserSpeaking(nowMs) ?? false
+            const gateResult = speechGatesRef.current.channel_b.processChunk(streamPcm, nowMs, {
+              suppressAsSelfEcho
+            })
+            for (const batchedFrame of gateResult.framesToSend) {
+              sttManagerRef.current.sendAudio('channel_b', batchedFrame)
             }
-          } else if (
-            lastActiveAudioMsRef.current[channelId] > 0 &&
-            !channelPauseFinalizedRef.current[channelId]
-          ) {
-            channelPauseFinalizedRef.current[channelId] = true
-            sttManagerRef.current.finalizeChannelPause(channelId)
+            if (gateResult.shouldFinalize) {
+              sttManagerRef.current.finalizeChannelPause('channel_b')
+            }
           }
         }
       },
       onVadTelemetry: (channelId, prob, isSpeech, latencyMs) => {
+        speechGatesRef.current[channelId].updateVadTelemetry(prob, isSpeech, Date.now())
         if (channelId === 'channel_a') {
           setVadProbabilityA(prob)
           setIsSpeechActiveA(isSpeech)
@@ -1201,7 +1368,10 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         sttManagerRef.current?.signalSpeechEnd(event.channelId)
       },
       onVadStatusChange: (status) => {
-        setIsVadReady(status === 'ready')
+        const ready = status === 'ready'
+        speechGatesRef.current.channel_a.setVadReady(ready)
+        speechGatesRef.current.channel_b.setVadReady(ready)
+        setIsVadReady(ready)
       },
       onLoopbackStatusChange: (status, detail) => {
         setLoopbackStatus(status)
@@ -1222,9 +1392,10 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     engineRef.current = engine
 
     return () => {
-      engine.stop()
+      flushAndStopClientTelemetry()
+      engine.dispose()
     }
-  }, [])
+  }, [flushAndStopClientTelemetry])
 
   // Start Audio Ingestion & Zero-Trust Gateway STT Pipeline
   const startAudioEngine = useCallback(async () => {
@@ -1316,8 +1487,50 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         endpointingMs: resolveEndpointingMs(latencyMode),
         sampleRate: TARGET_STREAM_SAMPLE_RATE
       })
+      sttManagerRef.current?.resetTokenTelemetry()
       sttManagerRef.current?.start()
       setIsAudioActive(true)
+
+      const nowMs = Date.now()
+      telemetrySessionRef.current = {
+        sessionId: `client-${nowMs}-${Math.random().toString(36).slice(2, 8)}`,
+        startedAtMs: nowMs,
+        startedAtIso: new Date(nowMs).toISOString(),
+        mode: operatingMode,
+        pair: `${sourceLangRef.current}<->${targetLangRef.current}`,
+        domain: domainIdRef.current
+      }
+      if (telemetryCheckpointTimerRef.current) {
+        clearInterval(telemetryCheckpointTimerRef.current)
+      }
+      telemetryCheckpointTimerRef.current = setInterval(() => {
+        const meta = telemetrySessionRef.current
+        if (!meta || !window.electronAPI?.recordClientTelemetry) return
+        const gateStats = speechGatesRef.current.channel_b.getStats()
+        const tokStats = sttManagerRef.current?.getTokenTelemetry() || {
+          finalOriginalTokens: 0,
+          finalTranslationTokens: 0,
+          finalizesSent: 0
+        }
+        window.electronAPI.recordClientTelemetry({
+          sessionId: meta.sessionId,
+          startedAtIso: meta.startedAtIso,
+          endedAtIso: null,
+          status: 'active',
+          gatewayUrl: getGatewayHttpUrl(),
+          mode: meta.mode,
+          pair: meta.pair,
+          domain: meta.domain,
+          wallClockMs: Math.max(0, Date.now() - meta.startedAtMs),
+          audioSecondsCaptured: Math.round((gateStats.totalInputSamples / TARGET_STREAM_SAMPLE_RATE) * 100) / 100,
+          audioSecondsSent: Math.round((gateStats.totalSentSamples / TARGET_STREAM_SAMPLE_RATE) * 100) / 100,
+          audioSecondsSuppressed: Math.round((gateStats.suppressedSamples / TARGET_STREAM_SAMPLE_RATE) * 100) / 100,
+          audioSecondsEchoBlocked: Math.round((gateStats.echoBlockedSamples / TARGET_STREAM_SAMPLE_RATE) * 100) / 100,
+          finalOriginalTokens: tokStats.finalOriginalTokens,
+          finalTranslationTokens: tokStats.finalTranslationTokens,
+          finalizesSent: tokStats.finalizesSent
+        })
+      }, 15_000)
     } catch (err) {
       console.error('[DUALAI] Failed to start audio engine:', err)
       setHasPipelineError(true)
@@ -1356,6 +1569,9 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setIsSpeechActiveA(false)
       setIsSpeechActiveB(false)
     }
+    flushAndStopClientTelemetry()
+    speechGatesRef.current.channel_a.reset()
+    speechGatesRef.current.channel_b.reset()
     sttManagerRef.current?.stop()
     paragraphAccumulatorRef.current?.reset()
     clearDraftTimers()
@@ -1381,27 +1597,57 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [audioRoute, stopAudioEngine, startAudioEngine])
 
-  // Instantaneous Cough Mute (Day 09 DoD: 0ms audible bleed within 1 buffer quantum)
-  const setCoughMute = useCallback((muted: boolean) => {
-    setIsCoughMuted(muted)
-    engineRef.current?.setCoughMute(muted)
-    if (muted) {
-      setIsSpeechActiveA(false)
-      setVadProbabilityA(0)
+  // Sync initial OS-wide call microphone mute state on boot
+  useEffect(() => {
+    let active = true
+    if (window.electronAPI?.getSystemMicMute) {
+      void window.electronAPI
+        .getSystemMicMute()
+        .then((res) => {
+          if (active && typeof res?.muted === 'boolean') {
+            setIsCoughMuted(res.muted)
+          }
+        })
+        .catch(() => {
+          // Ignore non-Electron browser preview
+        })
+    }
+    return () => {
+      active = false
     }
   }, [])
 
-  const toggleCoughMute = useCallback(() => {
-    setIsCoughMuted((prev) => {
-      const next = !prev
-      engineRef.current?.setCoughMute(next)
-      if (next) {
-        setIsSpeechActiveA(false)
-        setVadProbabilityA(0)
-      }
-      return next
-    })
+  // OS-Wide System Call Microphone Mute (mutes your mic across Zoom/Teams/Meet/calls during hold/silence;
+  // does NOT capture mic audio or affect Soniox listening to System Audio)
+  const applyOsMicMute = useCallback((muted: boolean) => {
+    isCoughMutedRef.current = muted
+    setIsCoughMuted(muted)
+    if (window.electronAPI?.setSystemMicMute) {
+      void window.electronAPI
+        .setSystemMicMute(muted)
+        .then((res) => {
+          if (res && typeof res.muted === 'boolean' && res.muted !== muted) {
+            isCoughMutedRef.current = res.muted
+            setIsCoughMuted(res.muted)
+          }
+        })
+        .catch(() => {
+          // Keep optimistic UI state in non-Electron environments
+        })
+    }
   }, [])
+
+  const setCoughMute = useCallback(
+    (muted: boolean) => {
+      applyOsMicMute(muted)
+    },
+    [applyOsMicMute]
+  )
+
+  const toggleCoughMute = useCallback(() => {
+    // Read ref outside state updater so React 18 StrictMode never double-fires IPC
+    applyOsMicMute(!isCoughMutedRef.current)
+  }, [applyOsMicMute])
 
   // Hardware Gain Multipliers & Calibration Monitor Feedback (Day 11)
   const setGainChannelA = useCallback((gain: number) => {
@@ -1694,6 +1940,12 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setIsSystemAudioMuted((prev) => {
       const next = !prev
       engineRef.current?.setSystemAudioMuted(next)
+      if (next) {
+        speechGatesRef.current.channel_b.forceMuteClose()
+        sttManagerRef.current?.pauseChannel('channel_b')
+        setIsSpeechActiveB(false)
+        setVadProbabilityB(0)
+      }
       return next
     })
   }, [])

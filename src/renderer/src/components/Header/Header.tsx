@@ -24,7 +24,7 @@ import { GlassTooltip } from '../UI/GlassTooltip'
 export const Header: React.FC = () => {
   const {
     isAudioActive,
-    isCoughMuted,
+    isSystemAudioMuted,
     pipelineState,
     endToEndLatencyMs,
     sourceLang,
@@ -101,7 +101,7 @@ export const Header: React.FC = () => {
 
   const isLivePulsing =
     isAudioActive &&
-    !isCoughMuted &&
+    !isSystemAudioMuted &&
     (pipelineState.state === 'listening' ||
       pipelineState.state === 'transcribing' ||
       pipelineState.state === 'translating')
@@ -128,7 +128,7 @@ export const Header: React.FC = () => {
           aria-live="polite"
           title={`Latency: ${endToEndLatencyMs > 0 ? `${endToEndLatencyMs}ms` : '--'}`}
           className={`flex items-center space-x-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium transition-all duration-200 ${
-            isAudioActive || isCoughMuted
+            isAudioActive
               ? 'bg-white/[0.07] border border-white/[0.1] text-white/90'
               : 'hidden sm:flex text-white/45'
           }`}
