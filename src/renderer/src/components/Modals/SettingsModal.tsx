@@ -17,7 +17,6 @@ import {
   ShieldCheck,
   RotateCcw,
   Columns2,
-  Maximize2,
   Rows2,
   MousePointerClick,
   ArrowRight,
@@ -57,7 +56,6 @@ const VIEW_ICONS: Record<
   React.ComponentType<{ className?: string; strokeWidth?: number }>
 > = {
   dual: Columns2,
-  target_only: Maximize2,
   stacked: Rows2
 }
 

@@ -13,19 +13,24 @@ import {
   Lock,
   Unlock,
   Settings,
-  PictureInPicture2
+  PictureInPicture2,
+  Trash2
 } from 'lucide-react'
 import {
   HudSettings,
   DEFAULT_HUD_SETTINGS,
+  DEFAULT_WORKSPACE_DISPLAY_SETTINGS,
   WorkspaceLineSpacing
 } from '../../../../types/settings'
 import { TranscriptPayload } from '../../../../types/ipc'
 import {
   CONVERSATION_COLOR_PRESETS,
+  STORAGE_KEY_WORKSPACE_DISPLAY,
   WORKSPACE_FONT_OPTIONS,
+  mergeWorkspaceTypographyIntoHud,
   resolveFontFamilyCss,
-  resolveLineSpacingMetrics
+  resolveLineSpacingMetrics,
+  sanitizeWorkspaceDisplaySettings
 } from '../../utils/typographyPreferences'
 import { AppleSwitch } from '../UI/AppleSwitch'
 
@@ -45,19 +50,36 @@ const SHORT_SPACING_LABELS: Record<WorkspaceLineSpacing, string> = {
 }
 
 function loadHudSettings(): HudSettings {
+  let baseHud: HudSettings = DEFAULT_HUD_SETTINGS
   try {
     const raw = localStorage.getItem(STORAGE_KEY_HUD)
-    if (!raw) return DEFAULT_HUD_SETTINGS
-    return { ...DEFAULT_HUD_SETTINGS, ...(JSON.parse(raw) as Partial<HudSettings>) }
+    if (raw) {
+      baseHud = { ...DEFAULT_HUD_SETTINGS, ...(JSON.parse(raw) as Partial<HudSettings>) }
+    }
   } catch {
-    return DEFAULT_HUD_SETTINGS
+    baseHud = DEFAULT_HUD_SETTINGS
   }
+
+  // Always inherit the active Compact Stacked / Dual Pane typography & colors on boot
+  try {
+    const rawWorkspace = localStorage.getItem(STORAGE_KEY_WORKSPACE_DISPLAY)
+    if (rawWorkspace) {
+      const workspace = sanitizeWorkspaceDisplaySettings(JSON.parse(rawWorkspace))
+      return mergeWorkspaceTypographyIntoHud(baseHud, workspace)
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  return mergeWorkspaceTypographyIntoHud(baseHud, DEFAULT_WORKSPACE_DISPLAY_SETTINGS)
 }
 
 interface HudLine {
   id: string
   speakerLabel: string
+  sourceText: string
   translatedText: string
+  originalColor?: string
+  translationColor?: string
   isInterim: boolean
   timestampMs: number
 }
@@ -130,17 +152,22 @@ export const TeleprompterHud: React.FC = () => {
       cleanups.push(
         window.electronAPI.onHudTranscript((payload: TranscriptPayload) => {
           const id = payload.id || `${payload.speakerId}-${payload.timestampMs}`
-          const text = payload.translatedText || payload.sourceText
-          if (!text) return
+          const cleanSource = (payload.sourceText || '').trim()
+          const cleanTranslated = (payload.translatedText || '').trim()
+          if (!cleanSource && !cleanTranslated) return
 
           setLines((prev) => {
             const existingIdx = prev.findIndex((item) => item.id === id)
+            const prevItem = existingIdx !== -1 ? prev[existingIdx] : undefined
             const nextLine: HudLine = {
               id,
-              speakerLabel: payload.speakerLabel,
-              translatedText: text,
+              speakerLabel: payload.speakerLabel || prevItem?.speakerLabel || 'Speaker 1',
+              sourceText: cleanSource || prevItem?.sourceText || '',
+              translatedText: cleanTranslated || prevItem?.translatedText || '',
+              originalColor: payload.originalColor || prevItem?.originalColor,
+              translationColor: payload.translationColor || prevItem?.translationColor,
               isInterim: payload.isInterim,
-              timestampMs: payload.timestampMs
+              timestampMs: payload.timestampMs || prevItem?.timestampMs || Date.now()
             }
 
             if (existingIdx !== -1) {
@@ -148,7 +175,7 @@ export const TeleprompterHud: React.FC = () => {
               copy[existingIdx] = nextLine
               return copy
             }
-            return [...prev.slice(-24), nextLine]
+            return [...prev.slice(-39), nextLine]
           })
         })
       )
@@ -157,7 +184,24 @@ export const TeleprompterHud: React.FC = () => {
     if (window.electronAPI?.onHudConfigUpdate) {
       cleanups.push(
         window.electronAPI.onHudConfigUpdate((remoteConfig: HudSettings) => {
-          setSettings(remoteConfig)
+          setSettings((prevSettings) => {
+            const prevA = (prevSettings.languageAColor || '#ffffff').toLowerCase()
+            const prevB = (prevSettings.languageBColor || prevSettings.textColor || '#ffaa00').toLowerCase()
+            const nextA = remoteConfig.languageAColor || prevSettings.languageAColor || '#ffffff'
+            const nextB = remoteConfig.languageBColor || remoteConfig.textColor || prevSettings.languageBColor || '#ffaa00'
+            if (prevA !== nextA.toLowerCase() || prevB !== nextB.toLowerCase()) {
+              setLines((prevLines) =>
+                prevLines.map((line) => ({
+                  ...line,
+                  originalColor:
+                    line.originalColor?.toLowerCase() === prevB ? nextB : nextA,
+                  translationColor:
+                    line.translationColor?.toLowerCase() === prevA ? nextA : nextB
+                }))
+              )
+            }
+            return remoteConfig
+          })
           try {
             localStorage.setItem(STORAGE_KEY_HUD, JSON.stringify(remoteConfig))
           } catch {
@@ -208,7 +252,9 @@ export const TeleprompterHud: React.FC = () => {
   const isHighContrast = Boolean(settings.highContrast)
   const showSpeakers = settings.showSpeakerLabels ?? false
   const showTimes = Boolean(settings.showTimestamps)
-  const activeTextColor = settings.textColor || '#ffffff'
+  const defaultOriginalColor = settings.languageAColor || '#ffffff'
+  const defaultTranslationColor = settings.languageBColor || settings.textColor || '#ffaa00'
+  const activeTextColor = defaultTranslationColor
   const showChrome = isHovered || showControls || visibleLines.length === 0
 
   return (
@@ -287,6 +333,19 @@ export const TeleprompterHud: React.FC = () => {
             <span className="hidden sm:inline">
               {settings.isClickThrough ? 'Pass-Through' : 'Interactive'}
             </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={(e) => {
+              e.currentTarget.blur()
+              setLines([])
+            }}
+            title="Clear Mini View text"
+            aria-label="Clear Mini View text"
+            className="glass-control-hover flex h-6 w-6 items-center justify-center rounded-full text-white/65 hover:bg-white/[0.14] hover:text-white"
+          >
+            <Trash2 className="h-3.5 w-3.5" strokeWidth={1.75} />
           </button>
 
           <button
@@ -498,17 +557,17 @@ export const TeleprompterHud: React.FC = () => {
         </div>
       )}
 
-      {/* 100% Pure, Edge-to-Edge Live Reading Canvas */}
+      {/* 100% Pure Compact Stacked Live Reading Canvas (Original above, Translation below) */}
       <div
         ref={scrollRef}
-        className={`flex-1 overflow-y-auto px-4 sm:px-6 pb-4 space-y-2 transition-all duration-200 ${
+        className={`flex-1 overflow-y-auto px-4 sm:px-6 pb-4 space-y-2.5 transition-all duration-200 ${
           showChrome ? 'pt-11' : 'pt-4'
         }`}
         style={{
           fontFamily: fontMetrics.fontFamily,
           letterSpacing: fontMetrics.letterSpacing,
           fontSize: `${settings.fontSizePx}px`,
-          lineHeight: lineMetrics.hudLineHeight
+          lineHeight: lineMetrics.lineHeight
         }}
       >
         {visibleLines.length === 0 ? (
@@ -519,14 +578,14 @@ export const TeleprompterHud: React.FC = () => {
             <p
               className="font-medium tracking-tight"
               style={{
-                color: activeTextColor,
-                fontSize: `${Math.min(24, Math.max(13, settings.fontSizePx * 0.7))}px`
+                color: defaultOriginalColor,
+                fontSize: `${Math.min(22, Math.max(13, settings.fontSizePx))}px`
               }}
             >
               Mini View ready
             </p>
             <p className="mt-1 text-xs text-white/45 max-w-[280px] leading-snug">
-              Live translations float cleanly here above Zoom, Teams, or Meet.
+              Original speech appears above and translation right below, synced with your workspace style.
             </p>
           </div>
         ) : (
@@ -537,35 +596,55 @@ export const TeleprompterHud: React.FC = () => {
               hour: '2-digit',
               minute: '2-digit'
             })
+            const rowOriginalColor = line.originalColor || defaultOriginalColor
+            const rowTranslationColor = line.translationColor || defaultTranslationColor
             return (
               <div
                 key={line.id}
-                className="animate-utterance transition-opacity duration-200"
+                className="animate-utterance border-b border-white/[0.06] pb-2 last:border-b-0 space-y-0.5 transition-opacity duration-200"
                 style={{
-                  color: activeTextColor,
-                  opacity: isHighContrast ? (isNewest ? 1 : 0.85) : isNewest ? 1 : 0.68
+                  opacity: isHighContrast ? (isNewest ? 1 : 0.88) : isNewest ? 1 : 0.78
                 }}
               >
-                {showSpeakers && (
-                  <span className="mr-2 rounded-full bg-white/[0.1] border border-white/[0.12] px-2 py-0.5 align-middle text-[10px] font-medium text-accent-emerald">
-                    {line.speakerLabel}
-                  </span>
+                {line.sourceText && (
+                  <div
+                    className={isHighContrast ? 'font-medium tracking-tight' : 'font-normal tracking-tight'}
+                    style={{
+                      color: rowOriginalColor,
+                      textShadow: '0 1px 4px rgba(0, 0, 0, 0.78)'
+                    }}
+                  >
+                    {showSpeakers && (
+                      <span className="mr-2 rounded-full bg-white/[0.1] border border-white/[0.12] px-2 py-0.5 align-middle text-[10px] font-medium text-accent-steel">
+                        {line.speakerLabel}
+                      </span>
+                    )}
+                    {showTimes && (
+                      <span className="mr-2 align-middle font-mono text-[10px] tabular-nums text-white/45">
+                        {formattedTime}
+                      </span>
+                    )}
+                    <span>{line.sourceText}</span>
+                    {line.isInterim && !line.translatedText && (
+                      <span className="ml-1.5 inline-block h-[0.75em] w-1.5 rounded-full align-middle bg-accent-steel animate-pulse" />
+                    )}
+                  </div>
                 )}
-                {showTimes && (
-                  <span className="mr-2 align-middle font-mono text-[10px] tabular-nums text-white/45">
-                    {formattedTime}
-                  </span>
-                )}
-                <span
-                  className={isHighContrast ? 'font-semibold tracking-tight' : 'font-medium tracking-tight'}
-                  style={{
-                    textShadow: '0 1px 4px rgba(0, 0, 0, 0.78)'
-                  }}
-                >
-                  {line.translatedText}
-                </span>
-                {line.isInterim && (
-                  <span className="ml-1.5 inline-block h-[0.82em] w-1.5 rounded-full align-middle bg-accent-emerald animate-pulse" />
+
+                {line.translatedText ? (
+                  <div
+                    className={isHighContrast ? 'font-semibold tracking-tight' : 'font-medium tracking-tight'}
+                    style={{
+                      color: rowTranslationColor,
+                      textShadow: '0 1px 4px rgba(0, 0, 0, 0.78)'
+                    }}
+                  >
+                    {line.translatedText}
+                  </div>
+                ) : line.isInterim ? (
+                  <div className="text-[0.82em] italic text-white/35">Translating...</div>
+                ) : (
+                  <div className="text-[0.82em] italic text-white/30">Translation unavailable</div>
                 )}
               </div>
             )

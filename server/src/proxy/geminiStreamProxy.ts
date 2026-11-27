@@ -27,7 +27,7 @@ export interface TranslateProxyPayload {
 }
 
 const STT_REPAIR_GUIDANCE =
-  'The input comes from live real-time speech-to-text and may contain occasional phonetic mishearings, stray punctuation, or brief cross-language slips (e.g. a Portuguese word like "primeiro" or "e" inside Spanish speech). Silently infer the speaker\'s true intended meaning from context and domain vocabulary before translating. Never explain corrections; output ONLY the clean, natural translation.'
+  'The input comes from live real-time speech-to-text and may contain occasional phonetic mishearings, stray punctuation, or brief cross-language slips (e.g. a Portuguese word like "primeiro" or "e" inside Spanish speech). Silently infer the speaker\'s true intended meaning from context and domain vocabulary before translating. Preserve every conditional ("if"/"si"), negation ("not"/"no"), and speaker intent accurately even in colloquial or disfluent speech—never invert meaning. Never explain corrections; output ONLY the clean, natural translation.'
 
 const DOMAIN_INSTRUCTIONS: Record<string, string> = {
   medical: `You are an expert clinical medical interpreter. Strictly follow ICD-10 anatomical nomenclature and pharmacological precision. Preserve all dosages, units, and numeric vitals verbatim. ${STT_REPAIR_GUIDANCE}`,

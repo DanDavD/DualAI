@@ -143,8 +143,10 @@ export const TranslationCard: React.FC<TranslationCardProps> = React.memo(({
           highlightCriticalEntities(translation.translatedText)
         ) : isWaitingForPause ? (
           <span className="font-light text-text-muted text-xs italic">Listening...</span>
-        ) : (
+        ) : isStreaming || isDraft ? (
           <span className="font-light text-text-muted text-xs">Translating...</span>
+        ) : (
+          <span className="font-light text-text-muted text-xs italic">Translation unavailable</span>
         )}
         {isStreaming && translation?.translatedText && (
           <span className="inline-block w-1.5 h-3.5 bg-accent-emerald/70 ml-1 animate-pulse align-middle" />

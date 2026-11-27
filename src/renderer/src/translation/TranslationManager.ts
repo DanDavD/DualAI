@@ -26,7 +26,7 @@ export interface TranslationManagerCallbacks {
   onDraftComplete?: (result: TranslationResult) => void
   onDraftError?: (utteranceId: string, error: Error) => void
   onTelemetry: (telemetry: TranslationTelemetry) => void
-  onError: (error: Error) => void
+  onError: (error: Error, utteranceId?: string) => void
   onQuotaExhausted?: (message: string) => void
 }
 
@@ -155,7 +155,7 @@ export class TranslationManager {
         this.callbacks.onTranslationComplete(result)
       },
       onTelemetry: (telemetry) => this.callbacks.onTelemetry(telemetry),
-      onError: (err) => this.callbacks.onError(err)
+      onError: (err) => this.callbacks.onError(err, utterance.id)
     }
 
     if (this.gatewayEngine) {
