@@ -144,6 +144,18 @@ export async function handleSttWebSocketProxy(params: {
     return
   }
 
+  if (quota.subscriptionStatus === 'canceled') {
+    clientSocket.send(
+      JSON.stringify({
+        type: 'dualai_error',
+        code: 'SUBSCRIPTION_CANCELED',
+        message: 'Your subscription has ended. Upgrade your plan to continue.'
+      })
+    )
+    clientSocket.close(WS_CLOSE_QUOTA_EXHAUSTED, 'SUBSCRIPTION_CANCELED')
+    return
+  }
+
   if (quota.remainingSeconds <= 0) {
     clientSocket.send(
       JSON.stringify({

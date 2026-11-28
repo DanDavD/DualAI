@@ -393,7 +393,10 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const quotaTotalHours = accountQuota ? accountQuota.totalAllocatedSeconds / 3600 : 1.0
   const quotaRemainingHours = accountQuota ? accountQuota.remainingSeconds / 3600 : 1.0
   const isGatewayAuthenticated = Boolean(authSession?.accessToken)
-  const isQuotaExhausted = Boolean(accountQuota && accountQuota.remainingSeconds <= 0)
+  const isQuotaExhausted = Boolean(
+    accountQuota &&
+      (accountQuota.remainingSeconds <= 0 || accountQuota.subscriptionStatus === 'canceled')
+  )
 
   // Audio Engine Ingestion & Hardware State
   const [isAudioActive, setIsAudioActive] = useState(false)
@@ -1487,7 +1490,13 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setHasPipelineError(false)
     setPipelineErrorMessage(null)
 
-    // Pre-flight Zero-Trust Session & Gateway verification (catches unverified emails, expired tokens or offline Gateway)
+    // Pre-flight Zero-Trust Session & Gateway verification (catches unauthenticated users, unverified emails, expired tokens, canceled subscriptions, or 0h balance)
+    if (!authSession) {
+      setPipelineErrorMessage('Sign in to start your 1-hour free trial.')
+      setIsAccountModalOpen(true)
+      return
+    }
+
     if (authSession) {
       if (authSession.user.emailVerified === false) {
         setPipelineErrorMessage(
@@ -1519,10 +1528,18 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
       try {
         const snapshot = await fetchAuthoritativeQuota(activeSession.accessToken)
         setAccountQuota(snapshot.quota)
+        setAccountSubscription(snapshot.subscription)
         setAvailablePlans(snapshot.plans)
+        if (snapshot.quota.subscriptionStatus === 'canceled') {
+          setPipelineErrorMessage('Your subscription has ended. Upgrade your plan to continue.')
+          setIsAccountModalOpen(true)
+          return
+        }
         if (snapshot.quota.remainingSeconds <= 0) {
           setPipelineErrorMessage(
-            'Your 1-hour free interpretation quota has been used. Select a plan to continue.'
+            snapshot.quota.planId === 'free_tier'
+              ? 'Your 1-hour free interpretation trial has been used. Upgrade to continue.'
+              : 'You have used all available hours in this billing cycle. Upgrade your plan to continue.'
           )
           setIsAccountModalOpen(true)
           return

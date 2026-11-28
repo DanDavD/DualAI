@@ -9,7 +9,8 @@ import { ServerResponse } from 'node:http'
 import { GoogleGenAI } from '@google/genai'
 import { GatewayConfig } from '../config.js'
 import { AuthenticatedUser } from '../security/authVerifier.js'
-import { QuotaStore } from '../quota/quotaStore.js'
+import { GatewayRateLimiter } from '../security/rateLimiter.js'
+import { QuotaStore, UserQuotaRecord } from '../quota/quotaStore.js'
 
 export interface TranslateProxyPayload {
   sourceText: string
@@ -45,19 +46,39 @@ const MAX_QUOTA_CACHE_ENTRIES = 2000
 
 interface CachedQuotaEntry {
   remainingSeconds: number
+  subscriptionStatus: UserQuotaRecord['subscriptionStatus']
   fetchedAtMs: number
 }
 
 const translateQuotaCache = new Map<string, CachedQuotaEntry>()
 
-async function getFastQuotaRemaining(
+export function invalidateTranslateQuotaCache(userId?: string): void {
+  if (userId) {
+    translateQuotaCache.delete(userId)
+  } else {
+    translateQuotaCache.clear()
+  }
+}
+
+async function getFastQuotaState(
   userId: string,
   quotaStore: QuotaStore
-): Promise<number> {
+): Promise<{
+  remainingSeconds: number
+  subscriptionStatus: UserQuotaRecord['subscriptionStatus']
+}> {
   const now = Date.now()
   const cached = translateQuotaCache.get(userId)
-  if (cached && now - cached.fetchedAtMs <= QUOTA_CACHE_TTL_MS && cached.remainingSeconds > 30) {
-    return cached.remainingSeconds
+  if (
+    cached &&
+    now - cached.fetchedAtMs <= QUOTA_CACHE_TTL_MS &&
+    cached.remainingSeconds > 30 &&
+    cached.subscriptionStatus !== 'canceled'
+  ) {
+    return {
+      remainingSeconds: cached.remainingSeconds,
+      subscriptionStatus: cached.subscriptionStatus
+    }
   }
   const quota = await quotaStore.getOrCreateUserQuota(userId)
   if (!translateQuotaCache.has(userId) && translateQuotaCache.size >= MAX_QUOTA_CACHE_ENTRIES) {
@@ -66,9 +87,13 @@ async function getFastQuotaRemaining(
   }
   translateQuotaCache.set(userId, {
     remainingSeconds: quota.remainingSeconds,
+    subscriptionStatus: quota.subscriptionStatus,
     fetchedAtMs: now
   })
-  return quota.remainingSeconds
+  return {
+    remainingSeconds: quota.remainingSeconds,
+    subscriptionStatus: quota.subscriptionStatus
+  }
 }
 
 let cachedClientKey: string | null = null
@@ -135,11 +160,26 @@ export async function handleGeminiTranslateStream(params: {
   user: AuthenticatedUser
   config: GatewayConfig
   quotaStore: QuotaStore
+  rateLimiter?: GatewayRateLimiter
 }): Promise<void> {
-  const { payload, res, user, config, quotaStore } = params
+  const { payload, res, user, config, quotaStore, rateLimiter } = params
 
-  // 1. Validate authoritative quota (8s in-memory hot-path cache saves 50-120ms Supabase RTT per call)
-  const remainingSeconds = await getFastQuotaRemaining(user.userId, quotaStore)
+  // 1. Validate authoritative quota & subscription status
+  const quotaState = await getFastQuotaState(user.userId, quotaStore)
+  if (quotaState.subscriptionStatus === 'canceled') {
+    translateQuotaCache.delete(user.userId)
+    res.writeHead(402, { 'Content-Type': 'application/json' })
+    res.end(
+      JSON.stringify({
+        code: 'SUBSCRIPTION_CANCELED',
+        message: 'Your subscription has ended. Upgrade your plan to continue.',
+        remainingSeconds: 0
+      })
+    )
+    return
+  }
+
+  let remainingSeconds = quotaState.remainingSeconds
   if (remainingSeconds <= 0) {
     translateQuotaCache.delete(user.userId)
     res.writeHead(402, { 'Content-Type': 'application/json' })
@@ -151,6 +191,28 @@ export async function handleGeminiTranslateStream(params: {
       })
     )
     return
+  }
+
+  // Anti-abuse metering: if caller invokes /v1/translate directly WITHOUT an active
+  // metered /v1/stt WebSocket session, deduct 1 second per request so attackers cannot
+  // script unlimited free Gemini translations on a 1-second balance.
+  if (rateLimiter && rateLimiter.getActiveSessionCount(user.userId) === 0) {
+    try {
+      const deducted = await quotaStore.deductSeconds(
+        user.userId,
+        'translate-direct',
+        1,
+        'system'
+      )
+      remainingSeconds = deducted.remainingSeconds
+      translateQuotaCache.set(user.userId, {
+        remainingSeconds,
+        subscriptionStatus: deducted.exhausted ? 'exhausted' : quotaState.subscriptionStatus,
+        fetchedAtMs: Date.now()
+      })
+    } catch {
+      // Fall through only if quotaStore failed to deduct; active quota check already ran
+    }
   }
 
   // 2. Validate payload bounds (anti-abuse / anti-prompt-stuffing)

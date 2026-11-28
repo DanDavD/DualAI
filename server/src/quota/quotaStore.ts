@@ -150,6 +150,7 @@ export interface QuotaStore {
     userId: string
     planId?: PlanId
     subscriptionStatus: UserQuotaRecord['subscriptionStatus']
+    resetRemainingToZero?: boolean
   }): Promise<void>
   setTestQuotaSeconds?(userId: string, remainingSeconds: number): void
 }
@@ -290,12 +291,14 @@ export class InMemoryQuotaStore implements QuotaStore {
     userId: string
     planId?: PlanId
     subscriptionStatus: UserQuotaRecord['subscriptionStatus']
+    resetRemainingToZero?: boolean
   }): Promise<void> {
     const current = await this.getOrCreateUserQuota(params.userId)
     const plan = params.planId ? PLAN_CATALOG[params.planId] : undefined
     this.quotas.set(params.userId, {
       ...current,
       planId: plan ? plan.id : current.planId,
+      remainingSeconds: params.resetRemainingToZero ? 0 : current.remainingSeconds,
       subscriptionStatus: params.subscriptionStatus,
       maxConcurrentSessions: plan ? plan.maxConcurrentSessions : current.maxConcurrentSessions
     })
@@ -599,6 +602,7 @@ export class SupabaseQuotaStore implements QuotaStore {
     userId: string
     planId?: PlanId
     subscriptionStatus: UserQuotaRecord['subscriptionStatus']
+    resetRemainingToZero?: boolean
   }): Promise<void> {
     const patch: Record<string, unknown> = {
       subscription_status: params.subscriptionStatus,
@@ -606,6 +610,9 @@ export class SupabaseQuotaStore implements QuotaStore {
     }
     if (params.planId) {
       patch.plan_id = params.planId
+    }
+    if (params.resetRemainingToZero) {
+      patch.remaining_seconds = 0
     }
     const res = await fetch(
       `${this.baseUrl}/rest/v1/user_quotas?user_id=eq.${encodeURIComponent(params.userId)}`,
@@ -616,7 +623,8 @@ export class SupabaseQuotaStore implements QuotaStore {
       }
     )
     if (!res.ok) {
-      console.warn(`[QuotaStore] syncSubscriptionMetadata returned ${res.status}`)
+      const errText = await res.text().catch(() => '')
+      throw new Error(`Supabase syncSubscriptionMetadata failed (${res.status}): ${errText}`)
     }
   }
 }

@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
+import WebSocket from 'ws'
 import { createGatewayServer } from '../server/src/index.ts'
 import { hasPaidAccess } from '../server/src/billing/paddleFulfillment.ts'
 import { InMemoryQuotaStore } from '../server/src/quota/quotaStore.ts'
@@ -672,6 +673,162 @@ async function runPaddleFulfillmentSuite(): Promise<void> {
     const refundReplayBody = (await refundReplay.json()) as { revoked: boolean }
     assert.equal(refundReplayBody.revoked, false, 'Replaying adjustment must NOT deduct hours twice')
     console.log('  Cancel, Undo Cancel, Duplicate Checkout Guard & Atomic Refund Clawback: VERIFIED\n')
+
+    // ------------------------------------------------------------------------
+    // TEST 10: Security Hardening — Canceled Block, Direct Translate Metering,
+    // Query-Token Rejection, and In-Place Upgrade (Zero Double-Billing)
+    // ------------------------------------------------------------------------
+    console.log('[TEST 10] Testing Canceled Cutoff, Direct-Translate Abuse Guard, Query-Token Block & In-Place Upgrade...')
+
+    // 10a. Query-string JWT must be rejected (401) on API routes
+    const queryTokenQuotaRes = await fetch(
+      `${gw.baseUrl}/v1/account/quota?token=${encodeURIComponent(session.accessToken)}`
+    )
+    assert.equal(queryTokenQuotaRes.status, 401, 'GET /v1/account/quota?token= must be rejected')
+    const queryTokenTranslateRes = await fetch(
+      `${gw.baseUrl}/v1/translate?token=${encodeURIComponent(session.accessToken)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sourceText: 'Hello',
+          sourceLang: 'en',
+          targetLang: 'es',
+          domainId: 'general'
+        })
+      }
+    )
+    assert.equal(queryTokenTranslateRes.status, 401, 'POST /v1/translate?token= must be rejected')
+
+    // 10b. Direct /v1/translate without active /v1/stt session must deduct 1s per call and block at 0s
+    const abuseSession = gw.authVerifier.mintDevSessionToken('direct-translate-abuse@dualai.test')
+    quotaStore.setTestQuotaSeconds(abuseSession.user.userId, 2)
+    for (let i = 0; i < 2; i++) {
+      const okTranslate = await fetch(`${gw.baseUrl}/v1/translate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${abuseSession.accessToken}`
+        },
+        body: JSON.stringify({
+          sourceText: `Abuse check ${i}`,
+          sourceLang: 'en',
+          targetLang: 'es',
+          domainId: 'general'
+        })
+      })
+      assert.equal(okTranslate.status, 200)
+      await okTranslate.text()
+    }
+    const blockedAbuseTranslate = await fetch(`${gw.baseUrl}/v1/translate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${abuseSession.accessToken}`
+      },
+      body: JSON.stringify({
+        sourceText: 'Should be blocked at 0s',
+        sourceLang: 'en',
+        targetLang: 'es',
+        domainId: 'general'
+      })
+    })
+    assert.equal(blockedAbuseTranslate.status, 402, 'Direct /v1/translate must block with 402 once metered to 0s')
+
+    // 10c. Canceled subscription MUST block both /v1/translate (402) and /v1/stt WS (4002) even when remainingSeconds > 0
+    const canceledSession = gw.authVerifier.mintDevSessionToken('canceled-with-hours@dualai.test')
+    quotaStore.setTestQuotaSeconds(canceledSession.user.userId, 7200) // Still has 2 hours left
+    await quotaStore.syncSubscriptionMetadata({
+      userId: canceledSession.user.userId,
+      planId: 'pro_40h',
+      subscriptionStatus: 'canceled'
+    })
+
+    const canceledTranslateRes = await fetch(`${gw.baseUrl}/v1/translate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${canceledSession.accessToken}`
+      },
+      body: JSON.stringify({
+        sourceText: 'Should be blocked after cancellation',
+        sourceLang: 'en',
+        targetLang: 'es',
+        domainId: 'general'
+      })
+    })
+    assert.equal(canceledTranslateRes.status, 402)
+    const canceledTranslateBody = (await canceledTranslateRes.json()) as { code: string }
+    assert.equal(canceledTranslateBody.code, 'SUBSCRIPTION_CANCELED')
+
+    const wsCloseCode = await new Promise<number>((resolve, reject) => {
+      const ws = new WebSocket(`${gw.wsUrl}/v1/stt`, ['dualai-auth', canceledSession.accessToken])
+      const timer = setTimeout(() => reject(new Error('WS canceled close timed out')), 4000)
+      ws.on('close', (code) => {
+        clearTimeout(timer)
+        resolve(code)
+      })
+      ws.on('error', (err) => {
+        clearTimeout(timer)
+        reject(err)
+      })
+    })
+    assert.equal(wsCloseCode, 4002, 'Canceled subscription with remaining hours must be closed with 4002')
+
+    // 10d. In-Place Upgrade on Active Subscription (Zero Double-Billing)
+    const upgradePaddleClient = gw.paddleFulfillment.getPaddleClient()
+    if (upgradePaddleClient) {
+      let updateCalledWith: { subId: string; priceId: string; proration: string } | null = null
+      let createTxCalled = false
+      ;(upgradePaddleClient.subscriptions as any).get = async (subId: string) => ({
+        id: subId,
+        customerId: 'ctm_test_dualai_001',
+        status: 'active',
+        items: [{ price: { id: 'pri_01m8aw2f6rzakqqenynbztq74f', productId: 'pro_01m8avhb2vpt2qhxh6mfchxv7x' } }],
+        scheduledChange: null,
+        updatedAt: new Date(Date.now() + 5000).toISOString()
+      })
+      ;(upgradePaddleClient.subscriptions as any).update = async (subId: string, body: any) => {
+        updateCalledWith = {
+          subId,
+          priceId: body?.items?.[0]?.priceId || '',
+          proration: body?.prorationBillingMode || ''
+        }
+        return {
+          id: subId,
+          customerId: 'ctm_test_dualai_001',
+          status: 'active',
+          items: [{ price: { id: body?.items?.[0]?.priceId, productId: 'pro_01m8avkskjcq996hev0sn86fsz' } }],
+          scheduledChange: null
+        }
+      }
+      ;(upgradePaddleClient.transactions as any).create = async () => {
+        createTxCalled = true
+        return { id: 'txn_should_not_be_created', checkout: { url: 'https://invalid' } }
+      }
+
+      const upgradeRes = await fetch(`${gw.baseUrl}/v1/billing/checkout-session`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.accessToken}`
+        },
+        body: JSON.stringify({ planId: 'pro_plus_70h', provider: 'paddle' })
+      })
+      assert.equal(upgradeRes.status, 200)
+      const upgradeBody = (await upgradeRes.json()) as {
+        ok: boolean
+        upgradedInPlace?: boolean
+        planId?: string
+      }
+      assert.equal(upgradeBody.ok, true)
+      assert.equal(upgradeBody.upgradedInPlace, true, 'Active subscriber changing plans must upgrade in-place')
+      assert.equal(createTxCalled, false, 'Must NOT create a 2nd parallel subscription transaction')
+      assert.ok(updateCalledWith, 'Must call paddle.subscriptions.update')
+      assert.equal((updateCalledWith as any).priceId, 'pri_01m8avr4a5504btrxkscxhh75g')
+      assert.equal((updateCalledWith as any).proration, 'prorated_immediately')
+    }
+    console.log('  Canceled Cutoff (402/4002), Direct-Translate Abuse Metering, Query-Token Block & In-Place Upgrade: VERIFIED\n')
 
     console.log('PASS: ALL PADDLE FULFILLMENT & PROVISIONING TESTS COMPLETED SUCCESSFULLY.')
     console.log('==================================================================\n')
