@@ -13,10 +13,27 @@ export class GatewayRateLimiter {
   private activeSessions: Map<string, Set<string>> = new Map()
   private readonly maxTokens: number
   private readonly refillPerSecond: number
+  private readonly maxTrackedBuckets = 5000
 
   constructor(options?: { maxTokens?: number; refillPerSecond?: number }) {
     this.maxTokens = options?.maxTokens ?? 40
     this.refillPerSecond = options?.refillPerSecond ?? 5
+  }
+
+  private pruneStaleBuckets(now: number): void {
+    if (this.buckets.size < this.maxTrackedBuckets) return
+    const staleThresholdMs = Math.ceil((this.maxTokens / this.refillPerSecond) * 1000) + 60_000
+    for (const [k, state] of this.buckets.entries()) {
+      if (now - state.lastRefillMs > staleThresholdMs) {
+        this.buckets.delete(k)
+      }
+    }
+    // Hard eviction cap if still over threshold under distributed IP flood
+    while (this.buckets.size >= this.maxTrackedBuckets) {
+      const oldestKey = this.buckets.keys().next().value
+      if (!oldestKey) break
+      this.buckets.delete(oldestKey)
+    }
   }
 
   public consume(key: string, cost: number = 1): { allowed: boolean; retryAfterSec: number } {
@@ -24,6 +41,7 @@ export class GatewayRateLimiter {
     let bucket = this.buckets.get(key)
 
     if (!bucket) {
+      this.pruneStaleBuckets(now)
       bucket = { tokens: this.maxTokens, lastRefillMs: now }
       this.buckets.set(key, bucket)
     } else {

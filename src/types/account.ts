@@ -15,6 +15,8 @@ export interface CheckoutSessionResult {
   includedHours?: number
   checkoutSessionId?: string
   checkoutUrl?: string
+  upgradedInPlace?: boolean
+  message?: string
   paddlePriceId?: string | null
   paddleProductId?: string | null
   msStoreProductId?: string | null

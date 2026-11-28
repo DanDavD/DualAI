@@ -2,7 +2,7 @@
  * DUALAI - Apple-Style Account & Horizontal Plans Modal
  * Separates Sign In / Account Profile cleanly from the 4-column left-to-right Plans view,
  * using calm consumer-friendly language with zero technical jargon while keeping 100%
- * of verified-email auth, password reset, quota sync, and Paddle/PayPal/Microsoft Store checkout.
+ * of verified-email auth, password reset, quota sync, and hosted checkout.
  */
 
 import React, { useEffect, useState } from 'react'
@@ -22,7 +22,7 @@ import {
   Eye,
   EyeOff
 } from 'lucide-react'
-import { CheckoutProvider, CheckoutSessionResult, PlanId } from '../../../../types/account'
+import { PlanId } from '../../../../types/account'
 import { useSession } from '../../context/SessionContext'
 import {
   cancelActiveOAuthSignIn,
@@ -81,8 +81,7 @@ export const AccountPlanModal: React.FC = () => {
     refreshAccountQuota,
     cancelSubscriptionAccount,
     undoCancelSubscriptionAccount,
-    startPlanCheckout,
-    verifyMsStoreReceipt
+    startPlanCheckout
   } = useSession()
 
   const [section, setSection] = useState<ModalSection>('account')
@@ -95,13 +94,9 @@ export const AccountPlanModal: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [statusNotice, setStatusNotice] = useState<string | null>(null)
   const [pendingVerificationEmail, setPendingVerificationEmail] = useState<string | null>(null)
-  const [checkoutProvider, setCheckoutProvider] = useState<CheckoutProvider>('paddle')
-  const [activeCheckout, setActiveCheckout] = useState<CheckoutSessionResult | null>(null)
   const [checkoutNotice, setCheckoutNotice] = useState<string | null>(null)
   const [checkoutError, setCheckoutError] = useState<string | null>(null)
   const [isCheckoutLoading, setIsCheckoutLoading] = useState(false)
-  const [msStoreIdKey, setMsStoreIdKey] = useState('')
-  const [isVerifyingStoreReceipt, setIsVerifyingStoreReceipt] = useState(false)
   const [isOpeningPortal, setIsOpeningPortal] = useState(false)
   const [isRefreshingAccount, setIsRefreshingAccount] = useState(false)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
@@ -267,27 +262,27 @@ export const AccountPlanModal: React.FC = () => {
 
     setIsCheckoutLoading(true)
     try {
-      const result = await startPlanCheckout(planId, checkoutProvider)
-      setActiveCheckout(result)
+      const result = await startPlanCheckout(planId, 'paddle')
       if (!result.ok) {
-        setCheckoutError(result.error || `Unable to start checkout for ${planName}.`)
+        setCheckoutError(result.error || `Unable to start upgrade for ${planName}.`)
         return
       }
-      if (checkoutProvider === 'microsoft_store') {
-        if (result.storeUri) {
-          window.open(result.storeUri, '_blank')
-        }
-        setCheckoutNotice(`Complete your purchase for ${planName} in Microsoft Store, then verify below.`)
-      } else if (result.checkoutUrl) {
-        // Open Paddle checkout in an in-app modal window (never leaves the app)
+      if (result.upgradedInPlace) {
+        await refreshAccountQuota({ syncBilling: true }).catch(() => undefined)
+        setCheckoutNotice(
+          result.message || `Your plan has been upgraded to ${planName}.`
+        )
+        return
+      }
+      if (result.checkoutUrl) {
         const opened = window.electronAPI?.openCheckoutWindow
           ? await window.electronAPI.openCheckoutWindow(result.checkoutUrl)
           : false
         if (!opened) {
           window.open(result.checkoutUrl, '_blank')
         }
-        setCheckoutNotice(`Secure payment window opened for ${planName}.`)
-      } else if (checkoutProvider === 'paddle' && paddleInstance && result.paddlePriceId) {
+        setCheckoutNotice(`Secure checkout opened for ${planName}.`)
+      } else if (paddleInstance && result.paddlePriceId) {
         paddleInstance.Checkout.open({
           settings: {
             displayMode: 'overlay',
@@ -306,34 +301,12 @@ export const AccountPlanModal: React.FC = () => {
             planId: planId
           }
         })
-        setCheckoutNotice(`Payment window opened for ${planName}.`)
+        setCheckoutNotice(`Secure checkout opened for ${planName}.`)
       }
     } catch (err) {
       setCheckoutError(err instanceof Error ? err.message : 'Checkout could not be started.')
     } finally {
       setIsCheckoutLoading(false)
-    }
-  }
-
-  const handleVerifyStoreReceipt = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!activeCheckout?.planId || !msStoreIdKey.trim()) return
-    setCheckoutError(null)
-    setCheckoutNotice(null)
-    setIsVerifyingStoreReceipt(true)
-    try {
-      const res = await verifyMsStoreReceipt(activeCheckout.planId, msStoreIdKey.trim())
-      if (res.verified) {
-        setMsStoreIdKey('')
-        setActiveCheckout(null)
-        setCheckoutNotice('Purchase confirmed. Your hours have been added to your account.')
-      } else {
-        setCheckoutError(res.error || 'Could not verify Microsoft Store receipt.')
-      }
-    } catch (err) {
-      setCheckoutError(err instanceof Error ? err.message : 'Receipt verification failed.')
-    } finally {
-      setIsVerifyingStoreReceipt(false)
     }
   }
 
@@ -517,14 +490,18 @@ export const AccountPlanModal: React.FC = () => {
               role="alert"
               className="mb-5 flex items-center justify-between gap-3 rounded-2xl border border-accent-crimson/40 bg-accent-crimson/12 px-4 py-3 text-xs text-accent-crimson"
             >
-              <span>You have used all your available hours for this cycle.</span>
+              <span>
+                {accountQuota?.subscriptionStatus === 'canceled'
+                  ? 'Your subscription has ended. Upgrade to continue interpreting.'
+                  : 'You have used all your available hours for this cycle.'}
+              </span>
               {!isPlansView && (
                 <button
                   type="button"
                   onClick={() => setSection('plans')}
                   className="shrink-0 rounded-full bg-accent-crimson px-3 py-1 text-[11px] font-semibold text-white"
                 >
-                  View Plans
+                  Upgrade
                 </button>
               )}
             </div>
@@ -1007,7 +984,7 @@ export const AccountPlanModal: React.FC = () => {
              * VIEW 2: 4 HORIZONTAL PLAN CARDS LEFT-TO-RIGHT
              * ================================================================ */
             <div className="space-y-5">
-              {/* Plans Header + Subtle Payment Method Switcher */}
+              {/* Plans Header */}
               <div className="flex flex-wrap items-end justify-between gap-3">
                 <div>
                   <h2 className="text-lg font-semibold tracking-tight text-white">
@@ -1017,21 +994,6 @@ export const AccountPlanModal: React.FC = () => {
                     Every plan includes 60+ languages, speaker detection, and the floating teleprompter.
                   </p>
                 </div>
-
-                <GlassSegmentedControl<CheckoutProvider>
-                  ariaLabel="Payment method"
-                  value={checkoutProvider}
-                  onChange={(next) => {
-                    setCheckoutProvider(next)
-                    setActiveCheckout(null)
-                    setCheckoutError(null)
-                  }}
-                  options={[
-                    { id: 'paddle', label: 'Card / Paddle' },
-                    { id: 'paypal', label: 'PayPal' },
-                    { id: 'microsoft_store', label: 'Microsoft Store' }
-                  ]}
-                />
               </div>
 
               {/* 4 Horizontal Cards Side-by-Side (Left -> Right) */}
@@ -1133,10 +1095,8 @@ export const AccountPlanModal: React.FC = () => {
                                 : 'glass-control-hover border border-white/[0.14] bg-white/[0.1] text-white hover:bg-white/[0.18]'
                             }`}
                           >
-                            <span>{`Choose ${cleanName}`}</span>
-                            {checkoutProvider !== 'microsoft_store' && (
-                              <ExternalLink className="h-3 w-3 opacity-70" />
-                            )}
+                            <span>Upgrade</span>
+                            <ExternalLink className="h-3 w-3 opacity-70" />
                           </button>
                         )}
                       </div>
@@ -1169,35 +1129,6 @@ export const AccountPlanModal: React.FC = () => {
                 >
                   {checkoutError}
                 </p>
-              )}
-
-              {/* Microsoft Store Receipt Verification (Shown only when active) */}
-              {activeCheckout?.ok && checkoutProvider === 'microsoft_store' && (
-                <form
-                  onSubmit={(e) => void handleVerifyStoreReceipt(e)}
-                  className="glass-grouped-card rounded-2xl p-4 space-y-3"
-                >
-                  <p className="text-xs font-medium text-white">
-                    Verify your Microsoft Store purchase
-                  </p>
-                  <div className="flex flex-col gap-2 sm:flex-row">
-                    <input
-                      type="text"
-                      required
-                      value={msStoreIdKey}
-                      onChange={(e) => setMsStoreIdKey(e.target.value)}
-                      placeholder="Paste Microsoft Store receipt ID"
-                      className="h-9 flex-1 rounded-full border border-white/[0.1] bg-white/[0.06] px-4 text-xs text-white placeholder:text-white/35 outline-none focus:border-accent-steel"
-                    />
-                    <button
-                      type="submit"
-                      disabled={isVerifyingStoreReceipt}
-                      className="glass-cta-start h-9 rounded-full px-5 text-xs font-semibold disabled:opacity-50"
-                    >
-                      {isVerifyingStoreReceipt ? 'Verifying...' : 'Confirm Purchase'}
-                    </button>
-                  </div>
-                </form>
               )}
 
               <div className="flex flex-wrap items-center justify-center gap-3 text-[11px] text-white/40 pt-2">

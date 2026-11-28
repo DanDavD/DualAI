@@ -312,13 +312,9 @@ export async function createGatewayServer(
 
         // Case A: Native Paddle Request with Paddle-Signature
         if (paddleSig) {
+          let eventData: Awaited<ReturnType<typeof paddleFulfillment.unmarshalWebhook>>
           try {
-            const eventData = await paddleFulfillment.unmarshalWebhook(rawBodyText, paddleSig)
-            if (eventData) {
-              const result = await paddleFulfillment.processVerifiedEvent(eventData)
-              sendJson(res, 200, { received: true, ...result })
-              return
-            }
+            eventData = await paddleFulfillment.unmarshalWebhook(rawBodyText, paddleSig)
           } catch (unmarshalErr) {
             securityLogger.log({
               level: 'warn',
@@ -334,6 +330,38 @@ export async function createGatewayServer(
             })
             return
           }
+
+          if (eventData) {
+            try {
+              const result = await paddleFulfillment.processVerifiedEvent(eventData)
+              sendJson(res, 200, { received: true, ...result })
+            } catch (processErr) {
+              // Return 500 on transient DB/upstream failure so Paddle retries automatically
+              console.error('[DUALAI-GATEWAY] Webhook processing failed:', processErr)
+              sendJson(res, 500, {
+                code: 'WEBHOOK_PROCESSING_ERROR',
+                message: 'Temporary billing processing error. Please retry.'
+              })
+            }
+            return
+          }
+        }
+
+        // Production requires strict cryptographic Paddle-Signature on every webhook
+        if (config.nodeEnv === 'production') {
+          securityLogger.log({
+            level: 'warn',
+            event: 'webhook_signature_failed',
+            route: pathname,
+            status: 401,
+            actorId: clientIp,
+            reason: 'Missing Paddle-Signature header in production'
+          })
+          sendJson(res, 401, {
+            code: 'INVALID_WEBHOOK_SIGNATURE',
+            message: 'Cryptographic webhook signature verification failed.'
+          })
+          return
         }
 
         // Case B: Fallback / PayPal / Simulator IP Check / Internal Test Runner
@@ -445,9 +473,14 @@ export async function createGatewayServer(
       return
     }
 
-    // 4. All Remaining Routes Require Verified Bearer JWT (via header or query param)
-    const queryToken =
-      parsedUrl.searchParams.get('token') || parsedUrl.searchParams.get('access_token')
+    // 4. All Remaining Routes Require Verified Bearer JWT
+    // Query-string token is strictly restricted to GET portal redirect routes (never POST/API routes)
+    const isPortalRedirectGet =
+      req.method === 'GET' &&
+      (pathname === '/v1/billing/customer-portal/redirect' || pathname === '/account/portal')
+    const queryToken = isPortalRedirectGet
+      ? parsedUrl.searchParams.get('token') || parsedUrl.searchParams.get('access_token')
+      : null
     const token = authVerifier.extractBearerToken(req.headers.authorization) || queryToken || ''
     const user = await authVerifier.verifyToken(token)
     if (!user) {
@@ -585,7 +618,7 @@ export async function createGatewayServer(
       try {
         const raw = await readRawBody(req, MAX_JSON_BODY_BYTES)
         const payload = JSON.parse(raw.toString('utf-8')) as TranslateProxyPayload
-        await handleGeminiTranslateStream({ payload, res, user, config, quotaStore })
+        await handleGeminiTranslateStream({ payload, res, user, config, quotaStore, rateLimiter })
       } catch (err) {
         if (err instanceof Error && err.message === 'PAYLOAD_TOO_LARGE') {
           sendJson(res, 413, {
@@ -617,7 +650,7 @@ export async function createGatewayServer(
             body.planId || '',
             { userId: user.userId, email: user.email }
           )
-          if (paddleTx.ok && paddleTx.checkoutUrl) {
+          if (paddleTx.ok && (paddleTx.checkoutUrl || paddleTx.upgradedInPlace)) {
             const plan = PLAN_CATALOG[body.planId as PlanId]
             sendJson(res, 200, {
               ok: true,
@@ -628,6 +661,8 @@ export async function createGatewayServer(
               includedHours: Math.round((plan?.includedSeconds || 3600) / 3600),
               checkoutSessionId: `chk_${Date.now()}`,
               checkoutUrl: paddleTx.checkoutUrl,
+              upgradedInPlace: paddleTx.upgradedInPlace || false,
+              message: paddleTx.message,
               paddlePriceId: plan?.paddlePriceId
             })
             return
@@ -773,7 +808,14 @@ export async function createGatewayServer(
       return
     }
 
-    const clientIp = req.socket.remoteAddress || 'unknown'
+    const flyClientIp = req.headers['fly-client-ip']
+    const xForwardedFor = req.headers['x-forwarded-for']
+    const rawForwarded = Array.isArray(xForwardedFor) ? xForwardedFor[0] : xForwardedFor
+    const clientIp =
+      (typeof flyClientIp === 'string' && flyClientIp.trim()) ||
+      (typeof rawForwarded === 'string' && rawForwarded.split(',')[0].trim()) ||
+      req.socket.remoteAddress ||
+      'unknown'
     const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin : undefined
 
     // Enforce strict WebSocket Origin allowlist in production (CSWSH defense)

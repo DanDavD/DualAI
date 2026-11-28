@@ -354,7 +354,8 @@ async function runCard18Suite(): Promise<void> {
     'utf-8'
   )
   assert.ok(modalSrc.includes('startPlanCheckout'), 'AccountPlanModal must wire live checkout sessions')
-  assert.ok(modalSrc.includes('verifyMsStoreReceipt'), 'AccountPlanModal must wire Microsoft Store v9.0 receipt verification')
+  assert.ok(!modalSrc.includes('Card / Paddle'), 'AccountPlanModal must not expose Paddle brand label in UI')
+  assert.ok(!modalSrc.includes('Microsoft Store'), 'AccountPlanModal must not expose Microsoft Store selector in UI')
 
   const auditedFiles = [
     'server/src/config.ts',

@@ -30,6 +30,7 @@ import {
   findPlanByPaddlePriceId,
   findPlanByPaddleProductId
 } from '../quota/quotaStore.js'
+import { invalidateTranslateQuotaCache } from '../proxy/geminiStreamProxy.js'
 
 export interface MirroredCustomer {
   customerId: string
@@ -389,12 +390,14 @@ export class PaddleFulfillmentService {
       lastEventAt: event.occurredAt || (event as any).occurred_at
     })
 
-    // Revoke user quota access in database when subscription is canceled
+    // Revoke user quota access & expire unused cycle hours when subscription actually ends
     if (userId) {
       await this.quotaStore.syncSubscriptionMetadata({
         userId,
-        subscriptionStatus: 'canceled'
+        subscriptionStatus: 'canceled',
+        resetRemainingToZero: true
       })
+      invalidateTranslateQuotaCache(userId)
     }
 
     return {
@@ -474,6 +477,7 @@ export class PaddleFulfillmentService {
         seconds: matchedPlan.includedSeconds
       })
       credited = creditRes.credited
+      invalidateTranslateQuotaCache(userId)
     }
 
     return {
@@ -557,6 +561,7 @@ export class PaddleFulfillmentService {
         eventKind
       })
       revoked = res.revoked
+      invalidateTranslateQuotaCache(userId)
     }
 
     return {
@@ -938,8 +943,11 @@ export class PaddleFulfillmentService {
         })
         const items = await customerCollection.next()
         if (items && items.length > 0) {
-          const found =
-            items.find((c) => c.email.toLowerCase() === user.email?.toLowerCase()) || items[0]
+          // Strict exact case-insensitive email match only (never fall back to items[0] on fuzzy search)
+          const found = items.find((c) => c.email.toLowerCase() === user.email?.toLowerCase())
+          if (!found) {
+            return null
+          }
           
           const subIds: string[] = []
           try {
@@ -1633,13 +1641,20 @@ export class PaddleFulfillmentService {
   }
 
   /**
-   * Generates an official Paddle hosted checkout URL for a plan transaction.
-   * Opens in in-app modal window, preventing duplicate subscriptions on the same active plan.
+   * Generates an official hosted checkout URL for a new subscription, OR upgrades an existing
+   * active subscription in-place (prorated immediately) so a user is NEVER double-billed with
+   * two concurrent subscriptions.
    */
   public async createPaddleCheckoutTransaction(
     planId: string,
     user: { userId: string; email?: string }
-  ): Promise<{ ok: boolean; checkoutUrl?: string; error?: string }> {
+  ): Promise<{
+    ok: boolean
+    checkoutUrl?: string
+    upgradedInPlace?: boolean
+    message?: string
+    error?: string
+  }> {
     if (!this.paddleClient) {
       return { ok: false, error: 'Billing service is temporarily unavailable.' }
     }
@@ -1649,16 +1664,10 @@ export class PaddleFulfillmentService {
       return { ok: false, error: 'Selected plan is unavailable. Please choose another plan.' }
     }
 
-    // Prevent accidental double subscription on the exact same active plan.
-    // Reconcile against live Paddle before blocking so a user who canceled in
-    // the Customer Portal is never wrongly blocked by a stale DB mirror.
+    // Reconcile existing subscription against live Paddle before deciding between
+    // in-place upgrade vs new checkout, so stale DB rows never block or double-bill.
     let existingSub = await this.getActiveSubscriptionForUser(user)
-    if (
-      existingSub &&
-      hasPaidAccess(existingSub.status) &&
-      existingSub.planId === plan.id &&
-      existingSub.scheduledChangeAction !== 'cancel'
-    ) {
+    if (existingSub && hasPaidAccess(existingSub.status)) {
       const reconciled = await this.reconcileActiveSubscriptionForUser(user)
       if (reconciled) existingSub = reconciled
     }
@@ -1672,6 +1681,54 @@ export class PaddleFulfillmentService {
       return {
         ok: false,
         error: `You already have an active ${plan.name} subscription.`
+      }
+    }
+
+    // If the user already has an active subscription on a DIFFERENT plan, upgrade in-place
+    // via subscriptions.update() with immediate proration instead of creating a 2nd subscription.
+    if (
+      existingSub &&
+      hasPaidAccess(existingSub.status) &&
+      existingSub.planId !== plan.id &&
+      existingSub.status !== 'paused'
+    ) {
+      try {
+        const updated = (await this.paddleClient.subscriptions.update(
+          existingSub.subscriptionId,
+          {
+            items: [{ priceId: plan.paddlePriceId, quantity: 1 }],
+            prorationBillingMode: 'prorated_immediately',
+            onPaymentFailure: 'prevent_change'
+          }
+        )) as any
+
+        const resolvedCustomer = await this.resolveCustomerIdForUser(user)
+        const nowIso = new Date().toISOString()
+        await this.upsertSubscriptionMirror({
+          subscriptionId: existingSub.subscriptionId,
+          customerId: resolvedCustomer?.customerId || '',
+          userId: user.userId,
+          status: String(updated?.status || 'active').toLowerCase(),
+          priceId: plan.paddlePriceId,
+          productId: plan.paddleProductId || '',
+          scheduledChangeAction: null,
+          scheduledChangeAt: null,
+          lastEventAt: nowIso
+        })
+        await this.quotaStore.syncSubscriptionMetadata({
+          userId: user.userId,
+          planId: plan.id,
+          subscriptionStatus: 'active'
+        })
+        invalidateTranslateQuotaCache(user.userId)
+
+        return {
+          ok: true,
+          upgradedInPlace: true,
+          message: `Your subscription has been upgraded to ${plan.name}. Your new hours will appear shortly.`
+        }
+      } catch (err) {
+        return { ok: false, error: this.mapPaddleBillingError(err, 'checkout', existingSub) }
       }
     }
 
