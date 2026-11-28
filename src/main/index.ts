@@ -7,7 +7,8 @@ import {
   desktopCapturer,
   screen,
   session,
-  safeStorage
+  safeStorage,
+  Menu
 } from 'electron'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -117,11 +118,10 @@ function createMainWindow(): void {
         ? {
             titleBarStyle: 'hidden' as const,
             titleBarOverlay: {
-              color: '#111114',
+              color: '#00000000',
               symbolColor: '#f4f4f5',
-              height: 52
-            },
-            backgroundMaterial: 'mica' as const
+              height: 54
+            }
           }
         : {}),
     webPreferences: {
@@ -171,7 +171,11 @@ function createHudWindow(initialBounds?: HudBounds): BrowserWindow {
   }
 
   const primaryDisplay = screen.getPrimaryDisplay()
-  const workArea = primaryDisplay.workArea
+  const targetDisplay =
+    typeof initialBounds?.x === 'number' && typeof initialBounds?.y === 'number'
+      ? screen.getDisplayNearestPoint({ x: initialBounds.x, y: initialBounds.y }) || primaryDisplay
+      : primaryDisplay
+  const workArea = targetDisplay.workArea
 
   const width = Math.max(380, Math.min(workArea.width, initialBounds?.width ?? 760))
   const height = Math.max(120, Math.min(workArea.height, initialBounds?.height ?? 220))
@@ -194,6 +198,7 @@ function createHudWindow(initialBounds?: HudBounds): BrowserWindow {
     height,
     minWidth: 320,
     minHeight: 100,
+    show: false,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -214,10 +219,13 @@ function createHudWindow(initialBounds?: HudBounds): BrowserWindow {
   })
 
   hardenBrowserWindow(hudWindow)
+  hudWindow.once('ready-to-show', () => {
+    hudWindow?.showInactive()
+  })
 
   // Guarantee HUD floats above full-screen Zoom, Teams, and Meet windows without minimizing
   hudWindow.setAlwaysOnTop(true, 'screen-saver')
-  if (typeof hudWindow.setVisibleOnAllWorkspaces === 'function') {
+  if (process.platform === 'darwin' && typeof hudWindow.setVisibleOnAllWorkspaces === 'function') {
     hudWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   }
 
@@ -370,7 +378,11 @@ function registerIpcHandlers(): void {
     IPC_CHANNELS.HUD_SET_CLICK_THROUGH,
     async (_event, enabled: boolean): Promise<void> => {
       if (hudWindow && !hudWindow.isDestroyed()) {
-        hudWindow.setIgnoreMouseEvents(enabled, { forward: true })
+        if (enabled) {
+          hudWindow.setIgnoreMouseEvents(true, { forward: true })
+        } else {
+          hudWindow.setIgnoreMouseEvents(false)
+        }
       }
     }
   )
@@ -405,7 +417,10 @@ function registerIpcHandlers(): void {
           return false
         }
         const encrypted = safeStorage.encryptString(serializedSession)
-        fs.writeFileSync(getSessionVaultPath(), encrypted, { mode: 0o600 })
+        const vaultPath = getSessionVaultPath()
+        const tmpPath = `${vaultPath}.tmp`
+        fs.writeFileSync(tmpPath, encrypted, { mode: 0o600 })
+        fs.renameSync(tmpPath, vaultPath)
         return true
       } catch {
         return false
@@ -465,9 +480,17 @@ function registerIpcHandlers(): void {
         }
       })
       checkoutWindow = win
+      if (process.platform !== 'darwin') {
+        win.removeMenu()
+      }
       win.setMenuBarVisibility(false)
       win.once('ready-to-show', () => win.show())
       win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+      win.webContents.on('did-fail-load', () => {
+        if (!win.isDestroyed()) {
+          win.destroy()
+        }
+      })
       const onNav = (_e: unknown, navUrl: string): void => {
         try {
           const u = new URL(navUrl)
@@ -492,6 +515,11 @@ function registerIpcHandlers(): void {
       await win.loadURL(parsed.toString())
       return true
     } catch {
+      // Prevent permanent Win32 modal parent deadlock if loadURL fails before ready-to-show
+      if (checkoutWindow && !checkoutWindow.isDestroyed()) {
+        checkoutWindow.destroy()
+      }
+      checkoutWindow = null
       return false
     }
   })
@@ -635,8 +663,15 @@ function registerIpcHandlers(): void {
     }
     if (result.ok && mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore()
-      mainWindow.show()
-      mainWindow.focus()
+      if (process.platform === 'win32') {
+        mainWindow.setAlwaysOnTop(true)
+        mainWindow.show()
+        mainWindow.focus()
+        mainWindow.setAlwaysOnTop(false)
+      } else {
+        mainWindow.show()
+        mainWindow.focus()
+      }
     }
     flow.resolveCallback?.(result)
   }
@@ -907,17 +942,37 @@ function registerMediaAndLoopbackHandlers(): void {
   })
 }
 
-app.whenReady().then(() => {
-  registerSecurityHeaders()
-  registerMediaAndLoopbackHandlers()
-  registerIpcHandlers()
-  registerGlobalShortcuts(DEFAULT_SHORTCUT_BINDINGS)
-  createMainWindow()
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.universalaisync.dualai')
+}
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createMainWindow()
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    }
   })
-})
+
+  app.whenReady().then(() => {
+    if (process.platform !== 'darwin') {
+      Menu.setApplicationMenu(null)
+    }
+    registerSecurityHeaders()
+    registerMediaAndLoopbackHandlers()
+    registerIpcHandlers()
+    registerGlobalShortcuts(DEFAULT_SHORTCUT_BINDINGS)
+    createMainWindow()
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createMainWindow()
+    })
+  })
+}
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()

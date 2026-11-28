@@ -93,10 +93,20 @@ export class SileroVadEngine {
         this.callbacks.onStatusChange?.('error', err.message)
       }
 
+      // Resolve model & WASM URLs relative to renderer index.html so packaged Windows file:///C:/... builds resolve cleanly
+      const resolvedModelUrl =
+        typeof window !== 'undefined' && window.location?.href
+          ? new URL('./models/silero_vad.onnx', window.location.href).href
+          : this.modelUrl
+      const resolvedWasmPaths =
+        typeof window !== 'undefined' && window.location?.href
+          ? new URL('./wasm/', window.location.href).href
+          : '/wasm/'
+
       // Initialize session in worker
       this.worker.postMessage({
         type: 'init',
-        payload: { modelUrl: this.modelUrl }
+        payload: { modelUrl: resolvedModelUrl, wasmPaths: resolvedWasmPaths }
       })
     } catch (err) {
       console.error('[DUALAI-VAD] Worker initialization failed:', err)

@@ -53,19 +53,23 @@ const channelStates: Record<ChannelId, ChannelVadState> = {
   channel_b: createInitialState()
 }
 
-async function initSession(modelUrl: string): Promise<void> {
+async function initSession(modelUrl: string, wasmPaths?: string): Promise<void> {
   try {
     ort.env.wasm.numThreads = 1
     ort.env.wasm.simd = true
 
-    if (typeof self !== 'undefined' && self.location?.href) {
-      ort.env.wasm.wasmPaths = new URL('/wasm/', self.location.href).href
+    if (wasmPaths) {
+      ort.env.wasm.wasmPaths = wasmPaths
+    } else if (typeof self !== 'undefined' && self.location?.href) {
+      ort.env.wasm.wasmPaths = new URL('../wasm/', self.location.href).href
     }
 
     const resolvedModelUrl =
-      typeof self !== 'undefined' && self.location?.href
-        ? new URL(modelUrl, self.location.href).href
-        : modelUrl
+      /^(https?:|file:)/i.test(modelUrl)
+        ? modelUrl
+        : typeof self !== 'undefined' && self.location?.href
+          ? new URL(modelUrl, self.location.href).href
+          : modelUrl
 
     session = await ort.InferenceSession.create(resolvedModelUrl, {
       executionProviders: ['wasm'],
@@ -276,7 +280,7 @@ self.onmessage = async (event: MessageEvent) => {
 
   switch (type) {
     case 'init':
-      await initSession(payload.modelUrl)
+      await initSession(payload.modelUrl, payload.wasmPaths)
       break
     case 'process_frame':
       await processFrame(payload.channelId, payload.pcmBuffer, payload.timestampMs)

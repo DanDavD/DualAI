@@ -48,6 +48,7 @@ dmg:
 
 win:
   artifactName: DualAI-${version}-${arch}-setup.${ext}
+  requestedExecutionLevel: asInvoker
   target:
     - target: nsis
       arch:

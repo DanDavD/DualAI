@@ -33,6 +33,7 @@ import {
   sanitizeWorkspaceDisplaySettings
 } from '../../utils/typographyPreferences'
 import { AppleSwitch } from '../UI/AppleSwitch'
+import { formatPlatformShortcut, isWindows } from '../../utils/platform'
 
 const STORAGE_KEY_HUD = 'dualai_hud_settings'
 
@@ -263,9 +264,13 @@ export const TeleprompterHud: React.FC = () => {
       onMouseLeave={() => setIsHovered(false)}
       className="relative flex h-screen w-screen flex-col overflow-hidden rounded-[22px] select-none font-sans"
       style={{
-        backgroundColor: zincBackground,
-        backdropFilter: settings.opacity > 0.04 ? 'blur(34px) saturate(185%)' : 'none',
-        WebkitBackdropFilter: settings.opacity > 0.04 ? 'blur(34px) saturate(185%)' : 'none',
+        backgroundColor:
+          isWindows && settings.opacity > 0.04
+            ? `rgba(11, 11, 14, ${Math.min(0.96, settings.opacity * 1.15).toFixed(2)})`
+            : zincBackground,
+        backdropFilter: !isWindows && settings.opacity > 0.04 ? 'blur(34px) saturate(185%)' : 'none',
+        WebkitBackdropFilter:
+          !isWindows && settings.opacity > 0.04 ? 'blur(34px) saturate(185%)' : 'none',
         border: `1px solid rgba(255, 255, 255, ${borderAlpha})`,
         boxShadow:
           settings.opacity > 0.04
@@ -280,13 +285,15 @@ export const TeleprompterHud: React.FC = () => {
         className={`absolute top-2.5 left-3 right-3 z-30 flex items-center justify-between gap-2 transition-opacity duration-200 ${
           showChrome ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
-        style={{
-          // @ts-expect-error Electron WebKit draggable window region
-          WebkitAppRegion: 'drag'
-        }}
       >
-        {/* Left Drag Pill */}
-        <div className="glass-capsule flex h-7 items-center space-x-1.5 rounded-full px-2.5 text-[11px] text-white/80">
+        {/* Left Drag Pill (Apply WebkitAppRegion drag strictly to the pill so Windows hover events fire cleanly) */}
+        <div
+          className="glass-capsule flex h-7 items-center space-x-1.5 rounded-full px-2.5 text-[11px] text-white/80"
+          style={{
+            // @ts-expect-error Electron WebKit draggable window region
+            WebkitAppRegion: 'drag'
+          }}
+        >
           <GripHorizontal className="h-3.5 w-3.5 text-white/45 shrink-0" />
           <span className="font-semibold tracking-tight text-white/90 whitespace-nowrap">
             DualAI
@@ -365,7 +372,7 @@ export const TeleprompterHud: React.FC = () => {
           <button
             type="button"
             onClick={() => void window.electronAPI?.closeHud?.()}
-            title="Close Mini View (Cmd/Ctrl+Shift+H)"
+            title={`Close Mini View (${formatPlatformShortcut('CommandOrControl+Shift+H')})`}
             aria-label="Close Mini View"
             className="glass-control-hover flex h-6 w-6 items-center justify-center rounded-full text-white/60 hover:bg-accent-crimson/25 hover:text-accent-crimson"
           >
