@@ -15,6 +15,7 @@ import { QuotaGauge } from './QuotaGauge'
 import { AcousticPulse } from '../UI/AcousticPulse'
 import { AppleSwitch } from '../UI/AppleSwitch'
 import { GlassTooltip } from '../UI/GlassTooltip'
+import { isMac, isWindows } from '../../utils/platform'
 
 /**
  * DUALAI — Unified Apple macOS Tahoe Liquid Glass Top Command Bar
@@ -43,11 +44,7 @@ export const Header: React.FC = () => {
   const hudPopoverRef = useRef<HTMLDivElement>(null)
   const [swapRotation, setSwapRotation] = useState(0)
   const [showHudPopover, setShowHudPopover] = useState(false)
-
-  const isMac =
-    typeof navigator !== 'undefined' && /mac/i.test(navigator.platform || navigator.userAgent)
-  const isWin =
-    typeof navigator !== 'undefined' && /win/i.test(navigator.platform || navigator.userAgent)
+  const isWin = isWindows
 
   useEffect(() => {
     if (!showHudPopover) return
@@ -113,7 +110,7 @@ export const Header: React.FC = () => {
       aria-label="Master Session Command Bar"
       onKeyDown={handleToolbarKeyDown}
       className={`app-drag-region relative z-40 flex h-[54px] w-full shrink-0 items-center justify-between gap-2 border-b border-white/[0.06] bg-white/[0.02] backdrop-blur-2xl select-none ${
-        isMac ? 'pl-[80px] pr-3.5' : isWin ? 'pl-3.5 pr-[144px]' : 'px-3.5'
+        isMac ? 'pl-[80px] pr-3.5' : isWin ? 'pl-3.5 pr-[148px]' : 'px-3.5'
       }`}
     >
       {/* LEFT CLUSTER: Calm App Identity & Live Acoustic Status Pill */}
@@ -140,7 +137,11 @@ export const Header: React.FC = () => {
 
       {/* CAPSULE 2 (TRUE MATHEMATICAL CENTER): Unified Language Pair Capsule */}
       <div
-        className="app-no-drag flex items-center justify-center min-w-0 lg:absolute lg:left-1/2 lg:-translate-x-1/2"
+        className={`app-no-drag flex items-center justify-center min-w-0 ${
+          isWin
+            ? 'xl:absolute xl:left-1/2 xl:-translate-x-1/2'
+            : 'lg:absolute lg:left-1/2 lg:-translate-x-1/2'
+        }`}
         data-tour-id="languages"
       >
         <div className="glass-capsule flex h-9 items-center space-x-0.5 rounded-full px-1">

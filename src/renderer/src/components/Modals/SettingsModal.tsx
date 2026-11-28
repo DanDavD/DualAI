@@ -167,10 +167,11 @@ export const SettingsModal: React.FC = () => {
 
       const accelerator = parts.join('+')
       void updateShortcutBinding(recordingActionId, accelerator).then((ok) => {
+        const formatted = formatPlatformShortcut(accelerator)
         if (!ok) {
-          setShortcutFeedback(`Shortcut "${accelerator}" is already in use by another app.`)
+          setShortcutFeedback(`Shortcut "${formatted}" is already in use by another app.`)
         } else {
-          setShortcutFeedback(`Shortcut updated to ${accelerator}.`)
+          setShortcutFeedback(`Shortcut updated to ${formatted}.`)
         }
         setTimeout(() => setShortcutFeedback(null), 3000)
       })
@@ -290,13 +291,19 @@ export const SettingsModal: React.FC = () => {
                     <select
                       value={selectedLoopbackDeviceId}
                       onChange={(e) => setSelectedLoopbackDeviceId(e.target.value)}
-                      className="max-w-[260px] rounded-xl border border-white/[0.1] bg-white/[0.06] px-3 py-1.5 text-xs text-white outline-none focus:border-accent-steel"
+                      className="max-w-[260px] rounded-xl border border-white/[0.1] bg-[#1a1a1f] px-3 py-1.5 text-xs text-white outline-none focus:border-accent-steel"
                     >
-                      <option value="system_loopback">Automatic System Audio (Recommended)</option>
+                      <option value="system_loopback" className="bg-[#1a1a1f] text-white">
+                        Automatic System Audio (Recommended)
+                      </option>
                       {inputDevices
                         .filter((d) => VIRTUAL_LOOPBACK_REGEX.test(d.label))
                         .map((d) => (
-                          <option key={`lb-${d.deviceId}`} value={d.deviceId}>
+                          <option
+                            key={`lb-${d.deviceId}`}
+                            value={d.deviceId}
+                            className="bg-[#1a1a1f] text-white"
+                          >
                             {d.label}
                           </option>
                         ))}
@@ -308,11 +315,17 @@ export const SettingsModal: React.FC = () => {
                     <select
                       value={selectedOutputDeviceId}
                       onChange={(e) => setSelectedOutputDeviceId(e.target.value)}
-                      className="max-w-[260px] rounded-xl border border-white/[0.1] bg-white/[0.06] px-3 py-1.5 text-xs text-white outline-none focus:border-accent-steel"
+                      className="max-w-[260px] rounded-xl border border-white/[0.1] bg-[#1a1a1f] px-3 py-1.5 text-xs text-white outline-none focus:border-accent-steel"
                     >
-                      <option value="default">System Default Output</option>
+                      <option value="default" className="bg-[#1a1a1f] text-white">
+                        System Default Output
+                      </option>
                       {outputDevices.map((d) => (
-                        <option key={d.deviceId} value={d.deviceId}>
+                        <option
+                          key={d.deviceId}
+                          value={d.deviceId}
+                          className="bg-[#1a1a1f] text-white"
+                        >
                           {d.label}
                         </option>
                       ))}

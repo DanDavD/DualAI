@@ -10,6 +10,7 @@ import { CircularAudioBuffer } from './CircularAudioBuffer'
 import { PCM_PROCESSOR_CODE } from './PcmProcessorCode'
 import { downsampleInt16Pcm, TARGET_STREAM_SAMPLE_RATE } from './pcmDownsampler'
 import { SileroVadEngine } from './vad/SileroVadEngine'
+import { isWindows } from '../utils/platform'
 
 export interface AudioEngineCallbacks {
   onLevelMetric: (metric: AudioLevelMetric) => void
@@ -119,10 +120,13 @@ export class AudioIngestionEngine {
   private async ensureAudioContext(): Promise<AudioContext> {
     if (!this.audioContext || this.audioContext.state === 'closed') {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
-      this.audioContext = new AudioCtx({
-        sampleRate: 16000,
-        latencyHint: 'interactive'
-      })
+      // On Windows WASAPI shared mode, omit forced 16kHz sampleRate to prevent setSinkId/resampler glitches;
+      // downstream AudioWorklet + downsampleInt16Pcm already converts native 48kHz/44.1kHz -> 16kHz cleanly.
+      this.audioContext = new AudioCtx(
+        isWindows
+          ? { latencyHint: 'interactive' }
+          : { sampleRate: 16000, latencyHint: 'interactive' }
+      )
       this.workletLoaded = false
     }
 
@@ -189,21 +193,30 @@ export class AudioIngestionEngine {
         const videoTracks = displayStream.getVideoTracks()
 
         if (audioTracks.length > 0 && audioTracks[0].readyState === 'live') {
-          // Keep minimal video tracks disabled while session runs so macOS ScreenCaptureKit
-          // does not prematurely terminate the linked audio stream; released cleanly in stop().
-          videoTracks.forEach((track) => {
-            track.enabled = false
-          })
-          this.displayVideoTracks = videoTracks
+          if (isWindows) {
+            // On Windows 10/11, WASAPI loopback audio is independent of the WGC video track.
+            // Stop videoTracks immediately to remove the bright yellow WGC screen-capture border.
+            videoTracks.forEach((track) => track.stop())
+            this.displayVideoTracks = []
+          } else {
+            // Keep minimal video tracks disabled while session runs so macOS ScreenCaptureKit
+            // does not prematurely terminate the linked audio stream; released cleanly in stop().
+            videoTracks.forEach((track) => {
+              track.enabled = false
+            })
+            this.displayVideoTracks = videoTracks
+          }
           this.setLoopbackStatus('native_loopback', 'Native OS system audio loopback active')
           return new MediaStream(audioTracks)
         }
 
-        // No live audio track returned (e.g. OS Screen & System Audio Recording permission denied)
+        // No live audio track returned
         displayStream.getTracks().forEach((track) => track.stop())
         this.setLoopbackStatus(
           'unavailable',
-          'System audio loopback unavailable. Grant Screen & System Audio Recording permission in macOS System Settings or select a virtual loopback device (e.g. BlackHole) in Settings -> Audio.'
+          isWindows
+            ? 'System audio loopback unavailable. Verify your Windows playback device is active or select a virtual loopback device (e.g. VB-Cable or Stereo Mix) in Settings -> Audio.'
+            : 'System audio loopback unavailable. Grant Screen & System Audio Recording permission in macOS System Settings or select a virtual loopback device (e.g. BlackHole) in Settings -> Audio.'
         )
         return null
       } catch (displayErr) {
@@ -212,7 +225,9 @@ export class AudioIngestionEngine {
         console.warn('[DUALAI] Native OS loopback capture unavailable:', displayErr)
         this.setLoopbackStatus(
           'unavailable',
-          `System audio loopback unavailable (${message}). Verify macOS Screen & System Audio Recording permission or select a virtual loopback device in Settings -> Audio.`
+          isWindows
+            ? `System audio loopback unavailable (${message}). Check Windows Sound Settings or select a virtual loopback device (e.g. VB-Cable) in Settings -> Audio.`
+            : `System audio loopback unavailable (${message}). Verify macOS Screen & System Audio Recording permission or select a virtual loopback device in Settings -> Audio.`
         )
         return null
       }
@@ -284,7 +299,9 @@ export class AudioIngestionEngine {
 
         if (!this.streamChannelB) {
           throw new Error(
-            'Unable to capture System Audio Loopback. Check macOS Screen & System Audio Recording permission or configure a virtual loopback device (BlackHole) in Settings -> Audio.'
+            isWindows
+              ? 'Unable to capture System Audio Loopback. Verify your Windows playback device is active or configure a virtual loopback device (VB-Cable / Stereo Mix) in Settings -> Audio.'
+              : 'Unable to capture System Audio Loopback. Check macOS Screen & System Audio Recording permission or configure a virtual loopback device (BlackHole) in Settings -> Audio.'
           )
         }
       } else {
@@ -423,6 +440,15 @@ export class AudioIngestionEngine {
       await sinkable.setSinkId(!deviceId || deviceId === 'default' ? '' : deviceId)
     } catch (err) {
       console.warn('[DUALAI-AUDIO] Unable to switch audio output sink:', err)
+      // Recover cleanly on Windows if a previously selected USB/Bluetooth headset was unplugged
+      if (deviceId && deviceId !== 'default') {
+        this.outputDeviceId = 'default'
+        try {
+          await sinkable.setSinkId('')
+        } catch {
+          // Ignore fallback failure
+        }
+      }
     }
   }
 

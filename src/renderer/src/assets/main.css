@@ -17,11 +17,12 @@
   --color-accent-amber: #ff9f0a;
   --color-accent-crimson: #ff453a;
 
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-  --font-mono: "SF Mono", "Geist Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI Variable", "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: "SF Mono", "Cascadia Mono", "Geist Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
 }
 
 :root {
+  color-scheme: dark;
   --ease-apple-spring: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-apple-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
   --ease-apple-smooth: cubic-bezier(0.25, 0.1, 0.25, 1);
@@ -49,6 +50,12 @@
     background-color: rgba(10, 132, 255, 0.35);
     color: #ffffff;
   }
+
+  /* Guarantee readable dark dropdown menus on Windows 10/11 Chromium */
+  select option {
+    background-color: #1a1a1f;
+    color: #f4f4f5;
+  }
 }
 
 /* ============================================================================
@@ -57,8 +64,6 @@
 
 .app-window-canvas {
   background-color: rgba(17, 17, 20, 0.86);
-  backdrop-filter: blur(40px) saturate(160%);
-  -webkit-backdrop-filter: blur(40px) saturate(160%);
 }
 
 .glass-capsule {
